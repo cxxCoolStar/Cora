@@ -23,17 +23,25 @@ class QueryRewriter:
         """Extract search keywords from user query using LLM."""
         prompt = (
             "You are helping to search a personal archive. "
-            "Extract key search terms from the user's query that would help find relevant content.\n\n"
+            "Rewrite the user's query into a small set of search keywords that maximize recall.\n\n"
+            "Goal:\n"
+            "- Produce keywords that are likely to literally appear in stored notes/files.\n"
+            "- Do light expansion with Chinese/English synonyms so the search can match both languages.\n\n"
             "Rules:\n"
-            "1. Extract only concrete keywords that would appear in stored documents\n"
-            "2. Remove filler words like '请', '帮我', '告诉我', '的信息'\n"
-            "3. Keep technical terms, names, topics as-is\n"
-            "4. Return 1-5 most relevant keywords\n\n"
+            "1. Remove filler words like '请', '帮我', '告诉我', '一下', '能不能', '的信息'\n"
+            "2. Keep concrete entities and technical terms (product names, topics, protocols, IDs, file names)\n"
+            "3. Expand bilingual variants when helpful:\n"
+            "   - If the query contains Chinese terms, add common English equivalents (e.g. 内网 -> intranet)\n"
+            "   - If the query contains English terms, add common Chinese equivalents (e.g. server -> 服务器)\n"
+            "   - Include common abbreviations/aliases if they are standard (e.g. Retrieval-Augmented Generation -> RAG)\n"
+            "4. Do NOT add unrelated concepts; only expansions that preserve the same intent\n"
+            "5. Return 2-8 keywords (deduplicated). Prefer shorter keyword tokens\n\n"
             "Examples:\n"
-            '- "帮我找一下linux服务器的信息" -> ["linux", "服务器"]\n'
-            '- "我之前保存的面试题" -> ["面试题"]\n'
-            '- "关于Agent和RAG的资料" -> ["Agent", "RAG"]\n\n'
-            "Respond with strict JSON using keys: keywords (array of strings), reasoning (string)."
+            '- "帮我找一下linux服务器的信息" -> ["linux", "服务器", "server"]\n'
+            '- "我之前保存的面试题" -> ["面试题", "interview questions"]\n'
+            '- "关于Agent和RAG的资料" -> ["agent", "智能体", "rag", "检索增强生成"]\n'
+            '- "帮我找一下内网的信息" -> ["内网", "intranet"]\n\n'
+            "Respond with strict JSON only using keys: keywords (array of strings), reasoning (string)."
         )
         response = self.model_client.generate(
             messages=[

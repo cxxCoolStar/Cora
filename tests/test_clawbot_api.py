@@ -422,6 +422,41 @@ def test_natural_language_find_request_routes_to_retrieve(tmp_path):
     assert "面试题" in payload["reply"]
 
 
+def test_upload_doc_is_parsed_as_document_when_possible(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+
+    # .doc should be accepted; depending on the environment it may be parsed to text or saved as file upload.
+    files = {"file": ("resume.doc", BytesIO(b"fake doc bytes"), "application/msword")}
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    assert payload["item_id"]
+    assert "Saved" in payload["reply"]
+
+
+def test_upload_md_is_parsed_as_document(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("note.md", BytesIO(b"# Title\n\nSome content about Agent and RAG."), "text/markdown")}
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+
+    items_response = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items"))
+    items = items_response.json()
+    assert len(items) == 1
+    assert items[0]["item_type"] == "document"
+    assert items[0]["title"] == "note"
+
 def test_llm_router_can_promote_ambiguous_text_to_capture():
     router = IntentRouter(
         llm_classifier=FakeLLMIntentClassifier(

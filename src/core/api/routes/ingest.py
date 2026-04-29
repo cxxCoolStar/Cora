@@ -23,6 +23,9 @@ async def ingest_message(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # Treat validation/parsing errors as client input errors instead of 500.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/reply", response_model=SessionReplyResponse)

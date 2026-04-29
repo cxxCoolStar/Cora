@@ -5,10 +5,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 import uuid
 
+import anyio
 from fastapi import UploadFile
 
 from core.ingestion.parsers.base import FileSource, ParsedContent
-from core.ingestion.parsers.docx_parser import DocxFileParser
+from core.ingestion.parsers.doc_parser import DocFileParser
+from core.ingestion.parsers.docling_parser import DoclingFileParser
 from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
@@ -40,7 +42,8 @@ class IngestionService:
         self.text_parser = TextParser()
         self.link_parser = LinkParser()
         self.txt_parser = TxtFileParser()
-        self.docx_parser = DocxFileParser()
+        self.docling_parser = DoclingFileParser()
+        self.doc_parser = DocFileParser()
 
     async def ingest(
         self,
@@ -51,9 +54,10 @@ class IngestionService:
         upload: UploadFile | None,
     ) -> IngestedItemResult:
         parsed = await self._parse_input(text=text, upload=upload)
-        summary = self._summarize(parsed.normalized_text)
+        summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
         tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
         locator_hint = self._build_locator_hint(parsed)
+        chunk_texts = parsed.metadata.pop("_chunk_texts", None)
         item = self.item_repository.create(
             session_id=session_id,
             source_message_id=source_message_id,
@@ -72,14 +76,26 @@ class IngestionService:
             tags=tags,
             title=item.title,
         )
-        for index, chunk in enumerate(self._chunk_text(parsed.normalized_text)):
-            self.item_chunk_repository.create(
-                item_id=item.id,
-                chunk_index=index,
-                content=chunk,
-                metadata={"title": item.title},
+        if isinstance(chunk_texts, list) and any(str(c).strip() for c in chunk_texts):
+            chunks = [str(c).strip() for c in chunk_texts if str(c).strip()]
+        else:
+            chunks = self._chunk_text(parsed.normalized_text)
+        for index, chunk in enumerate(chunks):
+            self.item_chunk_repository.create(item_id=item.id, chunk_index=index, content=chunk, metadata={"title": item.title})
+
+        if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
+            original_name = parsed.metadata.get("original_file_name", item.title)
+            suffix = parsed.metadata.get("file_suffix", "")
+            parse_status = parsed.metadata.get("parse_status")
+            parse_error = parsed.metadata.get("parse_error")
+            error_hint = f" (parse error: {parse_error})" if parse_status == "failed" and parse_error else ""
+            reply = (
+                f"Saved `{original_name}` as a file upload ({suffix or 'unknown'}). "
+                f"I can't extract searchable text from this file type yet{error_hint}, but I kept the original file so you can find it later. "
+                f"Summary: {summary}"
             )
-        reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
+        else:
+            reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
         return IngestedItemResult(item_id=item.id, reply=reply)
 
     async def _parse_input(self, *, text: str | None, upload: UploadFile | None) -> ParsedContent:
@@ -92,11 +108,58 @@ class IngestionService:
             source = FileSource(path=target, filename=upload.filename or target.name)
             if suffix == ".txt":
                 parsed = self.txt_parser.parse(source)
-            elif suffix == ".docx":
-                parsed = self.docx_parser.parse(source)
+            elif suffix in {".md", ".markdown", ".docx"}:
+                try:
+                    parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
+                except Exception as exc:
+                    # If docling isn't installed or parsing fails, keep the original file.
+                    return ParsedContent(
+                        item_type="file_upload",
+                        title=upload.filename or target.name,
+                        raw_content="",
+                        normalized_text="",
+                        metadata={
+                            "parse_status": "failed",
+                            "file_suffix": suffix or "unknown",
+                            "original_file_name": upload.filename or target.name,
+                            "stored_file_path": str(target),
+                            "parse_error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+            elif suffix == ".doc":
+                try:
+                    parsed = await anyio.to_thread.run_sync(self.doc_parser.parse, source)
+                except Exception as exc:
+                    # Keep the original file even if parsing fails (bad file, unsupported on this machine, etc).
+                    return ParsedContent(
+                        item_type="file_upload",
+                        title=upload.filename or target.name,
+                        raw_content="",
+                        normalized_text="",
+                        metadata={
+                            "parse_status": "failed",
+                            "file_suffix": suffix or "unknown",
+                            "original_file_name": upload.filename or target.name,
+                            "stored_file_path": str(target),
+                            "parse_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
             else:
-                raise ValueError(f"Unsupported file type: {suffix or 'unknown'}")
+                # Keep the original file even if we can't parse it yet.
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=upload.filename or target.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "unsupported",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": upload.filename or target.name,
+                        "stored_file_path": str(target),
+                    },
+                )
             parsed.metadata["stored_file_path"] = str(target)
+            parsed.metadata["original_file_name"] = upload.filename or target.name
             return parsed
         if text is None or not text.strip():
             raise ValueError("Either text or a supported file is required.")
