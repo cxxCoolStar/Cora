@@ -363,6 +363,36 @@ def test_retrieve_returns_saved_material(tmp_path):
     assert "10.30.1.127" in payload["reply"]
 
 
+def test_retrieve_short_material_returns_full_text(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存：内网地址10.30.1.127 网关10.30.0.1"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "告诉我内网地址"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "内容较短，直接给你全文" in payload["reply"]
+    assert "10.30.1.127" in payload["reply"]
+
+
 def test_natural_language_find_request_routes_to_retrieve(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()

@@ -65,14 +65,15 @@ class RetrievalService:
         self.query_rewriter = query_rewriter
 
     def search(self, *, session_id: str, query: str) -> RetrievalResult | None:
-        if self.query_rewriter is None:
-            raise RuntimeError("QueryRewriter is required but not configured")
-
-        rewritten = self.query_rewriter.rewrite(query=query)
-        if rewritten is None or not rewritten.keywords:
-            raise RuntimeError("Failed to extract search keywords from query")
-
-        tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
+        tokens: list[str]
+        if self.query_rewriter is not None:
+            rewritten = self.query_rewriter.rewrite(query=query)
+            if rewritten is not None and rewritten.keywords:
+                tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
+            else:
+                tokens = self._tokenize(query)
+        else:
+            tokens = self._tokenize(query)
         items = self.item_repository.list_all()
         if not items:
             return None
@@ -120,24 +121,24 @@ class RetrievalService:
             final_score=None,
         )
 
+        tokens: list[str]
         if self.query_rewriter is None:
-            result.error = "QueryRewriter is required but not configured"
-            return result
-
-        # Step 1: Query Rewriting
-        rewritten = self.query_rewriter.rewrite(query=query)
-        if rewritten is None:
-            result.error = "Failed to rewrite query - LLM returned None"
-            return result
-
-        result.rewritten_keywords = rewritten.keywords
-        result.rewrite_reasoning = rewritten.reasoning
-
-        if not rewritten.keywords:
-            result.error = "QueryRewriter returned empty keywords"
-            return result
-
-        tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
+            result.rewrite_reasoning = "QueryRewriter not configured; using direct tokenization fallback."
+            tokens = self._tokenize(query)
+        else:
+            # Step 1: Query Rewriting
+            rewritten = self.query_rewriter.rewrite(query=query)
+            if rewritten is None:
+                result.rewrite_reasoning = "QueryRewriter returned None; using direct tokenization fallback."
+                tokens = self._tokenize(query)
+            else:
+                result.rewritten_keywords = rewritten.keywords
+                result.rewrite_reasoning = rewritten.reasoning
+                if not rewritten.keywords:
+                    result.rewrite_reasoning = "QueryRewriter returned empty keywords; using direct tokenization fallback."
+                    tokens = self._tokenize(query)
+                else:
+                    tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
         result.tokens_used_for_search = tokens
 
         if not tokens:

@@ -30,6 +30,8 @@ from core.storage.repositories import (
 
 
 class ClawBotService:
+    FULL_TEXT_REPLY_THRESHOLD = 420
+
     def __init__(
         self,
         *,
@@ -135,12 +137,19 @@ class ClawBotService:
             if result is None:
                 reply = "我没有找到相关的已保存资料。你可以先发送内容给我保存，再来查询。"
             else:
-                snippet = result.matched_chunk.content if result.matched_chunk is not None else result.item.summary
-                reply = (
-                    f"我找到了一条相关资料：`{result.item.title}`。\n"
-                    f"摘要：{result.item.summary}\n"
-                    f"相关内容：{snippet}"
-                )
+                normalized_text = (result.item.normalized_text or "").strip()
+                if normalized_text and len(normalized_text) <= self.FULL_TEXT_REPLY_THRESHOLD:
+                    reply = (
+                        f"我找到了一条相关资料：`{result.item.title}`。\n"
+                        f"内容较短，直接给你全文：\n{normalized_text}"
+                    )
+                else:
+                    snippet = result.matched_chunk.content if result.matched_chunk is not None else result.item.summary
+                    reply = (
+                        f"我找到了一条相关资料：`{result.item.title}`。\n"
+                        f"摘要：{result.item.summary}\n"
+                        f"相关内容：{snippet}"
+                    )
                 if result.item.locator_hint:
                     reply += f"\n定位提示：{result.item.locator_hint}"
             self.message_repository.add_assistant_message(
