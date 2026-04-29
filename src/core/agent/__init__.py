@@ -1,5 +1,5 @@
-"""Agent runtime exports."""
+"""Agent package."""
 
-from .agent import CoreAgent
+from .config import CoreSettings
 
-__all__ = ["CoreAgent"]
+__all__ = ["CoreSettings"]

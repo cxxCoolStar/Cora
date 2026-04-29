@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class CoreSettings(BaseSettings):
     agent_name: str = "core"
     database_path: Path = Field(default=Path(".cora/core.db"))
+    clawbot_database_path: Path = Field(default=Path(".cora/clawbot.db"))
+    files_storage_dir: Path = Field(default=Path(".cora/files"))
     model_provider: str = "dev"
     model: str | None = None
     openai_api_key: str | None = None
@@ -25,3 +27,7 @@ class CoreSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def clawbot_database_url(self) -> str:
+        return f"sqlite:///{self.clawbot_database_path.as_posix()}"

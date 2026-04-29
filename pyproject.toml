@@ -9,15 +9,24 @@ description = "Core agent runtime for the Cora project."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "alembic>=1.14,<2",
+    "fastapi>=0.115,<1",
     "httpx>=0.27,<1",
+    "jinja2>=3.1,<4",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
+    "python-docx>=1.1,<2",
+    "python-multipart>=0.0.9,<1",
+    "sqlalchemy>=2.0,<3",
+    "trafilatura>=2.0,<3",
     "typer>=0.12,<1",
+    "uvicorn>=0.30,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2,<9",
+    "pytest-cov>=5,<6",
 ]
 
 [project.scripts]
