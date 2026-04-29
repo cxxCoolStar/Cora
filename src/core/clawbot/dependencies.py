@@ -12,6 +12,7 @@ from core.clawbot.service import ClawBotService
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
+from core.retrieval.query_rewriter import QueryRewriter
 from core.retrieval.service import RetrievalService
 from core.storage.db import DatabaseManager
 from core.storage.repositories import ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository
@@ -58,20 +59,24 @@ def get_clawbot_container() -> ClawBotContainer:
             user_signal_repository=user_signal_repository,
             storage_dir=settings.files_storage_dir,
         )
-        retrieval_service = RetrievalService(
-            item_repository=item_repository,
-            item_chunk_repository=item_chunk_repository,
-        )
-        llm_classifier = None
+        model_client = None
         if settings.model_provider == "openai" or (settings.openai_api_key and settings.model):
             model_client = OpenAIChatModelClient(
                 api_key=settings.openai_api_key or "",
                 model=settings.model or "",
                 base_url=settings.openai_base_url,
             )
-            llm_classifier = LLMIntentClassifier(model_client=model_client)
         elif settings.debug:
-            llm_classifier = LLMIntentClassifier(model_client=DevelopmentModelClient())
+            model_client = DevelopmentModelClient()
+
+        query_rewriter = QueryRewriter(model_client=model_client) if model_client else None
+        retrieval_service = RetrievalService(
+            item_repository=item_repository,
+            item_chunk_repository=item_chunk_repository,
+            query_rewriter=query_rewriter,
+        )
+
+        llm_classifier = LLMIntentClassifier(model_client=model_client) if model_client else None
         intent_router = IntentRouter(llm_classifier=llm_classifier)
         clawbot_service = ClawBotService(
             session_repository=session_repository,
