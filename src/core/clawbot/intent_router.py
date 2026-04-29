@@ -11,6 +11,7 @@ class IntentDecision:
     confidence: str
     reason: str
     needs_clarification: bool = False
+    source: str = "rule"
 
 
 class IntentRouter:
@@ -24,9 +25,9 @@ class IntentRouter:
         "嗨",
         "哈喽",
     }
-    SAVE_HINTS = ("保存", "存一下", "记一下", "记住", "收录", "帮我存", "帮我记")
-    RETRIEVE_HINTS = ("找", "之前", "发过", "保存过", "哪个", "那条", "那个")
-    ORGANIZE_HINTS = ("总结", "整理", "分类", "提炼", "归纳")
+    FALLBACK_CAPTURE_HINTS = ("请保存", "帮我保存", "先保存", "存一下", "帮我记", "收录")
+    FALLBACK_RETRIEVE_HINTS = ("找一下", "找出来", "找回", "告诉我", "我之前保存的", "之前保存的")
+    FALLBACK_ORGANIZE_HINTS = ("总结", "整理", "分类", "提炼", "归纳")
 
     def __init__(self, llm_classifier: LLMIntentClassifier | None = None) -> None:
         self.llm_classifier = llm_classifier
@@ -36,39 +37,52 @@ class IntentRouter:
         lowered = content.lower()
 
         if has_upload:
-            return IntentDecision(intent="capture", confidence="high", reason="File upload detected.")
+            return IntentDecision(intent="capture", confidence="high", reason="File upload detected.", source="rule")
 
         if self._is_greeting(content, lowered):
-            return IntentDecision(intent="chat", confidence="high", reason="Greeting detected.")
+            return IntentDecision(intent="chat", confidence="high", reason="Greeting detected.", source="rule")
 
         if self._is_url_only(content):
-            return IntentDecision(intent="capture", confidence="high", reason="Standalone URL detected.")
-
-        if any(hint in content for hint in self.RETRIEVE_HINTS):
-            return IntentDecision(intent="retrieve", confidence="medium", reason="Retrieval phrase detected.")
-
-        if any(hint in content for hint in self.ORGANIZE_HINTS):
-            return IntentDecision(intent="organize", confidence="medium", reason="Organization phrase detected.")
-
-        if any(hint in content for hint in self.SAVE_HINTS):
-            return IntentDecision(intent="capture", confidence="medium", reason="Explicit save phrase detected.")
-
-        if self._looks_like_long_material(content):
-            llm_decision = self._llm_decide(content)
-            if llm_decision is not None:
-                return llm_decision
-            return IntentDecision(
-                intent="clarify",
-                confidence="low",
-                reason="Long text without explicit action.",
-                needs_clarification=True,
-            )
+            return IntentDecision(intent="capture", confidence="high", reason="Standalone URL detected.", source="rule")
 
         llm_decision = self._llm_decide(content)
         if llm_decision is not None:
             return llm_decision
 
-        return IntentDecision(intent="chat", confidence="medium", reason="Default conversational text.")
+        if any(hint in content for hint in self.FALLBACK_CAPTURE_HINTS):
+            return IntentDecision(
+                intent="capture",
+                confidence="medium",
+                reason="Fallback capture phrase detected while LLM is unavailable.",
+                source="fallback",
+            )
+
+        if any(hint in content for hint in self.FALLBACK_RETRIEVE_HINTS):
+            return IntentDecision(
+                intent="retrieve",
+                confidence="medium",
+                reason="Fallback retrieval phrase detected while LLM is unavailable.",
+                source="fallback",
+            )
+
+        if any(hint in content for hint in self.FALLBACK_ORGANIZE_HINTS):
+            return IntentDecision(
+                intent="organize",
+                confidence="medium",
+                reason="Fallback organization phrase detected while LLM is unavailable.",
+                source="fallback",
+            )
+
+        if self._looks_like_long_material(content):
+            return IntentDecision(
+                intent="clarify",
+                confidence="low",
+                reason="LLM unavailable or inconclusive for long text.",
+                needs_clarification=True,
+                source="fallback",
+            )
+
+        return IntentDecision(intent="chat", confidence="medium", reason="LLM unavailable; default conversational fallback.", source="fallback")
 
     @staticmethod
     def _is_url_only(content: str) -> bool:
@@ -107,10 +121,12 @@ class IntentRouter:
                 confidence=result.confidence,
                 reason=result.reason,
                 needs_clarification=True,
+                source="llm",
             )
         return IntentDecision(
             intent=result.intent,
             confidence=result.confidence,
             reason=result.reason,
             needs_clarification=False,
+            source="llm",
         )

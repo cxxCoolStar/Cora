@@ -186,6 +186,47 @@
                     <div class="empty">No chunks generated yet.</div>
                     {% endif %}
                 </section>
+                <section class="card">
+                    <h2>User Signals</h2>
+                    {% for signal in selected_session.user_signals %}
+                    <div class="entry">
+                        <div class="label">{{ signal.signal_type }} · {{ signal.confidence }} · {{ signal.created_at }}</div>
+                        <strong>{{ signal.signal_value }}</strong>
+                        <div class="mono">{{ signal.source }}</div>
+                    </div>
+                    {% endfor %}
+                    {% if not selected_session.user_signals %}
+                    <div class="empty">No user signals recorded yet.</div>
+                    {% endif %}
+                </section>
+                <section class="card">
+                    <h2>User Profile</h2>
+                    {% for section in selected_session.user_profile %}
+                    <div class="entry">
+                        <div class="label">{{ section.name }}</div>
+                        <ul>
+                            {% for value in section.values %}
+                            <li>{{ value }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endfor %}
+                    {% if not selected_session.user_profile %}
+                    <div class="empty">No aggregated user profile yet.</div>
+                    {% endif %}
+                </section>
+                <section class="card">
+                    <h2>Recent Decisions</h2>
+                    {% for decision in selected_session.recent_decisions %}
+                    <div class="entry">
+                        <div class="label">{{ decision.action }} · {{ decision.source }} · {{ decision.confidence }}</div>
+                        <div>{{ decision.reason }}</div>
+                    </div>
+                    {% endfor %}
+                    {% if not selected_session.recent_decisions %}
+                    <div class="empty">No recorded routing decisions yet.</div>
+                    {% endif %}
+                </section>
             </div>
             {% else %}
             <div class="empty">Create a session and send some content first.</div>

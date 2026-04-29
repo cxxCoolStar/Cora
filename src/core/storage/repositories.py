@@ -5,7 +5,14 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
-from core.storage.models import ClarificationStateRecord, ItemChunkRecord, ItemRecord, MessageRecord, SessionRecord
+from core.storage.models import (
+    ClarificationStateRecord,
+    ItemChunkRecord,
+    ItemRecord,
+    MessageRecord,
+    SessionRecord,
+    UserSignalRecord,
+)
 
 
 class SessionRepository:
@@ -38,14 +45,14 @@ class MessageRepository:
         self.database = database
 
     def add_user_message(self, *, session_id: str, content: str) -> MessageRecord:
-        return self._create(session_id=session_id, role="user", content=content)
+        return self._create(session_id=session_id, role="user", content=content, metadata={})
 
-    def add_assistant_message(self, *, session_id: str, content: str) -> MessageRecord:
-        return self._create(session_id=session_id, role="assistant", content=content)
+    def add_assistant_message(self, *, session_id: str, content: str, metadata: dict[str, Any] | None = None) -> MessageRecord:
+        return self._create(session_id=session_id, role="assistant", content=content, metadata=metadata or {})
 
-    def _create(self, *, session_id: str, role: str, content: str) -> MessageRecord:
+    def _create(self, *, session_id: str, role: str, content: str, metadata: dict[str, Any]) -> MessageRecord:
         with self.database.session() as session:
-            record = MessageRecord(session_id=session_id, role=role, content=content)
+            record = MessageRecord(session_id=session_id, role=role, content=content, metadata_json=metadata)
             session.add(record)
             session.commit()
             session.refresh(record)
@@ -111,6 +118,10 @@ class ItemRepository:
             records = list(session.scalars(stmt))
         for record in records:
             haystack = " ".join([record.title, record.summary, record.normalized_text]).lower()
+            compact_query = lowered.replace(" ", "")
+            compact_haystack = haystack.replace(" ", "")
+            if compact_query and compact_query in compact_haystack:
+                return record
             if any(token for token in lowered.split() if token in haystack):
                 return record
         return records[0] if records else None
@@ -191,3 +202,44 @@ class ClarificationRepository:
                 raise KeyError(f"Clarification not found: {clarification_id}")
             record.status = status
             session.commit()
+
+
+class UserSignalRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create(
+        self,
+        *,
+        session_id: str,
+        item_id: str | None,
+        signal_type: str,
+        signal_value: str,
+        confidence: str = "medium",
+        source: str = "ingestion",
+        metadata: dict[str, Any] | None = None,
+    ) -> UserSignalRecord:
+        with self.database.session() as session:
+            record = UserSignalRecord(
+                session_id=session_id,
+                item_id=item_id,
+                signal_type=signal_type,
+                signal_value=signal_value,
+                confidence=confidence,
+                source=source,
+                metadata_json=metadata or {},
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def list_by_session(self, *, session_id: str, limit: int = 50) -> list[UserSignalRecord]:
+        with self.database.session() as session:
+            stmt = (
+                select(UserSignalRecord)
+                .where(UserSignalRecord.session_id == session_id)
+                .order_by(desc(UserSignalRecord.created_at))
+                .limit(limit)
+            )
+            return list(session.scalars(stmt))

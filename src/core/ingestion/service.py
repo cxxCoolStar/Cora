@@ -12,7 +12,7 @@ from core.ingestion.parsers.docx_parser import DocxFileParser
 from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
-from core.storage.repositories import ItemChunkRepository, ItemRepository, MessageRepository
+from core.storage.repositories import ItemChunkRepository, ItemRepository, MessageRepository, UserSignalRepository
 
 
 @dataclass(slots=True)
@@ -28,11 +28,13 @@ class IngestionService:
         item_repository: ItemRepository,
         item_chunk_repository: ItemChunkRepository,
         message_repository: MessageRepository,
+        user_signal_repository: UserSignalRepository,
         storage_dir: Path,
     ) -> None:
         self.item_repository = item_repository
         self.item_chunk_repository = item_chunk_repository
         self.message_repository = message_repository
+        self.user_signal_repository = user_signal_repository
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.text_parser = TextParser()
@@ -62,6 +64,13 @@ class IngestionService:
             summary=summary,
             metadata={**parsed.metadata, "tags": tags},
             locator_hint=locator_hint,
+        )
+        self._record_user_signals(
+            session_id=session_id,
+            item_id=item.id,
+            item_type=parsed.item_type,
+            tags=tags,
+            title=item.title,
         )
         for index, chunk in enumerate(self._chunk_text(parsed.normalized_text)):
             self.item_chunk_repository.create(
@@ -136,3 +145,30 @@ class IngestionService:
         if url:
             return f"Look for the link message containing {url}."
         return None
+
+    def _record_user_signals(
+        self,
+        *,
+        session_id: str,
+        item_id: str,
+        item_type: str,
+        tags: list[str],
+        title: str,
+    ) -> None:
+        self.user_signal_repository.create(
+            session_id=session_id,
+            item_id=item_id,
+            signal_type="content_type",
+            signal_value=item_type,
+            confidence="high",
+            metadata={"title": title},
+        )
+        for tag in tags:
+            self.user_signal_repository.create(
+                session_id=session_id,
+                item_id=item_id,
+                signal_type="interest_topic",
+                signal_value=tag,
+                confidence="medium",
+                metadata={"title": title},
+            )

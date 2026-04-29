@@ -36,6 +36,7 @@ class MessageRecord(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
     role: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
@@ -79,3 +80,17 @@ class ClarificationStateRecord(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class UserSignalRecord(Base):
+    __tablename__ = "clawbot_user_signals"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    item_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_items.id"), nullable=True, index=True)
+    signal_type: Mapped[str] = mapped_column(String(64), index=True)
+    signal_value: Mapped[str] = mapped_column(String(255), index=True)
+    confidence: Mapped[str] = mapped_column(String(32), default="medium")
+    source: Mapped[str] = mapped_column(String(64), default="ingestion")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

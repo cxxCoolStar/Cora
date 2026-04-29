@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -13,6 +15,24 @@ class DatabaseManager:
 
     def create_all(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._run_sqlite_migrations()
 
     def session(self) -> Session:
         return self.session_factory()
+
+    def _run_sqlite_migrations(self) -> None:
+        if not self.engine.url.drivername.startswith("sqlite"):
+            return
+        with self.engine.begin() as connection:
+            raw = connection.connection
+            if not isinstance(raw, sqlite3.Connection):
+                return
+            self._ensure_column(raw, "clawbot_messages", "metadata_json", "JSON NOT NULL DEFAULT '{}'")
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+        cursor = conn.execute(f"PRAGMA table_info({table_name})")
+        columns = {row[1] for row in cursor.fetchall()}
+        if column_name in columns:
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")

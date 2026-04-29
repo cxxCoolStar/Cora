@@ -1,17 +1,18 @@
 # Cora
 
-`core` is the first Python agent runtime in this repository.
+`ClawBot` is the first real product scenario in this repository.
 
 ## Current Scope
 
 This repository currently contains:
 
-- a V1 architecture spec
-- a minimal runtime skeleton for multi-turn chat
-- a structured tool interface with a few built-in tools
-- an OpenAI-compatible chat completions adapter
-- an interactive CLI entrypoint
-- test coverage for the basic runtime flows
+- ClawBot V1 product and technical design docs
+- a local FastAPI app for simulating chat-style input before WeChat integration
+- text, link, and basic file ingestion
+- item/chunk persistence in SQLite
+- a debug explorer for inspecting saved data
+- an OpenAI-compatible client for LLM-assisted intent routing
+- test coverage for the current ClawBot flows
 
 ## Quick Start
 
@@ -20,7 +21,7 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -e .[dev]
 pytest
-core-cli chat
+core-cli serve
 ```
 
 On Windows PowerShell:
@@ -30,22 +31,36 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .[dev]
 pytest
-core-cli chat
+core-cli serve
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The debug explorer is available at:
+
+```text
+http://127.0.0.1:8000/debug
 ```
 
 ## Notes
 
-The CLI currently uses a local fallback model client for development. It supports:
+The current implementation focuses on:
 
-- normal echo-style multi-turn replies
-- simple tool calls using slash commands such as `/tool get_time`
+- natural chat-like submission
+- intent routing
+- cautious clarification when intent is unclear
+- structured storage for later retrieval
 
-If `CORA_OPENAI_API_KEY` and `CORA_MODEL` are configured, the CLI will use the real provider-backed client instead.
+If `CORA_OPENAI_API_KEY` and `CORA_MODEL` are configured, ClawBot will use the real provider-backed client for LLM-assisted intent classification on ambiguous turns.
 
 Example:
 
 ```powershell
 $env:CORA_OPENAI_API_KEY="sk-..."
 $env:CORA_MODEL="gpt-4.1-mini"
-core-cli chat
+core-cli serve
 ```

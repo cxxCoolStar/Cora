@@ -3,7 +3,7 @@ from __future__ import annotations
 import typer
 import uvicorn
 
-from core.agent.config import CoreSettings
+from core.config import CoreSettings
 
 app = typer.Typer(help="CLI for ClawBot.")
 

@@ -15,13 +15,14 @@ if str(SRC) not in sys.path:
 from core.api.app import create_app  # noqa: E402
 from core.clawbot import dependencies as deps  # noqa: E402
 from core.clawbot.dependencies import ClawBotContainer  # noqa: E402
-from core.agent.config import CoreSettings  # noqa: E402
+from core.config import CoreSettings  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
+from core.retrieval.service import RetrievalService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository  # noqa: E402
+from core.storage.repositories import ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository  # noqa: E402
 
 
 class FakeLLMIntentClassifier:
@@ -43,11 +44,17 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
     item_repository = ItemRepository(database)
     item_chunk_repository = ItemChunkRepository(database)
     clarification_repository = ClarificationRepository(database)
+    user_signal_repository = UserSignalRepository(database)
     ingestion_service = IngestionService(
         item_repository=item_repository,
         item_chunk_repository=item_chunk_repository,
         message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
         storage_dir=settings.files_storage_dir,
+    )
+    retrieval_service = RetrievalService(
+        item_repository=item_repository,
+        item_chunk_repository=item_chunk_repository,
     )
     clawbot_service = ClawBotService(
         session_repository=session_repository,
@@ -56,6 +63,8 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         item_chunk_repository=item_chunk_repository,
         ingestion_service=ingestion_service,
         clarification_repository=clarification_repository,
+        user_signal_repository=user_signal_repository,
+        retrieval_service=retrieval_service,
     )
     container = ClawBotContainer(
         settings=settings,
@@ -65,7 +74,9 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         item_repository=item_repository,
         item_chunk_repository=item_chunk_repository,
         clarification_repository=clarification_repository,
+        user_signal_repository=user_signal_repository,
         ingestion_service=ingestion_service,
+        retrieval_service=retrieval_service,
         clawbot_service=clawbot_service,
         templates_dir=str(ROOT / "src" / "core" / "api" / "templates"),
         templates_static_dir=str(ROOT / "src" / "core" / "api" / "static"),
@@ -225,7 +236,7 @@ def test_clarification_reply_can_save_pending_text(tmp_path):
     app = create_app()
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
-    long_text = "这是一个很长的资料内容，需要你之后帮我查找和整理。\n" * 4
+    long_text = "这是一个很长的资料内容，里面有很多后面可能会用到的信息，我先发给你。\n" * 4
     asyncio.run(
         api_request(
             app,
@@ -269,6 +280,116 @@ def test_debug_page_renders_saved_data(tmp_path):
     assert response.status_code == 200
     assert "Debug Explorer" in response.text
     assert "A saved debug note" in response.text
+    assert "User Signals" in response.text
+
+
+def test_ingest_records_user_signals(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存这段 Agent 和 RAG 面试题资料"},
+        )
+    )
+
+    response = asyncio.run(api_request(app, "GET", f"/debug?session_id={session_id}"))
+
+    assert response.status_code == 200
+    assert "interest_topic" in response.text
+    assert "agent" in response.text.lower()
+
+
+def test_debug_page_shows_aggregated_user_profile(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存 Agent 资料，后续我还会继续研究 Agent 和 RAG"},
+        )
+    )
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存另一段 Agent 学习资料"},
+        )
+    )
+
+    response = asyncio.run(api_request(app, "GET", f"/debug?session_id={session_id}"))
+
+    assert response.status_code == 200
+    assert "User Profile" in response.text
+    assert "Recent Interest Topics" in response.text
+    assert "Likely Ongoing Focus" in response.text
+
+
+def test_retrieve_returns_saved_material(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存内网地址：10.30.1.127，网关是10.30.0.1"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请告诉我内网地址"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "10.30.1.127" in payload["reply"]
+
+
+def test_natural_language_find_request_routes_to_retrieve(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存这些 Agent 面试题，后面我还要复习"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "我之前保存的面试题你能帮我找一下吗"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "面试题" in payload["reply"]
 
 
 def test_llm_router_can_promote_ambiguous_text_to_capture():

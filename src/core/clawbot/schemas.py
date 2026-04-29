@@ -28,6 +28,7 @@ class IngestResponse(BaseModel):
     action: str
     item_id: str | None = None
     needs_clarification: bool = False
+    decision_source: str | None = None
 
 
 class SessionReplyResponse(BaseModel):
@@ -50,9 +51,33 @@ class ChunkDebugResponse(BaseModel):
     created_at: datetime
 
 
+class UserSignalDebugResponse(BaseModel):
+    id: str
+    signal_type: str
+    signal_value: str
+    confidence: str
+    source: str
+    created_at: datetime
+
+
+class UserProfileSection(BaseModel):
+    name: str
+    values: list[str]
+
+
+class DecisionDebugResponse(BaseModel):
+    action: str
+    confidence: str
+    reason: str
+    source: str
+
+
 class SessionDebugResponse(BaseModel):
     session_id: str
     created_at: datetime
     messages: list[MessageDebugResponse]
     items: list[ItemDetailResponse]
     chunks: list[ChunkDebugResponse]
+    user_signals: list[UserSignalDebugResponse]
+    user_profile: list[UserProfileSection]
+    recent_decisions: list[DecisionDebugResponse]
