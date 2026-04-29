@@ -103,6 +103,11 @@ class ItemRepository:
             stmt = select(ItemRecord).where(ItemRecord.session_id == session_id).order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
 
+    def list_all(self) -> list[ItemRecord]:
+        with self.database.session() as session:
+            stmt = select(ItemRecord).order_by(desc(ItemRecord.created_at))
+            return list(session.scalars(stmt))
+
     def get(self, *, item_id: str, session_id: str) -> ItemRecord:
         with self.database.session() as session:
             stmt = select(ItemRecord).where(ItemRecord.id == item_id, ItemRecord.session_id == session_id)

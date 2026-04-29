@@ -36,7 +36,7 @@ class RetrievalService:
 
     def search(self, *, session_id: str, query: str) -> RetrievalResult | None:
         tokens = self._tokenize(query)
-        items = self.item_repository.list_by_session(session_id=session_id)
+        items = self.item_repository.list_all()
         if not items:
             return None
 

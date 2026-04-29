@@ -57,11 +57,15 @@
             padding: 20px 28px;
             border-top: 1px solid var(--line);
             border-bottom: 1px solid var(--line);
-            min-height: 260px;
+            height: 460px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
         }
         .log {
             display: grid;
             gap: 14px;
+            margin-top: auto;
         }
         .entry {
             padding: 14px 16px;
@@ -123,7 +127,7 @@
                 <a href="/debug">Open Debug Explorer</a>
             </div>
         </section>
-        <section class="board">
+        <section class="board" id="board">
             <div class="session" id="sessionLabel">No session yet</div>
             <div class="log" id="log"></div>
         </section>
@@ -135,6 +139,7 @@
     </main>
     <script>
         const log = document.getElementById("log");
+        const board = document.getElementById("board");
         const form = document.getElementById("chatForm");
         const sessionLabel = document.getElementById("sessionLabel");
         let sessionId = null;
@@ -143,7 +148,8 @@
             const entry = document.createElement("div");
             entry.className = `entry ${kind}`;
             entry.innerHTML = `<strong>${title}</strong><div>${content}</div>`;
-            log.prepend(entry);
+            log.appendChild(entry);
+            board.scrollTop = board.scrollHeight;
         }
 
         async function ensureSession() {
