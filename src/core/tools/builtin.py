@@ -195,3 +195,38 @@ def register_builtin_tools() -> None:
             is_agent_stateful=True,
         )
     )
+    # File delivery tool for WeChat
+    registry.register(
+        ToolSpec(
+            name="send_file_to_user",
+            toolset="wiki_read",
+            description="Send a file (document, image, video) from the personal wiki back to the user via WeChat. Use when the user asks to view, download, or receive a previously saved file.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "description": "How to identify the file item to send.",
+                            },
+                            "value": {
+                                "description": "The item identifier or working-set rank, depending on target.type.",
+                            },
+                        },
+                        "required": ["type", "value"],
+                        "additionalProperties": False,
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional text to send along with the file.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+            handler=lambda executor, invocation: executor._tool_send_file_to_user(invocation),
+        )
+    )

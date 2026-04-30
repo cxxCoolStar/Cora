@@ -9,6 +9,9 @@ from tempfile import NamedTemporaryFile
 import base64
 import hashlib
 import mimetypes
+import secrets
+import struct
+from urllib.parse import quote
 
 import httpx
 
@@ -21,6 +24,47 @@ ITEM_IMAGE = 2
 ITEM_VOICE = 3
 ITEM_FILE = 4
 ITEM_VIDEO = 5
+
+# Media type constants for upload
+MEDIA_IMAGE = 1
+MEDIA_VIDEO = 2
+MEDIA_FILE = 3
+MEDIA_VOICE = 4
+
+# API Endpoints
+EP_GET_UPLOAD_URL = "ilink/bot/getuploadurl"
+
+# AES-128-ECB utilities for file encryption
+try:
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    _CRYPTO_AVAILABLE = True
+except Exception:  # pragma: no cover
+    default_backend = None  # type: ignore[misc,assignment]
+    Cipher = None  # type: ignore[misc,assignment]
+    algorithms = None  # type: ignore[misc,assignment]
+    modes = None  # type: ignore[misc,assignment]
+    _CRYPTO_AVAILABLE = False
+
+
+def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    """Pad data using PKCS#7 padding."""
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
+
+
+def _aes128_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
+    """Encrypt data using AES-128-ECB."""
+    if not _CRYPTO_AVAILABLE:
+        raise RuntimeError("cryptography library required for AES encryption")
+    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    encryptor = cipher.encryptor()
+    return encryptor.update(_pkcs7_pad(plaintext)) + encryptor.finalize()
+
+
+def _aes_padded_size(size: int) -> int:
+    """Calculate the AES padded size for a given plaintext size."""
+    return ((size + 1 + 15) // 16) * 16
 
 logger = logging.getLogger(__name__)
 
@@ -302,3 +346,255 @@ class WechatIlinkClient:
         except Exception as exc:
             logger.warning("wechat image download failed: %s", exc)
             return None
+
+    # ===== File Sending Methods =====
+
+    async def send_file(
+        self,
+        *,
+        peer_user_id: str,
+        file_path: str,
+        caption: str = "",
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a file to WeChat user.
+
+        Args:
+            peer_user_id: Target user ID
+            file_path: Local file path to send
+            caption: Optional text caption
+            context_token: Optional context token for session
+
+        Returns:
+            API response dict
+        """
+        if not _CRYPTO_AVAILABLE:
+            raise RuntimeError("cryptography library is required for sending files")
+
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        plaintext = path.read_bytes()
+        media_type, item_builder = self._outbound_media_builder(file_path)
+        filekey = secrets.token_hex(16)
+        aes_key = secrets.token_bytes(16)
+        rawsize = len(plaintext)
+        rawfilemd5 = hashlib.md5(plaintext).hexdigest()
+
+        # Get upload URL from iLink
+        upload_response = await self._get_upload_url(
+            to_user_id=peer_user_id,
+            media_type=media_type,
+            filekey=filekey,
+            rawsize=rawsize,
+            rawfilemd5=rawfilemd5,
+            filesize=_aes_padded_size(rawsize),
+            aeskey_hex=aes_key.hex(),
+        )
+
+        upload_param = str(upload_response.get("upload_param") or "")
+        upload_full_url = str(upload_response.get("upload_full_url") or "")
+
+        # Encrypt file content
+        ciphertext = _aes128_ecb_encrypt(plaintext, aes_key)
+
+        # Determine upload URL
+        if upload_full_url:
+            upload_url = upload_full_url
+        elif upload_param:
+            upload_url = self._cdn_upload_url(upload_param, filekey)
+        else:
+            raise RuntimeError(f"getuploadurl returned neither upload_param nor upload_full_url")
+
+        # Upload encrypted content to CDN
+        encrypted_query_param = await self._upload_ciphertext(ciphertext, upload_url)
+
+        # Resolve context token
+        resolved_context_token = context_token
+        if not resolved_context_token and self._token_store is not None:
+            resolved_context_token = self._token_store.get(peer_user_id)
+
+        # Send caption if provided
+        if caption:
+            await self.send_text(
+                peer_user_id=peer_user_id,
+                text=caption,
+                context_token=resolved_context_token,
+            )
+
+        # Build media item
+        aes_key_for_api = base64.b64encode(aes_key.hex().encode("ascii")).decode("ascii")
+        item_kwargs = {
+            "encrypt_query_param": encrypted_query_param,
+            "aes_key_for_api": aes_key_for_api,
+            "ciphertext_size": len(ciphertext),
+            "plaintext_size": rawsize,
+            "filename": path.name,
+            "rawfilemd5": rawfilemd5,
+        }
+        media_item = item_builder(**item_kwargs)
+
+        # Send media message
+        client_id = str(uuid.uuid4())
+        message: dict[str, Any] = {
+            "from_user_id": "",
+            "to_user_id": peer_user_id,
+            "client_id": client_id,
+            "message_type": 2,  # MSG_TYPE_BOT
+            "message_state": 2,  # MSG_STATE_FINISH
+            "item_list": [media_item],
+        }
+        if resolved_context_token:
+            message["context_token"] = resolved_context_token
+
+        payload = {
+            "base_info": {"channel_version": "2.2.0"},
+            "msg": message,
+        }
+
+        return await self._post_json("ilink/bot/sendmessage", payload)
+
+    async def send_image(
+        self,
+        *,
+        peer_user_id: str,
+        image_path: str,
+        caption: str = "",
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an image file to WeChat user."""
+        return await self.send_file(
+            peer_user_id=peer_user_id,
+            file_path=image_path,
+            caption=caption,
+            context_token=context_token,
+        )
+
+    async def send_document(
+        self,
+        *,
+        peer_user_id: str,
+        file_path: str,
+        caption: str = "",
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a document file to WeChat user."""
+        return await self.send_file(
+            peer_user_id=peer_user_id,
+            file_path=file_path,
+            caption=caption,
+            context_token=context_token,
+        )
+
+    async def send_video(
+        self,
+        *,
+        peer_user_id: str,
+        video_path: str,
+        caption: str = "",
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a video file to WeChat user."""
+        return await self.send_file(
+            peer_user_id=peer_user_id,
+            file_path=video_path,
+            caption=caption,
+            context_token=context_token,
+        )
+
+    # ===== Private Helper Methods =====
+
+    async def _get_upload_url(
+        self,
+        *,
+        to_user_id: str,
+        media_type: int,
+        filekey: str,
+        rawsize: int,
+        rawfilemd5: str,
+        filesize: int,
+        aeskey_hex: str,
+    ) -> dict[str, Any]:
+        """Get upload URL from iLink API."""
+        payload = {
+            "base_info": {"channel_version": "2.2.0"},
+            "filekey": filekey,
+            "media_type": media_type,
+            "to_user_id": to_user_id,
+            "rawsize": rawsize,
+            "rawfilemd5": rawfilemd5,
+            "filesize": filesize,
+            "no_need_thumb": True,
+            "aeskey": aeskey_hex,
+        }
+        return await self._post_json(EP_GET_UPLOAD_URL, payload)
+
+    async def _upload_ciphertext(self, ciphertext: bytes, upload_url: str) -> str:
+        """Upload encrypted media to the CDN."""
+        resp = await self._http.post(
+            upload_url,
+            content=ciphertext,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        encrypted_param = resp.headers.get("x-encrypted-param")
+        if encrypted_param:
+            return encrypted_param
+        raise RuntimeError(f"CDN upload missing x-encrypted-param header: {resp.text[:200]}")
+
+    def _cdn_upload_url(self, upload_param: str, filekey: str) -> str:
+        """Construct CDN upload URL."""
+        cdn_base = self.config.cdn_base_url or WEIXIN_CDN_BASE_URL
+        return (
+            f"{cdn_base.rstrip('/')}/upload"
+            f"?encrypted_query_param={quote(upload_param, safe='')}"
+            f"&filekey={quote(filekey, safe='')}"
+        )
+
+    def _outbound_media_builder(self, path: str) -> tuple[int, Any]:
+        """Determine media type and item builder for a file path."""
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+        if mime.startswith("image/"):
+            return MEDIA_IMAGE, lambda **kw: {
+                "type": ITEM_IMAGE,
+                "image_item": {
+                    "media": {
+                        "encrypt_query_param": kw["encrypt_query_param"],
+                        "aes_key": kw["aes_key_for_api"],
+                        "encrypt_type": 1,
+                    },
+                    "mid_size": kw["ciphertext_size"],
+                },
+            }
+
+        if mime.startswith("video/"):
+            return MEDIA_VIDEO, lambda **kw: {
+                "type": ITEM_VIDEO,
+                "video_item": {
+                    "media": {
+                        "encrypt_query_param": kw["encrypt_query_param"],
+                        "aes_key": kw["aes_key_for_api"],
+                        "encrypt_type": 1,
+                    },
+                    "video_size": kw["ciphertext_size"],
+                    "play_length": kw.get("play_length", 0),
+                    "video_md5": kw.get("rawfilemd5", ""),
+                },
+            }
+
+        # Default to file type
+        return MEDIA_FILE, lambda **kw: {
+            "type": ITEM_FILE,
+            "file_item": {
+                "media": {
+                    "encrypt_query_param": kw["encrypt_query_param"],
+                    "aes_key": kw["aes_key_for_api"],
+                    "encrypt_type": 1,
+                },
+                "file_name": kw["filename"],
+                "len": str(kw["plaintext_size"]),
+            },
+        }

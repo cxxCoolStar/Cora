@@ -3,9 +3,11 @@ from __future__ import annotations
 from io import BytesIO
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import UploadFile
 
+from core.channels.wechat.ilink_client import WechatIlinkClient
 from core.channels.wechat.types import WechatHandleResult, WechatInboundEvent
 from core.clawbot.service import ClawBotService
 from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository
@@ -22,10 +24,12 @@ class WechatGatewayService:
         clawbot_service: ClawBotService,
         event_repository: ChannelEventRepository,
         session_map_repository: ChannelSessionMapRepository,
+        ilink_client: WechatIlinkClient | None = None,
     ) -> None:
         self.clawbot_service = clawbot_service
         self.event_repository = event_repository
         self.session_map_repository = session_map_repository
+        self._ilink_client = ilink_client
 
     async def handle_inbound_event(self, *, event: WechatInboundEvent) -> WechatHandleResult:
         logger.info(
@@ -91,3 +95,40 @@ class WechatGatewayService:
             reply=response.reply,
             action=response.action,
         )
+
+    async def send_file_to_user(
+        self,
+        *,
+        user_id: str,
+        file_path: str,
+        caption: str = "",
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a file to a WeChat user.
+
+        Args:
+            user_id: Target WeChat user ID
+            file_path: Local file path to send
+            caption: Optional caption text
+            context_token: Optional context token for the session
+
+        Returns:
+            API response from iLink
+        """
+        if self._ilink_client is None:
+            raise RuntimeError("ilink_client not configured")
+
+        logger.info(
+            "wechat gateway sending file user_id=%s file=%s caption=%s",
+            user_id,
+            file_path,
+            bool(caption),
+        )
+        result = await self._ilink_client.send_file(
+            peer_user_id=user_id,
+            file_path=file_path,
+            caption=caption,
+            context_token=context_token,
+        )
+        logger.info("wechat gateway file sent user_id=%s result=%s", user_id, result.get("ret"))
+        return result

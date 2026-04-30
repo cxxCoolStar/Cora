@@ -10,7 +10,11 @@ from fastapi import UploadFile
 from core.clawbot.planner import ToolPlan
 from core.ingestion.service import IngestionService
 from core.storage.models import ItemRecord
-from core.storage.repositories import ClarificationRepository, ItemRepository
+from core.storage.repositories import (
+    ChannelSessionMapRepository,
+    ClarificationRepository,
+    ItemRepository,
+)
 from core.tools import ToolInvocation, register_builtin_tools, registry
 from core.topics.service import TopicOrganizerService
 
@@ -36,11 +40,17 @@ class ArchiveToolExecutor:
         item_repository: ItemRepository,
         clarification_repository: ClarificationRepository,
         topic_organizer: TopicOrganizerService | None = None,
+        gateway_service: Any | None = None,
+        session_map_repository: ChannelSessionMapRepository | None = None,
+        channel_name: str = "wechat",
     ) -> None:
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
         self.clarification_repository = clarification_repository
         self.topic_organizer = topic_organizer
+        self.gateway_service = gateway_service
+        self.session_map_repository = session_map_repository
+        self.channel_name = channel_name
         register_builtin_tools()
 
     async def execute(
@@ -85,7 +95,19 @@ class ArchiveToolExecutor:
             text=None,
             upload=invocation.upload,
         )
-        return ToolExecutionResult(reply=saved.reply, action="capture", item_id=saved.item_id)
+        item = self.item_repository.get_any(item_id=saved.item_id)
+        return ToolExecutionResult(
+            reply=saved.reply,
+            action="capture",
+            item_id=saved.item_id,
+            metadata={
+                "context": {
+                    "working_set": [self._item_snapshot(item, rank=1)],
+                    "focus_item_id": saved.item_id,
+                    "last_action": "save_file",
+                }
+            },
+        )
 
     async def _tool_save_text(self, invocation: ToolInvocation) -> ToolExecutionResult:
         saved = await self.ingestion_service.ingest(
@@ -94,10 +116,40 @@ class ArchiveToolExecutor:
             text=str(invocation.plan.arguments.get("text") or invocation.text or ""),
             upload=None,
         )
-        return ToolExecutionResult(reply=saved.reply, action="capture", item_id=saved.item_id)
+        item = self.item_repository.get_any(item_id=saved.item_id)
+        return ToolExecutionResult(
+            reply=saved.reply,
+            action="capture",
+            item_id=saved.item_id,
+            metadata={
+                "context": {
+                    "working_set": [self._item_snapshot(item, rank=1)],
+                    "focus_item_id": saved.item_id,
+                    "last_action": "save_text",
+                }
+            },
+        )
 
     async def _tool_save_link(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        return await self._tool_save_text(invocation)
+        saved = await self.ingestion_service.ingest(
+            session_id=invocation.session_id,
+            source_message_id=invocation.source_message_id,
+            text=str(invocation.plan.arguments.get("text") or invocation.text or ""),
+            upload=None,
+        )
+        item = self.item_repository.get_any(item_id=saved.item_id)
+        return ToolExecutionResult(
+            reply=saved.reply,
+            action="capture",
+            item_id=saved.item_id,
+            metadata={
+                "context": {
+                    "working_set": [self._item_snapshot(item, rank=1)],
+                    "focus_item_id": saved.item_id,
+                    "last_action": "save_link",
+                }
+            },
+        )
 
     def _tool_overview_knowledge_base(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if self.topic_organizer is None:
@@ -259,6 +311,108 @@ class ArchiveToolExecutor:
             pending_payload={"text": invocation.text or "", "type": "capture_intent"},
         )
         return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
+
+    async def _tool_send_file_to_user(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        """Send a file from the wiki to the user via WeChat."""
+        if self.gateway_service is None:
+            return ToolExecutionResult(
+                reply="文件发送功能未配置。",
+                action="chat",
+            )
+
+        # Resolve target item
+        target = invocation.plan.arguments.get("target") or {}
+        target_type = str(target.get("type") or "focus_item").strip()
+        target_value = target.get("value")
+
+        try:
+            if target_type == "item_id":
+                item = self.item_repository.get_any(item_id=str(target_value))
+            elif target_type == "working_set_rank":
+                working_set = invocation.context.get("working_set") or []
+                rank = int(target_value or 1)
+                if 1 <= rank <= len(working_set):
+                    item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
+                    if item_id:
+                        item = self.item_repository.get_any(item_id=item_id)
+                    else:
+                        raise KeyError(f"Working-set item not found for rank {rank}")
+                else:
+                    raise KeyError(f"Working-set rank {rank} out of range")
+            else:
+                # focus_item
+                focus_item_id = str(invocation.context.get("focus_item_id") or "").strip()
+                if not focus_item_id:
+                    raise KeyError("No focus item is available")
+                item = self.item_repository.get_any(item_id=focus_item_id)
+        except KeyError as e:
+            return ToolExecutionResult(reply=f"无法找到要发送的文件: {e}", action="chat")
+
+        # Get stored file path from item metadata
+        metadata = item.metadata_json or {}
+        stored_path = metadata.get("stored_file_path")
+
+        if not stored_path:
+            return ToolExecutionResult(
+                reply=f"文件 `{item.title}` 没有可发送的存储路径。它可能是纯文本内容而非文件上传。",
+                action="chat",
+            )
+
+        # Check if file exists
+        path = Path(stored_path)
+        if not path.exists():
+            return ToolExecutionResult(
+                reply=f"文件 `{item.title}` 的存储路径已失效，可能已被移动或删除。",
+                action="chat",
+            )
+
+        # Get caption from arguments
+        caption = str(invocation.plan.arguments.get("caption") or "").strip()
+
+        # Get user_id from session mapping
+        if self.session_map_repository is None:
+            return ToolExecutionResult(
+                reply="会话映射未配置，无法发送文件。",
+                action="chat",
+            )
+
+        user_id = self.session_map_repository.get_external_user_id(
+            channel=self.channel_name,
+            session_id=invocation.session_id,
+        )
+
+        if not user_id:
+            return ToolExecutionResult(
+                reply="无法找到当前会话对应的用户，请确保通过正确的渠道发起对话。",
+                action="chat",
+            )
+
+        # Send file via gateway service
+        try:
+            result = await self.gateway_service.send_file_to_user(
+                user_id=user_id,
+                file_path=str(path),
+                caption=caption or f"这是您请求的文件：{item.title}",
+            )
+
+            if result.get("ret") in (0, None) and result.get("errcode") in (0, None):
+                return ToolExecutionResult(
+                    reply=f"✅ 文件 `{item.title}` 已发送成功！",
+                    action="retrieve",
+                    item_id=item.id,
+                )
+            else:
+                error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
+                return ToolExecutionResult(
+                    reply=f"❌ 文件发送失败：{error_msg}",
+                    action="chat",
+                )
+        except Exception as exc:
+            logger.exception("Failed to send file to user")
+            return ToolExecutionResult(
+                reply=f"❌ 文件发送出错：{exc}",
+                action="chat",
+            )
 
     def try_resolve_reference_clarification(self, *, text: str, pending_payload: dict[str, Any]) -> ItemRecord | None:
         working_set = pending_payload.get("working_set") or []

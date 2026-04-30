@@ -15,6 +15,7 @@ from core.llm.openai_client import OpenAIChatModelClient
 from core.llm.openai_vision_client import OpenAIVisionClient
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
+    ChannelSessionMapRepository,
     ClarificationRepository,
     ItemRepository,
     MessageRepository,
@@ -40,11 +41,18 @@ class ClawBotContainer:
     topic_repository: TopicRepository
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
+    tool_executor: ArchiveToolExecutor
     templates_dir: str
     templates_static_dir: str
 
     def initialize(self) -> None:
         self.database.create_all()
+
+    def configure_gateway(self, gateway_service: Any, session_map_repository: ChannelSessionMapRepository | None = None) -> None:
+        """Configure gateway service for file sending capabilities."""
+        self.tool_executor.gateway_service = gateway_service
+        self.tool_executor.session_map_repository = session_map_repository
+        self.tool_executor.channel_name = "wechat"
 
 
 _container: ClawBotContainer | None = None

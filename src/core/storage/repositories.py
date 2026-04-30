@@ -484,6 +484,21 @@ class ChannelSessionMapRepository:
             session.refresh(record)
             return record
 
+    def get_external_user_id(self, *, channel: str, session_id: str) -> str | None:
+        """Get external user ID by channel and session ID (reverse lookup)."""
+        with self.database.session() as session:
+            stmt = (
+                select(ChannelSessionMapRecord)
+                .where(
+                    ChannelSessionMapRecord.channel == channel,
+                    ChannelSessionMapRecord.session_id == session_id,
+                )
+                .order_by(desc(ChannelSessionMapRecord.updated_at))
+                .limit(1)
+            )
+            record = session.scalar(stmt)
+            return record.external_user_id if record is not None else None
+
 
 class ChannelEventRepository:
     def __init__(self, database: DatabaseManager) -> None:
