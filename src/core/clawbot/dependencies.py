@@ -120,6 +120,7 @@ def get_clawbot_container() -> ClawBotContainer:
             clarification_repository=clarification_repository,
             topic_organizer=topic_organizer,
         )
+        session_map_repository = ChannelSessionMapRepository(database)
         clawbot_service = ClawBotService(
             session_repository=session_repository,
             message_repository=message_repository,
@@ -145,8 +146,10 @@ def get_clawbot_container() -> ClawBotContainer:
             topic_repository=topic_repository,
             ingestion_service=ingestion_service,
             clawbot_service=clawbot_service,
+            tool_executor=tool_executor,
             templates_dir=templates_dir,
             templates_static_dir=static_dir,
+            _session_map_repository=session_map_repository,
         )
     return _container
 
