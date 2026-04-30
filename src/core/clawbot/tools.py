@@ -244,6 +244,17 @@ class ArchiveToolExecutor:
         )
         return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
 
+    def _tool_clarify_capture_intent(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        question = str(invocation.plan.arguments.get("question") or "").strip() or "这段内容你是想让我先保存，还是先帮你总结一下？"
+        self.clarification_repository.create(
+            session_id=invocation.session_id,
+            source_message_id=invocation.source_message_id,
+            question=question,
+            candidate_intents=["capture", "organize"],
+            pending_payload={"text": invocation.text or "", "type": "capture_intent"},
+        )
+        return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
+
     def try_resolve_reference_clarification(self, *, text: str, pending_payload: dict[str, Any]) -> ItemRecord | None:
         working_set = pending_payload.get("working_set") or []
         if not isinstance(working_set, list):
@@ -339,9 +350,9 @@ class ArchiveToolExecutor:
     def _format_summary_reply(self, *, item: ItemRecord) -> str:
         normalized_text = (item.normalized_text or "").strip()
         if normalized_text and len(normalized_text) <= self.FULL_TEXT_REPLY_THRESHOLD:
-            return f"这份资料 `{item.title}` 内容不长，我直接把全文发你：\n{normalized_text}"
-        reply = f"这份资料是：`{item.title}`。\n我先给你一个更清晰的摘要：{item.summary}"
-        if item.locator_hint:
+            return f"`{item.title}` 内容不长，我直接把全文发你：\n{normalized_text}"
+        reply = f"你说的是 `{item.title}`。\n我先给你一个摘要：{item.summary}"
+        if item.locator_hint and not normalized_text:
             reply += f"\n定位提示：{item.locator_hint}"
         return reply
 

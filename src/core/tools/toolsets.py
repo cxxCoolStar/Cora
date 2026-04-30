@@ -15,7 +15,7 @@ TOOLSETS: dict[str, dict[str, object]] = {
     },
     "agent_state": {
         "description": "Clarification and short-term conversation state management.",
-        "tools": ["clarify_reference"],
+        "tools": ["clarify_reference", "clarify_capture_intent"],
     },
     "wiki_maintenance": {
         "description": "Maintenance actions over the wiki/topic index.",

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import logging
 
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -29,28 +32,45 @@ class LLMIntentClassifier:
         prompt = (
             "You are classifying the intent of a message sent to a personal archive assistant.\n"
             "Choose exactly one intent from: capture, retrieve, organize, chat.\n"
-            "The user may ask follow-up questions about the last retrieved item; this should be organize (explain/summarize the retrieved content), not capture.\n"
+            "You must use the full conversation state, not just surface keywords.\n"
+            "If the user is referring to a current working set item or focus item, classify based on the action they want next rather than treating it as new content.\n"
+            "For example, '第一个给我看全文/这里面写了什么/展开讲讲' should usually be retrieve because the user wants to open or read an existing archived item.\n"
+            "Requests to summarize or reorganize an already selected item should be organize.\n"
             "If the message is ambiguous and should be clarified before action, set should_clarify to true.\n"
             "Examples:\n"
             "- A user asking to find something they saved before -> retrieve\n"
             "- A user sending content they want stored -> capture\n"
             "- A user asking for summary or organization -> organize\n"
             "- A greeting or casual conversation -> chat\n"
-            "- If conversation context includes a last_retrieved_item and the user asks '这里面写了什么/展开讲讲/详细一点', classify as organize\n"
+            "- If conversation context includes an active result and the user asks to read/open/see it, classify as retrieve\n"
             "Respond with strict JSON using keys: intent, confidence, reason, should_clarify, clarification_question.\n"
             "confidence must be one of: high, medium, low.\n"
             "clarification_question should be a short Chinese question when should_clarify is true, otherwise null."
         )
         context_block = ""
         if context:
-            last_title = str(context.get("last_retrieved_item_title") or "").strip()
-            last_summary = str(context.get("last_retrieved_item_summary") or "").strip()
-            if last_title or last_summary:
+            serialized_context = {
+                "has_upload": context.get("has_upload"),
+                "focus_item_id": context.get("focus_item_id"),
+                "focus_item_title": context.get("focus_item_title"),
+                "focus_item_summary": context.get("focus_item_summary"),
+                "last_action": context.get("last_action"),
+                "working_set": [
+                    {
+                        "rank": snapshot.get("rank"),
+                        "title": snapshot.get("title"),
+                        "summary": snapshot.get("summary"),
+                    }
+                    for snapshot in (context.get("working_set") or [])[:5]
+                    if isinstance(snapshot, dict)
+                ],
+            }
+            if any(serialized_context.values()):
                 context_block = (
-                    "\n\nConversation context (may be empty):\n"
-                    f"- last_retrieved_item_title: {last_title or '(none)'}\n"
-                    f"- last_retrieved_item_summary: {last_summary or '(none)'}\n"
+                    "\n\nConversation context (JSON):\n"
+                    f"{json.dumps(serialized_context, ensure_ascii=False)}\n"
                 )
+        logger.info("intent llm classify_start text=%s context=%s", text[:160], (context_block or "(empty)")[:1000])
         response = self.model_client.generate(
             messages=[
                 Message.system(session_id="intent-router", content=prompt + context_block),
@@ -59,6 +79,7 @@ class LLMIntentClassifier:
             tools=[],
         )
         content = (response.assistant_text or "").strip()
+        logger.info("intent llm classify_raw_output text=%s output=%s", text[:160], content[:1000])
         if not content:
             return None
         try:
@@ -68,11 +89,13 @@ class LLMIntentClassifier:
             try:
                 payload = json.loads(fenced)
             except json.JSONDecodeError:
+                logger.warning("intent llm classify_non_json text=%s output=%s", text[:160], content[:1000])
                 return None
         intent = str(payload.get("intent") or "").strip()
         confidence = str(payload.get("confidence") or "").strip()
         reason = str(payload.get("reason") or "").strip()
         if intent not in {"capture", "retrieve", "organize", "chat"}:
+            logger.warning("intent llm classify_invalid_intent text=%s payload=%s", text[:160], payload)
             return None
         if confidence not in {"high", "medium", "low"}:
             confidence = "low"
@@ -80,10 +103,19 @@ class LLMIntentClassifier:
         clarification_question = payload.get("clarification_question")
         if clarification_question is not None:
             clarification_question = str(clarification_question).strip() or None
-        return LLMIntentResult(
+        result = LLMIntentResult(
             intent=intent,
             confidence=confidence,
             reason=reason or "LLM classified this intent.",
             should_clarify=should_clarify,
             clarification_question=clarification_question,
         )
+        logger.info(
+            "intent llm classify_done text=%s intent=%s confidence=%s clarify=%s reason=%s",
+            text[:160],
+            result.intent,
+            result.confidence,
+            result.should_clarify,
+            result.reason,
+        )
+        return result

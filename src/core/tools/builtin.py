@@ -12,7 +12,14 @@ def register_builtin_tools() -> None:
             name="save_text",
             toolset="capture",
             description="Save plain text content into the personal wiki.",
-            schema={"name": "save_text", "description": "Save user text as a knowledge item."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The text content to save into the wiki."},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_save_text(invocation),
         )
     )
@@ -21,7 +28,14 @@ def register_builtin_tools() -> None:
             name="save_link",
             toolset="capture",
             description="Save a standalone link into the personal wiki.",
-            schema={"name": "save_link", "description": "Save user link as a knowledge item."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The standalone URL to save into the wiki."},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_save_link(invocation),
         )
     )
@@ -30,7 +44,7 @@ def register_builtin_tools() -> None:
             name="save_file",
             toolset="capture",
             description="Save an uploaded file into the personal wiki.",
-            schema={"name": "save_file", "description": "Save an uploaded file as a knowledge item."},
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=lambda executor, invocation: executor._tool_save_file(invocation),
         )
     )
@@ -39,7 +53,7 @@ def register_builtin_tools() -> None:
             name="overview_knowledge_base",
             toolset="wiki_browse",
             description="Show a high-level overview of the current knowledge base.",
-            schema={"name": "overview_knowledge_base", "description": "Summarize the current knowledge base overview."},
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=lambda executor, invocation: executor._tool_overview_knowledge_base(invocation),
             read_only=True,
         )
@@ -49,7 +63,7 @@ def register_builtin_tools() -> None:
             name="list_topics",
             toolset="wiki_browse",
             description="List topics currently available in the personal wiki.",
-            schema={"name": "list_topics", "description": "List current topics in the knowledge base."},
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=lambda executor, invocation: executor._tool_list_topics(invocation),
             read_only=True,
         )
@@ -59,7 +73,15 @@ def register_builtin_tools() -> None:
             name="open_topic",
             toolset="wiki_browse",
             description="Open a topic and return the most relevant items under it.",
-            schema={"name": "open_topic", "description": "Open the best matching topic for the query."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The user query to match against topics and archived items."},
+                    "top_k": {"type": "integer", "description": "How many topic candidates to consider.", "minimum": 1, "maximum": 5},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_open_topic(invocation),
             read_only=True,
         )
@@ -69,7 +91,33 @@ def register_builtin_tools() -> None:
             name="read_item",
             toolset="wiki_read",
             description="Read a specific item from the current working set or focus item.",
-            schema={"name": "read_item", "description": "Read full text or a selected view of a known item."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "description": "How to identify the item to read.",
+                            },
+                            "value": {
+                                "description": "The item identifier or working-set rank, depending on target.type.",
+                            },
+                        },
+                        "required": ["type", "value"],
+                        "additionalProperties": False,
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["summary", "full_text", "key_points"],
+                        "description": "How much of the item to return.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_read_item(invocation),
             read_only=True,
         )
@@ -79,7 +127,33 @@ def register_builtin_tools() -> None:
             name="summarize_item",
             toolset="wiki_read",
             description="Summarize a specific item from the current working set or focus item.",
-            schema={"name": "summarize_item", "description": "Summarize a known item."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "description": "How to identify the item to summarize.",
+                            },
+                            "value": {
+                                "description": "The item identifier or working-set rank, depending on target.type.",
+                            },
+                        },
+                        "required": ["type", "value"],
+                        "additionalProperties": False,
+                    },
+                    "style": {
+                        "type": "string",
+                        "enum": ["brief", "structured", "interview_notes"],
+                        "description": "The summary style to use.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_summarize_item(invocation),
             read_only=True,
         )
@@ -89,8 +163,35 @@ def register_builtin_tools() -> None:
             name="clarify_reference",
             toolset="agent_state",
             description="Ask the user which current result they mean.",
-            schema={"name": "clarify_reference", "description": "Clarify an ambiguous reference across the current working set."},
+            schema={
+                "type": "object",
+                "properties": {
+                    "reference_text": {"type": "string", "description": "The ambiguous user reference that needs clarification."},
+                },
+                "required": ["reference_text"],
+                "additionalProperties": False,
+            },
             handler=lambda executor, invocation: executor._tool_clarify_reference(invocation),
+            is_agent_stateful=True,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="clarify_capture_intent",
+            toolset="agent_state",
+            description="Ask whether a newly provided long passage should be saved or summarized first.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The clarification question to ask the user about save vs summarize.",
+                    },
+                },
+                "required": ["question"],
+                "additionalProperties": False,
+            },
+            handler=lambda executor, invocation: executor._tool_clarify_capture_intent(invocation),
             is_agent_stateful=True,
         )
     )

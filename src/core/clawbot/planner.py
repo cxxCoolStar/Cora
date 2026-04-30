@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-import re
+import logging
 from typing import Any
 
 from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.tools.toolsets import resolve_toolsets
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -15,33 +17,11 @@ class ToolPlan:
     tool: str
     arguments: dict[str, Any]
     reason: str
-    source: str = "heuristic"
+    source: str = "llm"
 
 
 class AgentPlanner:
     """Choose a constrained wiki tool based on the user turn and session state."""
-
-    REFERENCE_CUES = (
-        "这里面",
-        "这里",
-        "上面那个",
-        "上面的",
-        "刚才那个",
-        "那个文件",
-        "这个文件",
-        "这个文档",
-        "那个文档",
-        "全文",
-        "原文",
-        "完整内容",
-        "详细",
-        "展开",
-        "展开讲讲",
-        "写了什么",
-    )
-    FULL_TEXT_CUES = ("全文", "原文", "完整", "全部内容", "具体内容")
-    KNOWLEDGE_OVERVIEW_CUES = ("知识库中有什么", "知识库里有什么", "知识库概览", "我这里都存了什么", "现在都有什么")
-    LIST_TOPIC_CUES = ("有哪些topic", "有哪些主题", "列出topic", "列出主题", "topic列表", "主题列表")
     DEFAULT_TOOLSETS = ["capture", "wiki_browse", "wiki_read", "agent_state"]
 
     def __init__(self, model_client: ModelClient | None = None) -> None:
@@ -58,91 +38,14 @@ class AgentPlanner:
         content = (text or "").strip()
         if not content and not has_upload:
             return None
+        llm_content = content or "[file upload]"
 
-        heuristic = self._heuristic_plan(content=content, has_upload=has_upload, coarse_intent=coarse_intent, context=context or {})
-        llm_plan = self._llm_plan(content=content, has_upload=has_upload, coarse_intent=coarse_intent, context=context or {})
-        if llm_plan is not None:
-            return self._sanitize_plan(llm_plan, fallback=heuristic)
-        return heuristic
-
-    def _heuristic_plan(
-        self,
-        *,
-        content: str,
-        has_upload: bool,
-        coarse_intent: str,
-        context: dict[str, Any],
-    ) -> ToolPlan:
-        if has_upload:
-            return ToolPlan(tool="save_file", arguments={}, reason="File upload detected.")
-
-        working_set = context.get("working_set") or []
-        focus_item_id = context.get("focus_item_id")
-        rank = self._extract_rank(content)
-        if rank is not None and working_set:
-            mode = "full_text" if self._wants_full_text(content) else "summary"
-            tool = "read_item" if mode == "full_text" else "summarize_item"
-            return ToolPlan(
-                tool=tool,
-                arguments={
-                    "target": {"type": "working_set_rank", "value": rank},
-                    "mode": mode if tool == "read_item" else None,
-                    "style": "brief" if tool == "summarize_item" else None,
-                },
-                reason="The user referenced a ranked working-set result.",
-            )
-
-        if self._looks_like_reference_followup(content):
-            if focus_item_id:
-                if self._wants_full_text(content):
-                    return ToolPlan(
-                        tool="read_item",
-                        arguments={"target": {"type": "focus_item", "value": ""}, "mode": "full_text"},
-                        reason="Follow-up question about the current focus item.",
-                    )
-                return ToolPlan(
-                    tool="summarize_item",
-                    arguments={"target": {"type": "focus_item", "value": ""}, "style": "brief"},
-                    reason="Follow-up question about the current focus item.",
-                )
-            if len(working_set) > 1:
-                return ToolPlan(
-                    tool="clarify_reference",
-                    arguments={"reference_text": content},
-                    reason="The user referenced prior results, but multiple candidates are active.",
-                )
-
-        if coarse_intent == "retrieve":
-            if self._looks_like_knowledge_overview(content):
-                return ToolPlan(
-                    tool="overview_knowledge_base",
-                    arguments={},
-                    reason="The user is asking for a knowledge-base overview.",
-                )
-            if self._looks_like_topic_listing(content):
-                return ToolPlan(
-                    tool="list_topics",
-                    arguments={},
-                    reason="The user is asking for the current topic list.",
-                )
-            return ToolPlan(
-                tool="open_topic",
-                arguments={"query": content, "top_k": 3},
-                reason="The user is asking to open or find relevant material in the topic/wiki index.",
-            )
-
-        if coarse_intent == "organize" and focus_item_id:
-            return ToolPlan(
-                tool="summarize_item",
-                arguments={"target": {"type": "focus_item", "value": ""}, "style": "brief"},
-                reason="The user wants to summarize the current focus item.",
-            )
-
-        return ToolPlan(
-            tool="save_link" if self._looks_like_link(content) else "save_text",
-            arguments={"text": content},
-            reason="Default wiki capture action for incoming content.",
-        )
+        if self.model_client is None:
+            raise RuntimeError("AgentPlanner requires a model client; heuristic tool planning has been removed.")
+        llm_plan = self._llm_plan(content=llm_content, has_upload=has_upload, coarse_intent=coarse_intent, context=context or {})
+        if llm_plan is None:
+            raise RuntimeError("AgentPlanner did not receive a usable LLM plan.")
+        return self._sanitize_plan(llm_plan)
 
     def _llm_plan(
         self,
@@ -155,25 +58,42 @@ class AgentPlanner:
         if self.model_client is None or not content:
             return None
         allowed_tools = ", ".join(resolve_toolsets(self.DEFAULT_TOOLSETS))
+        working_set = context.get("working_set", [])[:5]
         prompt = (
             "You are choosing one tool for a personal wiki assistant.\n"
             f"Allowed tools: {allowed_tools}.\n"
-            "Rules:\n"
+            "You must reason over the active conversation state, not just the latest utterance.\n"
+            "Decision policy:\n"
             "- If the user asks what exists in the knowledge base, use overview_knowledge_base or list_topics.\n"
             "- If the user asks to find or open earlier material, prefer open_topic.\n"
-            "- If the user asks about a current file/result ('this', 'that', 'the second one', 'full text'), prefer read_item or summarize_item.\n"
+            "- If the user refers to earlier results using phrases like '第一个', '第二个', '这个', '那个', '上一个', or a title fragment, treat it as a reference to the current working_set or focus_item rather than a new search.\n"
+            "- If the user asks to '看看', '打开', '给我看', '展开', or asks for the full content, prefer read_item.\n"
+            "- If the user asks to summarize, outline, or extract key points, prefer summarize_item.\n"
+            "- If a ranked reference and a title hint both appear, treat that as a high-confidence reference and do not ask for clarification.\n"
             "- If the user submits a standalone URL, prefer save_link.\n"
             "- Otherwise, new material should usually be saved with save_text or save_file.\n"
-            "- If the target is ambiguous and there are multiple active candidates, use clarify_reference.\n"
+            "- Use clarify_reference only when the target truly cannot be resolved from the current working_set or focus_item.\n"
             "- Do not invent item IDs.\n"
-            "- Return strict JSON with keys: tool, arguments, reason.\n"
+            "- Return strict JSON with keys: tool, reason, and optionally query, text, target_rank, target_title_hint, reference_strategy, mode, style, reference_text.\n"
+            "- Valid reference_strategy values are: working_set_selection, focus_item, direct_item_id, ambiguous_reference.\n"
         )
         state_json = json.dumps(
             {
                 "has_upload": has_upload,
                 "coarse_intent": coarse_intent,
                 "focus_item_id": context.get("focus_item_id"),
-                "working_set": context.get("working_set", [])[:5],
+                "focus_item_title": context.get("focus_item_title"),
+                "focus_item_summary": context.get("focus_item_summary"),
+                "last_action": context.get("last_action"),
+                "working_set": [
+                    {
+                        "rank": snapshot.get("rank"),
+                        "item_id": snapshot.get("item_id"),
+                        "title": snapshot.get("title"),
+                        "summary": snapshot.get("summary"),
+                    }
+                    for snapshot in working_set
+                ],
             },
             ensure_ascii=False,
         )
@@ -185,6 +105,7 @@ class AgentPlanner:
             tools=[],
         )
         raw = (response.assistant_text or "").strip()
+        logger.info("planner llm_raw_output content=%s output=%s", content[:120], raw[:1000])
         if not raw:
             return None
         try:
@@ -196,13 +117,59 @@ class AgentPlanner:
             except json.JSONDecodeError:
                 return None
         tool = str(payload.get("tool") or "").strip()
-        arguments = payload.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            return None
+        arguments = self._build_llm_arguments(payload=payload, content=content)
         reason = str(payload.get("reason") or "LLM selected a wiki tool.").strip()
+        logger.info(
+            "planner llm_decision content=%s tool=%s reason=%s arguments=%s",
+            content[:120],
+            tool,
+            reason[:240],
+            json.dumps(arguments, ensure_ascii=False),
+        )
         return ToolPlan(tool=tool, arguments=arguments, reason=reason, source="llm")
 
-    def _sanitize_plan(self, plan: ToolPlan, *, fallback: ToolPlan) -> ToolPlan:
+    @staticmethod
+    def _build_llm_arguments(*, payload: dict[str, Any], content: str) -> dict[str, Any]:
+        arguments = payload.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        tool = str(payload.get("tool") or "").strip()
+        if tool in {"save_text", "save_link"}:
+            return {"text": str(payload.get("text") or arguments.get("text") or content).strip()}
+
+        if tool == "open_topic":
+            query = str(payload.get("query") or arguments.get("query") or content).strip()
+            top_k = payload.get("top_k") or arguments.get("top_k") or 3
+            return {"query": query, "top_k": top_k}
+
+        if tool in {"read_item", "summarize_item"}:
+            target = arguments.get("target")
+            if not isinstance(target, dict):
+                reference_strategy = str(payload.get("reference_strategy") or "").strip()
+                if reference_strategy == "focus_item":
+                    target = {"type": "focus_item", "value": ""}
+                elif reference_strategy == "direct_item_id":
+                    target = {"type": "item_id", "value": str(payload.get("target_item_id") or "").strip()}
+                elif payload.get("target_rank") is not None:
+                    target = {"type": "working_set_rank", "value": payload.get("target_rank")}
+                else:
+                    target = {}
+            built: dict[str, Any] = {"target": target}
+            if tool == "read_item":
+                built["mode"] = str(payload.get("mode") or arguments.get("mode") or "summary").strip()
+            else:
+                built["style"] = str(payload.get("style") or arguments.get("style") or "brief").strip()
+            if payload.get("target_title_hint"):
+                built["target_title_hint"] = str(payload.get("target_title_hint"))
+            return built
+
+        if tool == "clarify_reference":
+            return {"reference_text": str(payload.get("reference_text") or arguments.get("reference_text") or content).strip()}
+
+        return arguments
+
+    def _sanitize_plan(self, plan: ToolPlan) -> ToolPlan:
         alias_map = {
             "save_text_or_link": "save_text",
             "search_items": "open_topic",
@@ -211,15 +178,15 @@ class AgentPlanner:
         normalized_tool = alias_map.get(plan.tool, plan.tool)
         allowed = set(resolve_toolsets(self.DEFAULT_TOOLSETS))
         if normalized_tool not in allowed:
-            return fallback
+            raise ValueError(f"Planner selected unsupported tool: {normalized_tool}")
 
         if normalized_tool in {"save_file", "overview_knowledge_base", "list_topics"}:
-            return ToolPlan(tool=normalized_tool, arguments={}, reason=plan.reason or fallback.reason, source=plan.source)
+            return ToolPlan(tool=normalized_tool, arguments={}, reason=plan.reason or "LLM selected a wiki tool.", source=plan.source)
 
         if normalized_tool == "open_topic":
             query = str(plan.arguments.get("query") or "").strip()
             if not query:
-                return fallback
+                raise ValueError("Planner selected open_topic without a query.")
             top_k = int(plan.arguments.get("top_k") or 3)
             top_k = max(1, min(5, top_k))
             return ToolPlan(tool="open_topic", arguments={"query": query, "top_k": top_k}, reason=plan.reason, source=plan.source)
@@ -227,12 +194,15 @@ class AgentPlanner:
         if normalized_tool in {"read_item", "summarize_item"}:
             target = plan.arguments.get("target")
             if not isinstance(target, dict):
-                return fallback
+                raise ValueError(f"Planner selected {normalized_tool} without a target object.")
             target_type = str(target.get("type") or "").strip()
             target_value = target.get("value")
             if target_type not in {"item_id", "focus_item", "working_set_rank"}:
-                return fallback
+                raise ValueError(f"Planner selected {normalized_tool} with invalid target type: {target_type}")
             args: dict[str, Any] = {"target": {"type": target_type, "value": target_value}}
+            title_hint = str(plan.arguments.get("target_title_hint") or "").strip()
+            if title_hint:
+                args["target_title_hint"] = title_hint
             if normalized_tool == "read_item":
                 mode = str(plan.arguments.get("mode") or "summary").strip()
                 if mode not in {"summary", "full_text", "key_points"}:
@@ -255,7 +225,7 @@ class AgentPlanner:
 
         text = str(plan.arguments.get("text") or "").strip()
         if not text:
-            return fallback
+            raise ValueError(f"Planner selected {normalized_tool} without text.")
         chosen = normalized_tool if normalized_tool in {"save_text", "save_link"} else "save_text"
         return ToolPlan(
             tool=chosen,
@@ -263,45 +233,3 @@ class AgentPlanner:
             reason=plan.reason,
             source=plan.source,
         )
-
-    @classmethod
-    def _extract_rank(cls, content: str) -> int | None:
-        mapping = {
-            "第一个": 1,
-            "第二个": 2,
-            "第三个": 3,
-            "第1个": 1,
-            "第2个": 2,
-            "第3个": 3,
-            "1号": 1,
-            "2号": 2,
-            "3号": 3,
-        }
-        for phrase, rank in mapping.items():
-            if phrase in content:
-                return rank
-        match = re.search(r"第\s*([1-9])\s*个", content)
-        if match:
-            return int(match.group(1))
-        return None
-
-    @classmethod
-    def _looks_like_reference_followup(cls, content: str) -> bool:
-        return any(token in content for token in cls.REFERENCE_CUES)
-
-    @classmethod
-    def _wants_full_text(cls, content: str) -> bool:
-        return any(token in content for token in cls.FULL_TEXT_CUES)
-
-    @classmethod
-    def _looks_like_knowledge_overview(cls, content: str) -> bool:
-        return any(token in content for token in cls.KNOWLEDGE_OVERVIEW_CUES)
-
-    @classmethod
-    def _looks_like_topic_listing(cls, content: str) -> bool:
-        compact = content.replace(" ", "").lower()
-        return any(token in compact for token in cls.LIST_TOPIC_CUES)
-
-    @staticmethod
-    def _looks_like_link(content: str) -> bool:
-        return content.startswith(("http://", "https://")) and " " not in content and "\n" not in content

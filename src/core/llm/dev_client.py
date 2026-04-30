@@ -14,9 +14,9 @@ class DevelopmentModelClient(ModelClient):
 
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
-        latest_tool = next((message for message in reversed(messages) if message.role == "tool"), None)
+        latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
 
-        if latest_tool and (not latest_user or latest_tool.created_at >= latest_user.created_at):
+        if latest_tool is not None:
             tool_name = latest_tool.name or "tool"
             return ModelResponse(assistant_text=f"Tool `{tool_name}` returned: {latest_tool.content}")
 

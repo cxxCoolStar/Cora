@@ -18,8 +18,10 @@ from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
 from core.clawbot import dependencies as deps  # noqa: E402
 from core.clawbot.dependencies import ClawBotContainer  # noqa: E402
 from core.config import CoreSettings  # noqa: E402
+from core.clawbot.intent_llm import LLMIntentClassifier  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
+from core.clawbot.planner import AgentPlanner  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
 from core.clawbot.tools import ArchiveToolExecutor  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
@@ -30,7 +32,7 @@ from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
 from core.schemas.message import Message  # noqa: E402
 from core.schemas.model import ModelResponse  # noqa: E402
-from core.schemas.tool import ToolSpec  # noqa: E402
+from core.schemas.tool import ToolCall, ToolSpec  # noqa: E402
 
 
 class FakeLLMIntentClassifier:
@@ -43,9 +45,57 @@ class FakeLLMIntentClassifier:
 
 class StubTopicModelClient(ModelClient):
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
-        system_prompt = messages[0].content if messages else ""
-        user_text = messages[-1].content if messages else ""
-        if "topic-query-router" in (messages[0].session_id if messages else "") or "existing_topics" in user_text and "query" in user_text:
+        session_id = messages[0].session_id if messages else ""
+        latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
+        latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
+        user_text = latest_user.content if latest_user else ""
+
+        if tools:
+            if latest_tool is not None:
+                return ModelResponse(assistant_text=latest_tool.content)
+
+            lowered = user_text.lower()
+            if user_text == "[file upload: note.txt]" or user_text.startswith("[file upload:"):
+                return ModelResponse(tool_calls=[ToolCall(tool_name="save_file", arguments={})])
+            if "知识库" in user_text and ("有什么" in user_text or "概览" in user_text):
+                return ModelResponse(tool_calls=[ToolCall(tool_name="overview_knowledge_base", arguments={})])
+            if "主题" in user_text or "topic" in lowered:
+                return ModelResponse(tool_calls=[ToolCall(tool_name="list_topics", arguments={})])
+            if "第二个" in user_text and ("全文" in user_text or "给我" in user_text):
+                return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "working_set_rank", "value": 2}, "mode": "full_text"})])
+            if "第一个" in user_text and "面试宝典" in user_text:
+                return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "working_set_rank", "value": 1}, "mode": "full_text"})])
+            if "这里面写了什么" in user_text or "展开讲讲" in user_text:
+                return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "focus_item", "value": ""}, "mode": "full_text"})])
+            if user_text.startswith("http://") or user_text.startswith("https://"):
+                return ModelResponse(tool_calls=[ToolCall(tool_name="save_link", arguments={"text": user_text})])
+            if "帮我找" in user_text or "帮我查" in user_text or "查一下" in user_text or "告诉我" in user_text:
+                return ModelResponse(tool_calls=[ToolCall(tool_name="open_topic", arguments={"query": user_text, "top_k": 3})])
+            if "总结" in user_text:
+                return ModelResponse(tool_calls=[ToolCall(tool_name="summarize_item", arguments={"target": {"type": "focus_item", "value": ""}, "style": "brief"})])
+            if user_text in {"你好", "您好", "hi", "hello"}:
+                return ModelResponse(assistant_text="你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。")
+            if len(user_text) >= 120 or ("\n" in user_text and len(user_text) >= 40):
+                return ModelResponse(tool_calls=[ToolCall(tool_name="clarify_capture_intent", arguments={"question": "这段内容你是想让我先保存，还是先帮你总结一下？"})])
+            return ModelResponse(tool_calls=[ToolCall(tool_name="save_text", arguments={"text": user_text})])
+
+        if session_id == "clarification-router":
+            if "保存" in user_text:
+                return ModelResponse(assistant_text='{"action":"capture","reason":"The user wants the earlier content saved."}')
+            if "总结" in user_text or "整理" in user_text:
+                return ModelResponse(assistant_text='{"action":"organize","reason":"The user wants a summary first."}')
+            if "取消" in user_text or "算了" in user_text or "不用" in user_text:
+                return ModelResponse(assistant_text='{"action":"cancel","reason":"The user cancelled the operation."}')
+            return ModelResponse(assistant_text='{"action":"unresolved","reason":"Still ambiguous."}')
+
+        if session_id == "reference-router":
+            if "第一个" in user_text or "面试宝典" in user_text:
+                return ModelResponse(assistant_text='{"action":"select","rank":1,"reason":"The user selected the first item."}')
+            if "第二个" in user_text:
+                return ModelResponse(assistant_text='{"action":"select","rank":2,"reason":"The user selected the second item."}')
+            return ModelResponse(assistant_text='{"action":"unresolved","reason":"Still ambiguous."}')
+
+        if "topic-query-router" in session_id or "existing_topics" in user_text and "query" in user_text:
             if "网络配置" in user_text or "内网" in user_text:
                 return ModelResponse(assistant_text='{"topic_slugs":["网络配置"],"reason":"Query is asking about network configuration."}')
             if "面试" in user_text:
@@ -60,6 +110,22 @@ class StubTopicModelClient(ModelClient):
         if "agent" in user_text.lower() or "react" in user_text.lower() or "memory" in user_text.lower():
             return ModelResponse(assistant_text='{"topic_name":"AI资料","slug":"ai资料","summary":"Agent、ReAct、Memory 等 AI 学习资料。","tags":["agent","ai"],"reason":"The item is about AI learning materials."}')
         return ModelResponse(assistant_text='{"topic_name":"杂项资料","slug":"杂项资料","summary":"一般资料。","tags":[],"reason":"Generic archive item."}')
+
+
+class StubPlannerModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        user_text = messages[-1].content if messages else ""
+        if "第一个" in user_text and "面试宝典" in user_text:
+            return ModelResponse(
+                assistant_text='{"tool":"read_item","reason":"用户明确引用上一轮结果的第一个条目，并要求查看内容。","reference_strategy":"working_set_selection","target_rank":1,"target_title_hint":"面试宝典","mode":"full_text"}'
+            )
+        if "这里面写了什么" in user_text:
+            return ModelResponse(
+                assistant_text='{"tool":"read_item","reason":"用户在追问当前 focus item 的正文内容。","reference_strategy":"focus_item","mode":"full_text"}'
+            )
+        return ModelResponse(
+            assistant_text='{"tool":"open_topic","reason":"默认按主题打开相关资料。","query":"' + user_text.replace('"', '\\"') + '","top_k":3}'
+        )
 
 
 def build_test_container(tmp_path: Path) -> ClawBotContainer:
@@ -98,6 +164,7 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         clarification_repository=clarification_repository,
         topic_organizer=topic_organizer,
     )
+    model_client = StubTopicModelClient()
     clawbot_service = ClawBotService(
         session_repository=session_repository,
         message_repository=message_repository,
@@ -107,6 +174,7 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
+        model_client=model_client,
         tool_executor=tool_executor,
         topic_organizer=topic_organizer,
     )
@@ -532,7 +600,7 @@ def test_follow_up_question_uses_focus_item_context(tmp_path):
 
     assert second.status_code == 200
     payload = second.json()
-    assert payload["action"] == "organize"
+    assert payload["action"] == "retrieve"
     assert "售前报价Agent系统" in payload["reply"]
     assert "24倍" in payload["reply"]
 
@@ -767,6 +835,55 @@ def test_list_topics_routes_to_topic_listing(tmp_path):
     payload = response.json()
     assert payload["action"] == "retrieve"
     assert "当前共有" in payload["reply"]
+
+
+def test_planner_uses_llm_reference_resolution_for_rank_plus_title():
+    planner = AgentPlanner(model_client=StubPlannerModelClient())
+
+    plan = planner.plan(
+        text="我想看看第一个，面试宝典",
+        has_upload=False,
+        coarse_intent="retrieve",
+        context={
+            "last_action": "open_topic",
+            "focus_item_id": "item-1",
+            "focus_item_title": "售前报价Agent-面试宝典",
+            "working_set": [
+                {"rank": 1, "item_id": "item-1", "title": "售前报价Agent-面试宝典", "summary": "面试资料"},
+                {"rank": 2, "item_id": "item-2", "title": "连接内网", "summary": "网络配置"},
+            ],
+        },
+    )
+
+    assert plan is not None
+    assert plan.source == "llm"
+    assert plan.tool == "read_item"
+    assert plan.arguments["target"]["type"] == "working_set_rank"
+    assert plan.arguments["target"]["value"] == 1
+    assert plan.arguments["mode"] == "full_text"
+    assert plan.arguments["target_title_hint"] == "面试宝典"
+
+
+def test_planner_uses_llm_focus_item_for_follow_up_read():
+    planner = AgentPlanner(model_client=StubPlannerModelClient())
+
+    plan = planner.plan(
+        text="这里面写了什么",
+        has_upload=False,
+        coarse_intent="organize",
+        context={
+            "last_action": "open_topic",
+            "focus_item_id": "item-1",
+            "focus_item_title": "售前报价Agent-面试宝典",
+            "working_set": [{"rank": 1, "item_id": "item-1", "title": "售前报价Agent-面试宝典", "summary": "面试资料"}],
+        },
+    )
+
+    assert plan is not None
+    assert plan.source == "llm"
+    assert plan.tool == "read_item"
+    assert plan.arguments["target"]["type"] == "focus_item"
+    assert plan.arguments["mode"] == "full_text"
 
 def test_llm_router_can_promote_ambiguous_text_to_capture():
     router = IntentRouter(

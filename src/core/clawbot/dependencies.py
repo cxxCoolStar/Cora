@@ -6,9 +6,6 @@ from pathlib import Path
 from fastapi import Request
 
 from core.config import CoreSettings
-from core.clawbot.intent_llm import LLMIntentClassifier
-from core.clawbot.intent_router import IntentRouter
-from core.clawbot.planner import AgentPlanner
 from core.clawbot.service import ClawBotService
 from core.clawbot.tools import ArchiveToolExecutor
 from core.ingestion.service import IngestionService
@@ -83,6 +80,8 @@ def get_clawbot_container() -> ClawBotContainer:
             )
         elif settings.debug:
             model_client = DevelopmentModelClient()
+        if model_client is None:
+            raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")
 
         topic_classifier = TopicClassifier(model_client=model_client)
         topic_organizer = TopicOrganizerService(
@@ -94,9 +93,6 @@ def get_clawbot_container() -> ClawBotContainer:
         )
         ingestion_service.topic_organizer = topic_organizer
 
-        llm_classifier = LLMIntentClassifier(model_client=model_client) if model_client else None
-        intent_router = IntentRouter(llm_classifier=llm_classifier)
-        planner = AgentPlanner(model_client=model_client)
         tool_executor = ArchiveToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
@@ -112,8 +108,7 @@ def get_clawbot_container() -> ClawBotContainer:
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,
             topic_repository=topic_repository,
-            intent_router=intent_router,
-            planner=planner,
+            model_client=model_client,
             tool_executor=tool_executor,
             topic_organizer=topic_organizer,
         )
