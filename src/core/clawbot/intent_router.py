@@ -26,15 +26,17 @@ class IntentRouter:
         "哈喽",
     }
     FALLBACK_CAPTURE_HINTS = ("请保存", "帮我保存", "先保存", "存一下", "帮我记", "收录")
-    FALLBACK_RETRIEVE_HINTS = ("找一下", "找出来", "找回", "告诉我", "我之前保存的", "之前保存的")
+    FALLBACK_RETRIEVE_HINTS = ("找一下", "找出来", "找回", "查一下", "查找", "查询", "告诉我", "我之前保存的", "之前保存的")
     FALLBACK_ORGANIZE_HINTS = ("总结", "整理", "分类", "提炼", "归纳")
+    FOLLOW_UP_REFERENCE_HINTS = ("这里面", "上面那个", "上面的", "刚才那个", "第二个", "第一个", "第三个", "全文", "原文", "展开", "详细", "写了什么", "讲了什么")
 
     def __init__(self, llm_classifier: LLMIntentClassifier | None = None) -> None:
         self.llm_classifier = llm_classifier
 
-    def decide(self, *, text: str | None, has_upload: bool) -> IntentDecision:
+    def decide(self, *, text: str | None, has_upload: bool, context: dict | None = None) -> IntentDecision:
         content = (text or "").strip()
         lowered = content.lower()
+        context = context or {}
 
         if has_upload:
             return IntentDecision(intent="capture", confidence="high", reason="File upload detected.", source="rule")
@@ -45,7 +47,15 @@ class IntentRouter:
         if self._is_url_only(content):
             return IntentDecision(intent="capture", confidence="high", reason="Standalone URL detected.", source="rule")
 
-        llm_decision = self._llm_decide(content)
+        if self._looks_like_contextual_followup(content=content, context=context):
+            return IntentDecision(
+                intent="organize",
+                confidence="high",
+                reason="Detected a follow-up reference to the current conversation working set.",
+                source="rule",
+            )
+
+        llm_decision = self._llm_decide(content, context=context)
         if llm_decision is not None:
             return llm_decision
 
@@ -109,10 +119,21 @@ class IntentRouter:
             return "cancel"
         return None
 
-    def _llm_decide(self, content: str) -> IntentDecision | None:
+    def _looks_like_contextual_followup(self, *, content: str, context: dict) -> bool:
+        if not content:
+            return False
+        if not (context.get("focus_item_id") or context.get("working_set")):
+            return False
+        return any(token in content for token in self.FOLLOW_UP_REFERENCE_HINTS)
+
+    def _llm_decide(self, content: str, *, context: dict | None) -> IntentDecision | None:
         if self.llm_classifier is None or not content:
             return None
-        result = self.llm_classifier.classify(text=content)
+        classify_with_context = getattr(self.llm_classifier, "classify_with_context", None)
+        if callable(classify_with_context):
+            result = classify_with_context(text=content, context=context)
+        else:
+            result = self.llm_classifier.classify(text=content)
         if result is None:
             return None
         if result.should_clarify:

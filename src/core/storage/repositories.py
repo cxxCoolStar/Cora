@@ -6,6 +6,8 @@ from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
 from core.storage.models import (
+    ChannelEventRecord,
+    ChannelSessionMapRecord,
     ClarificationStateRecord,
     ItemChunkRecord,
     ItemRecord,
@@ -63,6 +65,23 @@ class MessageRepository:
             stmt = select(MessageRecord).where(MessageRecord.session_id == session_id).order_by(MessageRecord.created_at)
             return list(session.scalars(stmt))
 
+    def get_latest_assistant_context(self, *, session_id: str) -> dict[str, Any] | None:
+        """Return the most recent assistant message context blob, if any."""
+        with self.database.session() as session:
+            stmt = (
+                select(MessageRecord)
+                .where(MessageRecord.session_id == session_id, MessageRecord.role == "assistant")
+                .order_by(desc(MessageRecord.created_at))
+                .limit(10)
+            )
+            records = list(session.scalars(stmt))
+        for record in records:
+            meta = record.metadata_json or {}
+            ctx = meta.get("context")
+            if isinstance(ctx, dict) and ctx:
+                return dict(ctx)
+        return None
+
 
 class ItemRepository:
     def __init__(self, database: DatabaseManager) -> None:
@@ -108,6 +127,13 @@ class ItemRepository:
             stmt = select(ItemRecord).order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
 
+    def get_any(self, *, item_id: str) -> ItemRecord:
+        with self.database.session() as session:
+            record = session.get(ItemRecord, item_id)
+            if record is None:
+                raise KeyError(f"Item not found: {item_id}")
+            return record
+
     def get(self, *, item_id: str, session_id: str) -> ItemRecord:
         with self.database.session() as session:
             stmt = select(ItemRecord).where(ItemRecord.id == item_id, ItemRecord.session_id == session_id)
@@ -116,10 +142,13 @@ class ItemRepository:
                 raise KeyError(f"Item not found: {item_id}")
             return record
 
-    def search_latest_by_text(self, *, session_id: str, query: str) -> ItemRecord | None:
+    def search_latest_by_text(self, *, session_id: str | None, query: str) -> ItemRecord | None:
         lowered = query.lower()
         with self.database.session() as session:
-            stmt = select(ItemRecord).where(ItemRecord.session_id == session_id).order_by(desc(ItemRecord.created_at))
+            stmt = select(ItemRecord)
+            if session_id is not None:
+                stmt = stmt.where(ItemRecord.session_id == session_id)
+            stmt = stmt.order_by(desc(ItemRecord.created_at))
             records = list(session.scalars(stmt))
         for record in records:
             haystack = " ".join([record.title, record.summary, record.normalized_text]).lower()
@@ -248,3 +277,85 @@ class UserSignalRepository:
                 .limit(limit)
             )
             return list(session.scalars(stmt))
+
+
+class ChannelSessionMapRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def get_session_id(self, *, channel: str, external_user_id: str) -> str | None:
+        with self.database.session() as session:
+            stmt = (
+                select(ChannelSessionMapRecord)
+                .where(
+                    ChannelSessionMapRecord.channel == channel,
+                    ChannelSessionMapRecord.external_user_id == external_user_id,
+                )
+                .order_by(desc(ChannelSessionMapRecord.updated_at))
+                .limit(1)
+            )
+            record = session.scalar(stmt)
+            return record.session_id if record is not None else None
+
+    def upsert(self, *, channel: str, external_user_id: str, session_id: str) -> ChannelSessionMapRecord:
+        with self.database.session() as session:
+            stmt = (
+                select(ChannelSessionMapRecord)
+                .where(
+                    ChannelSessionMapRecord.channel == channel,
+                    ChannelSessionMapRecord.external_user_id == external_user_id,
+                )
+                .order_by(desc(ChannelSessionMapRecord.updated_at))
+                .limit(1)
+            )
+            record = session.scalar(stmt)
+            if record is None:
+                record = ChannelSessionMapRecord(channel=channel, external_user_id=external_user_id, session_id=session_id)
+                session.add(record)
+            else:
+                record.session_id = session_id
+            session.commit()
+            session.refresh(record)
+            return record
+
+
+class ChannelEventRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def get(self, *, channel: str, external_event_id: str) -> ChannelEventRecord | None:
+        with self.database.session() as session:
+            stmt = (
+                select(ChannelEventRecord)
+                .where(
+                    ChannelEventRecord.channel == channel,
+                    ChannelEventRecord.external_event_id == external_event_id,
+                )
+                .order_by(desc(ChannelEventRecord.created_at))
+                .limit(1)
+            )
+            return session.scalar(stmt)
+
+    def create(
+        self,
+        *,
+        channel: str,
+        external_event_id: str,
+        external_user_id: str,
+        status: str,
+        session_id: str | None,
+        reply_preview: str | None,
+    ) -> ChannelEventRecord:
+        with self.database.session() as session:
+            record = ChannelEventRecord(
+                channel=channel,
+                external_event_id=external_event_id,
+                external_user_id=external_user_id,
+                status=status,
+                session_id=session_id,
+                reply_preview=reply_preview,
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record

@@ -5,6 +5,7 @@
 This document describes the technical design for `ClawBot V1`, based on the product requirements defined in:
 
 - [clawbot-v1-product-spec.md](C:/Users/asta1/ai-project/Cora/docs/clawbot-v1-product-spec.md)
+- [clawbot-agentic-tools-spec.md](C:/Users/asta1/ai-project/Cora/docs/clawbot-agentic-tools-spec.md)
 
 The goal is to implement the first working version of ClawBot as a reliable "personal archive assistant" that can:
 

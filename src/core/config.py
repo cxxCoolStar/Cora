@@ -15,6 +15,12 @@ class CoreSettings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     debug: bool = False
+    wechat_enabled: bool = False
+    wechat_token: str | None = None
+    wechat_account_id: str | None = None
+    wechat_account_name: str = "default"
+    wechat_base_url: str = "https://ilinkai.weixin.qq.com"
+    wechat_poll_timeout_seconds: int = 35
 
     model_config = SettingsConfigDict(
         env_prefix="CORA_",
@@ -26,3 +32,11 @@ class CoreSettings(BaseSettings):
     @property
     def clawbot_database_url(self) -> str:
         return f"sqlite:///{self.clawbot_database_path.as_posix()}"
+
+    @property
+    def cora_home_dir(self) -> Path:
+        return self.clawbot_database_path.parent
+
+    @property
+    def wechat_accounts_dir(self) -> Path:
+        return self.cora_home_dir / "wechat" / "accounts"

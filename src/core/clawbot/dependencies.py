@@ -8,7 +8,9 @@ from fastapi import Request
 from core.config import CoreSettings
 from core.clawbot.intent_llm import LLMIntentClassifier
 from core.clawbot.intent_router import IntentRouter
+from core.clawbot.planner import AgentPlanner
 from core.clawbot.service import ClawBotService
+from core.clawbot.tools import ArchiveToolExecutor
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
@@ -78,6 +80,13 @@ def get_clawbot_container() -> ClawBotContainer:
 
         llm_classifier = LLMIntentClassifier(model_client=model_client) if model_client else None
         intent_router = IntentRouter(llm_classifier=llm_classifier)
+        planner = AgentPlanner(model_client=model_client)
+        tool_executor = ArchiveToolExecutor(
+            ingestion_service=ingestion_service,
+            retrieval_service=retrieval_service,
+            item_repository=item_repository,
+            clarification_repository=clarification_repository,
+        )
         clawbot_service = ClawBotService(
             session_repository=session_repository,
             message_repository=message_repository,
@@ -88,6 +97,8 @@ def get_clawbot_container() -> ClawBotContainer:
             user_signal_repository=user_signal_repository,
             retrieval_service=retrieval_service,
             intent_router=intent_router,
+            planner=planner,
+            tool_executor=tool_executor,
         )
         templates_dir = str(Path(__file__).resolve().parents[1] / "api" / "templates")
         static_dir = str(Path(__file__).resolve().parents[1] / "api" / "static")

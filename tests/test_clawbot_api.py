@@ -13,6 +13,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.api.app import create_app  # noqa: E402
+from core.channels.wechat.service import WechatGatewayService  # noqa: E402
+from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
 from core.clawbot import dependencies as deps  # noqa: E402
 from core.clawbot.dependencies import ClawBotContainer  # noqa: E402
 from core.config import CoreSettings  # noqa: E402
@@ -22,7 +24,7 @@ from core.clawbot.service import ClawBotService  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.retrieval.service import RetrievalService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository  # noqa: E402
 
 
 class FakeLLMIntentClassifier:
@@ -393,6 +395,36 @@ def test_retrieve_short_material_returns_full_text(tmp_path):
     assert "10.30.1.127" in payload["reply"]
 
 
+def test_retrieve_can_search_across_sessions(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_a = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_a}/ingest",
+            data={"text": "请保存售前报价Agent系统的面试宝典，里面提到效率提升24倍。"},
+        )
+    )
+
+    session_b = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_b}/ingest",
+            data={"text": "帮我查一下我之前存的一份面试宝典"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "面试宝典" in payload["reply"]
+
+
 def test_natural_language_find_request_routes_to_retrieve(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()
@@ -420,6 +452,99 @@ def test_natural_language_find_request_routes_to_retrieve(tmp_path):
     payload = response.json()
     assert payload["action"] == "retrieve"
     assert "面试题" in payload["reply"]
+
+
+def test_follow_up_question_uses_focus_item_context(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存售前报价Agent系统的面试资料，里面提到核心数据是效率提升24倍。"},
+        )
+    )
+
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "帮我找一下售前报价Agent系统"},
+        )
+    )
+    assert first.status_code == 200
+    assert first.json()["action"] == "retrieve"
+
+    second = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "这里面写了什么"},
+        )
+    )
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["action"] == "organize"
+    assert "售前报价Agent系统" in payload["reply"]
+    assert "24倍" in payload["reply"]
+
+
+def test_working_set_can_resolve_second_result_full_text(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存第一份 Agent 学习资料，主要内容是关于 ReAct。"},
+        )
+    )
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存第二份 Agent 学习资料，主要内容是关于 Memory 设计。"},
+        )
+    )
+
+    search = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "帮我找一下 Agent 学习资料"},
+        )
+    )
+    assert search.status_code == 200
+    search_reply = search.json()["reply"]
+    assert "2." in search_reply
+    second_line = next(line for line in search_reply.splitlines() if line.startswith("2. "))
+    second_title = second_line.split(" - ", 1)[0].removeprefix("2. ").strip()
+
+    follow_up = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "第二个给我全文"},
+        )
+    )
+
+    assert follow_up.status_code == 200
+    payload = follow_up.json()
+    assert payload["action"] == "retrieve"
+    assert "全文" in payload["reply"]
+    assert second_title in payload["reply"]
 
 
 def test_upload_doc_is_parsed_as_document_when_possible(tmp_path):
@@ -498,3 +623,49 @@ def test_llm_router_can_request_clarification():
 
     assert decision.intent == "clarify"
     assert decision.needs_clarification is True
+
+
+def test_wechat_gateway_reuses_session_for_same_user(tmp_path):
+    container = build_test_container(tmp_path)
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-evt-1", user_id="wx-user-a", text="请保存：这是第一条微信消息")
+        )
+    )
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-evt-2", user_id="wx-user-a", text="请告诉我第一条微信消息是什么")
+        )
+    )
+
+    assert first.session_id == second.session_id
+    assert second.action in {"retrieve", "organize", "chat"}
+
+
+def test_wechat_gateway_deduplicates_same_event_id(tmp_path):
+    container = build_test_container(tmp_path)
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-dup-1", user_id="wx-user-b", text="请保存：重复事件测试")
+        )
+    )
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-dup-1", user_id="wx-user-b", text="请保存：重复事件测试")
+        )
+    )
+
+    assert first.deduplicated is False
+    assert second.deduplicated is True

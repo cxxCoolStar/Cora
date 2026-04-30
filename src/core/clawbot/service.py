@@ -15,6 +15,8 @@ from core.clawbot.schemas import (
     UserProfileSection,
 )
 from core.clawbot.intent_router import IntentRouter
+from core.clawbot.planner import AgentPlanner, ToolPlan
+from core.clawbot.tools import ArchiveToolExecutor, ToolExecutionResult
 from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
 from core.retrieval.service import RetrievalService
@@ -44,6 +46,8 @@ class ClawBotService:
         user_signal_repository: UserSignalRepository,
         retrieval_service: RetrievalService,
         intent_router: IntentRouter | None = None,
+        planner: AgentPlanner | None = None,
+        tool_executor: ArchiveToolExecutor | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -54,6 +58,13 @@ class ClawBotService:
         self.user_signal_repository = user_signal_repository
         self.retrieval_service = retrieval_service
         self.intent_router = intent_router or IntentRouter()
+        self.planner = planner or AgentPlanner()
+        self.tool_executor = tool_executor or ArchiveToolExecutor(
+            ingestion_service=ingestion_service,
+            retrieval_service=retrieval_service,
+            item_repository=item_repository,
+            clarification_repository=clarification_repository,
+        )
         self.user_profile_aggregator = UserProfileAggregator()
 
     def create_session(self) -> SessionRecord:
@@ -64,8 +75,36 @@ class ClawBotService:
         user_content = text or (upload.filename if upload and upload.filename else "")
         user_message = self.message_repository.add_user_message(session_id=session_id, content=user_content)
 
+        context = self._load_context(session_id=session_id)
+
         pending = self.clarification_repository.get_latest_pending(session_id=session_id)
         if pending is not None and text and not upload:
+            pending_payload = pending.pending_payload_json or {}
+            if pending_payload.get("type") == "reference_resolution":
+                resolved_item = self._resolve_reference_candidate(
+                    session_id=session_id,
+                    text=text,
+                    working_set=pending_payload.get("working_set") or [],
+                )
+                if resolved_item is not None:
+                    reply = self.tool_executor._format_item_reply(item=resolved_item, mode="full_text")
+                    self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                    assistant_metadata = self._build_assistant_metadata(
+                        action="retrieve",
+                        confidence="high",
+                        reason="Clarification resolved a working-set reference.",
+                        source="rule",
+                        tool="get_item",
+                        tool_arguments={"target": {"type": "item_id", "value": resolved_item.id}, "mode": "full_text"},
+                        context={
+                            "working_set": pending_payload.get("working_set") or [],
+                            "focus_item_id": resolved_item.id,
+                            "last_action": "get_item",
+                        },
+                    )
+                    self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=assistant_metadata)
+                    return IngestResponse(reply=reply, action="retrieve", item_id=resolved_item.id, decision_source="rule")
+
             action = self.intent_router.interpret_clarification_reply(text)
             if action == "capture":
                 pending_text = pending.pending_payload_json.get("text", "")
@@ -77,43 +116,27 @@ class ClawBotService:
                 )
                 reply = f"{saved_item.reply} I used your clarification to save the earlier content."
                 self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                self.message_repository.add_assistant_message(
-                    session_id=session_id,
-                    content=reply,
-                    metadata={"decision": {"action": "capture", "confidence": "high", "reason": "Clarification reply resolved pending save.", "source": "rule"}},
-                )
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="rule", tool="save_text_or_link", tool_arguments={"text": pending_text, "force_type": "auto"}, context=context))
                 return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="rule")
             if action == "organize":
                 pending_text = pending.pending_payload_json.get("text", "")
                 summary = self.ingestion_service.preview_summary(pending_text)
                 reply = f"Here is a quick summary of the earlier content: {summary}"
                 self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                self.message_repository.add_assistant_message(
-                    session_id=session_id,
-                    content=reply,
-                    metadata={"decision": {"action": "organize", "confidence": "high", "reason": "Clarification reply resolved pending organization.", "source": "rule"}},
-                )
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="organize", confidence="high", reason="Clarification reply resolved pending organization.", source="rule", tool="summarize_item", tool_arguments={"target": {"type": "inline_text", "value": ""}}, context=context))
                 return IngestResponse(reply=reply, action="organize", decision_source="rule")
             if action == "cancel":
                 reply = "Okay, I will leave that earlier content alone."
                 self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
-                self.message_repository.add_assistant_message(
-                    session_id=session_id,
-                    content=reply,
-                    metadata={"decision": {"action": "chat", "confidence": "high", "reason": "Clarification cancelled by user.", "source": "rule"}},
-                )
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence="high", reason="Clarification cancelled by user.", source="rule", tool="clarify_reference", tool_arguments={}, context=context))
                 return IngestResponse(reply=reply, action="chat", decision_source="rule")
 
         has_upload = upload is not None and bool((upload.filename or "").strip())
-        decision = self.intent_router.decide(text=text, has_upload=has_upload)
+        decision = self.intent_router.decide(text=text, has_upload=has_upload, context=context)
 
         if decision.intent == "chat":
             reply = "你好，我可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。"
-            self.message_repository.add_assistant_message(
-                session_id=session_id,
-                content=reply,
-                metadata={"decision": {"action": "chat", "confidence": decision.confidence, "reason": decision.reason, "source": decision.source}},
-            )
+            self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence=decision.confidence, reason=decision.reason, source=decision.source, tool="chat", tool_arguments={}, context=context))
             return IngestResponse(reply=reply, action="chat", decision_source=decision.source)
 
         if decision.intent == "clarify":
@@ -125,62 +148,46 @@ class ClawBotService:
                 candidate_intents=["capture", "organize"],
                 pending_payload={"text": text or ""},
             )
-            self.message_repository.add_assistant_message(
-                session_id=session_id,
-                content=reply,
-                metadata={"decision": {"action": "clarify", "confidence": decision.confidence, "reason": decision.reason, "source": decision.source}},
-            )
+            self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="clarify", confidence=decision.confidence, reason=decision.reason, source=decision.source, tool="clarify_reference", tool_arguments={"reference_text": text or ""}, context=context))
             return IngestResponse(reply=reply, action="clarify", needs_clarification=True, decision_source=decision.source)
 
-        if decision.intent == "retrieve":
-            result = self.retrieval_service.search(session_id=session_id, query=text or "")
-            if result is None:
-                reply = "我没有找到相关的已保存资料。你可以先发送内容给我保存，再来查询。"
-            else:
-                normalized_text = (result.item.normalized_text or "").strip()
-                if normalized_text and len(normalized_text) <= self.FULL_TEXT_REPLY_THRESHOLD:
-                    reply = (
-                        f"我找到了一条相关资料：`{result.item.title}`。\n"
-                        f"内容较短，直接给你全文：\n{normalized_text}"
-                    )
-                else:
-                    snippet = result.matched_chunk.content if result.matched_chunk is not None else result.item.summary
-                    reply = (
-                        f"我找到了一条相关资料：`{result.item.title}`。\n"
-                        f"摘要：{result.item.summary}\n"
-                        f"相关内容：{snippet}"
-                    )
-                if result.item.locator_hint:
-                    reply += f"\n定位提示：{result.item.locator_hint}"
-            self.message_repository.add_assistant_message(
-                session_id=session_id,
-                content=reply,
-                metadata={"decision": {"action": "retrieve", "confidence": decision.confidence, "reason": decision.reason, "source": decision.source}},
-            )
-            return IngestResponse(reply=reply, action="retrieve", decision_source=decision.source)
-
-        if decision.intent == "organize":
+        if decision.intent == "organize" and not context.get("focus_item_id") and not context.get("working_set"):
             base_text = text or ""
-            reply = f"我先理解成你想整理内容。当前版本的快速摘要是：{self.ingestion_service.preview_summary(base_text)}"
-            self.message_repository.add_assistant_message(
-                session_id=session_id,
-                content=reply,
-                metadata={"decision": {"action": "organize", "confidence": decision.confidence, "reason": decision.reason, "source": decision.source}},
-            )
-            return IngestResponse(reply=reply, action="organize", decision_source=decision.source)
+            reply = f"我先理解成你想整理这段新内容。当前版本的快速摘要是：{self.ingestion_service.preview_summary(base_text)}"
+            self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="organize", confidence=decision.confidence, reason="Inline summary for newly provided content.", source="rule", tool="summarize_inline", tool_arguments={"text": base_text}, context=context))
+            return IngestResponse(reply=reply, action="organize", decision_source="rule")
 
-        saved_item = await self.ingestion_service.ingest(
+        plan = self.planner.plan(text=text, has_upload=has_upload, coarse_intent=decision.intent, context=context)
+        if plan is None:
+            reply = "我暂时还不能理解这个请求，你可以换一种说法试试。"
+            self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence="low", reason="Planner returned no action.", source="fallback", tool="chat", tool_arguments={}, context=context))
+            return IngestResponse(reply=reply, action="chat", decision_source="fallback")
+
+        execution = await self.tool_executor.execute(
             session_id=session_id,
             source_message_id=user_message.id,
+            plan=plan,
             text=text,
             upload=upload,
+            context=context,
         )
-        self.message_repository.add_assistant_message(
-            session_id=session_id,
-            content=saved_item.reply,
-            metadata={"decision": {"action": "capture", "confidence": decision.confidence, "reason": decision.reason, "source": decision.source}},
+        assistant_metadata = self._build_assistant_metadata(
+            action=execution.action,
+            confidence=decision.confidence,
+            reason=plan.reason,
+            source=plan.source,
+            tool=plan.tool,
+            tool_arguments=plan.arguments,
+            context=(execution.metadata or {}).get("context") if execution.metadata else context,
         )
-        return IngestResponse(reply=saved_item.reply, action="capture", item_id=saved_item.item_id, decision_source=decision.source)
+        self.message_repository.add_assistant_message(session_id=session_id, content=execution.reply, metadata=assistant_metadata)
+        return IngestResponse(
+            reply=execution.reply,
+            action=execution.action,
+            item_id=execution.item_id,
+            needs_clarification=execution.needs_clarification,
+            decision_source=plan.source,
+        )
 
     async def reply(self, *, session_id: str, text: str) -> SessionReplyResponse:
         result = await self.ingest(session_id=session_id, text=text, upload=None)
@@ -283,3 +290,65 @@ class ClawBotService:
                 if message.role == "assistant" and message.metadata_json.get("decision")
             ],
         )
+
+    def _load_context(self, *, session_id: str) -> dict:
+        context = self.message_repository.get_latest_assistant_context(session_id=session_id) or {}
+        working_set = context.get("working_set") or []
+        focus_item_id = str(context.get("focus_item_id") or "").strip() or None
+        if focus_item_id:
+            try:
+                item = self.item_repository.get_any(item_id=focus_item_id)
+                context["focus_item_title"] = item.title or ""
+                context["focus_item_summary"] = item.summary or ""
+            except Exception:
+                context["focus_item_id"] = None
+        context["working_set"] = [snapshot for snapshot in working_set if isinstance(snapshot, dict)]
+        return context
+
+    def _build_assistant_metadata(
+        self,
+        *,
+        action: str,
+        confidence: str,
+        reason: str,
+        source: str,
+        tool: str,
+        tool_arguments: dict,
+        context: dict | None,
+    ) -> dict:
+        return {
+            "decision": {
+                "action": action,
+                "confidence": confidence,
+                "reason": reason,
+                "source": source,
+            },
+            "tool": {
+                "name": tool,
+                "arguments": tool_arguments,
+            },
+            "context": context or {},
+        }
+
+    def _resolve_reference_candidate(self, *, session_id: str, text: str, working_set: list[dict]) -> object | None:
+        rank = self._extract_rank_from_text(text)
+        if rank is not None and 1 <= rank <= len(working_set):
+            item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
+            if item_id:
+                return self.item_repository.get(item_id=item_id, session_id=session_id)
+        lowered = text.lower()
+        for snapshot in working_set:
+            title = str(snapshot.get("title") or "")
+            if title and (title in text or title.lower() in lowered):
+                item_id = str(snapshot.get("item_id") or "").strip()
+                if item_id:
+                    return self.item_repository.get_any(item_id=item_id)
+        return None
+
+    @staticmethod
+    def _extract_rank_from_text(text: str) -> int | None:
+        mappings = {"第一个": 1, "第二个": 2, "第三个": 3, "1": 1, "2": 2, "3": 3}
+        for phrase, rank in mappings.items():
+            if phrase == text.strip() or phrase in text:
+                return rank
+        return None

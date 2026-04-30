@@ -94,3 +94,27 @@ class UserSignalRecord(Base):
     source: Mapped[str] = mapped_column(String(64), default="ingestion")
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class ChannelSessionMapRecord(Base):
+    __tablename__ = "clawbot_channel_session_map"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    channel: Mapped[str] = mapped_column(String(32), index=True)
+    external_user_id: Mapped[str] = mapped_column(String(255), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class ChannelEventRecord(Base):
+    __tablename__ = "clawbot_channel_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    channel: Mapped[str] = mapped_column(String(32), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(255), index=True)
+    external_user_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="processed", index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_sessions.id"), nullable=True, index=True)
+    reply_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

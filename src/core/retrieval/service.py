@@ -65,6 +65,10 @@ class RetrievalService:
         self.query_rewriter = query_rewriter
 
     def search(self, *, session_id: str, query: str) -> RetrievalResult | None:
+        candidates = self.search_candidates(session_id=session_id, query=query, top_k=1)
+        return candidates[0] if candidates else None
+
+    def search_candidates(self, *, session_id: str, query: str, top_k: int = 3) -> list[RetrievalResult]:
         tokens: list[str]
         if self.query_rewriter is not None:
             rewritten = self.query_rewriter.rewrite(query=query)
@@ -76,7 +80,7 @@ class RetrievalService:
             tokens = self._tokenize(query)
         items = self.item_repository.list_all()
         if not items:
-            return None
+            return []
 
         item_scores: list[tuple[ItemRecord, int]] = []
         for item in items:
@@ -95,18 +99,20 @@ class RetrievalService:
 
         if not item_scores:
             fallback = self.item_repository.search_latest_by_text(
-                session_id=session_id,
+                session_id=None,
                 query=self._normalize_query_for_fallback(query),
             )
             if fallback is None:
-                return None
+                return []
             matched_chunk = self._best_chunk_for_item(item_id=fallback.id, query=query)
-            return RetrievalResult(item=fallback, matched_chunk=matched_chunk, score=1)
+            return [RetrievalResult(item=fallback, matched_chunk=matched_chunk, score=1)]
 
         item_scores.sort(key=lambda pair: pair[1], reverse=True)
-        best_item, best_score = item_scores[0]
-        matched_chunk = self._best_chunk_for_item(item_id=best_item.id, query=query)
-        return RetrievalResult(item=best_item, matched_chunk=matched_chunk, score=best_score)
+        results: list[RetrievalResult] = []
+        for item, score in item_scores[: max(1, top_k)]:
+            matched_chunk = self._best_chunk_for_item(item_id=item.id, query=query)
+            results.append(RetrievalResult(item=item, matched_chunk=matched_chunk, score=score))
+        return results
 
     def search_debug(self, *, session_id: str, query: str) -> RetrievalDebugResult:
         """Debug version of search that returns detailed trace of the retrieval pipeline."""
