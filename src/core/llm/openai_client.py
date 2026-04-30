@@ -58,6 +58,8 @@ class OpenAIChatModelClient(ModelClient):
             "role": message.role,
             "content": message.content,
         }
+        if message.role == "assistant" and message.tool_calls:
+            payload["tool_calls"] = message.tool_calls
         if message.role == "tool":
             payload["tool_call_id"] = message.tool_call_id
         if message.name:

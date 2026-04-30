@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from io import BytesIO
 import sys
 from pathlib import Path
@@ -44,6 +45,18 @@ class FakeLLMIntentClassifier:
 
 
 class StubTopicModelClient(ModelClient):
+    @staticmethod
+    def _tool_reply_text(content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+        if isinstance(payload, dict):
+            reply = payload.get("reply")
+            if isinstance(reply, str) and reply.strip():
+                return reply
+        return content
+
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         session_id = messages[0].session_id if messages else ""
         latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
@@ -52,7 +65,7 @@ class StubTopicModelClient(ModelClient):
 
         if tools:
             if latest_tool is not None:
-                return ModelResponse(assistant_text=latest_tool.content)
+                return ModelResponse(assistant_text=self._tool_reply_text(latest_tool.content))
 
             lowered = user_text.lower()
             if user_text == "[file upload: note.txt]" or user_text.startswith("[file upload:"):
@@ -691,6 +704,29 @@ def test_upload_md_is_parsed_as_document(tmp_path):
     assert len(items) == 1
     assert items[0]["item_type"] == "document"
     assert items[0]["title"] == "note"
+
+
+def test_upload_pdf_is_routed_through_docling_not_marked_unsupported(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("note.pdf", BytesIO(b"%PDF-1.4\nfake pdf bytes"), "application/pdf")}
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    assert payload["item_id"]
+
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    if item.item_type == "file_upload":
+        assert item.title == "note.pdf"
+        assert item.metadata_json.get("parse_status") == "failed"
+        assert item.metadata_json.get("file_suffix") == ".pdf"
+    else:
+        assert item.item_type == "document"
+        assert item.title == "note"
 
 
 def test_reupload_same_document_creates_new_version_and_hides_old_from_default_listing(tmp_path):

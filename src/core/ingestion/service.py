@@ -154,7 +154,7 @@ class IngestionService:
             source = FileSource(path=target, filename=upload.filename or target.name)
             if suffix == ".txt":
                 parsed = self.txt_parser.parse(source)
-            elif suffix in {".md", ".markdown", ".docx"}:
+            elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
                 try:
                     parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
                 except Exception as exc:

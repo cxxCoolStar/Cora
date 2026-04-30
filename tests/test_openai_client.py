@@ -105,3 +105,62 @@ def test_openai_client_sends_tools_and_messages():
     assert captured_request["json"]["tool_choice"] == "auto"
     assert captured_request["json"]["messages"][0]["role"] == "user"
     assert captured_request["json"]["tools"][0]["function"]["name"] == "echo"
+
+
+def test_openai_client_sends_assistant_tool_call_messages():
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["json"] = __import__("json").loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    model = OpenAIChatModelClient(
+        api_key="test-key",
+        model="gpt-test",
+        base_url="https://example.com/v1",
+        http_client=client,
+    )
+
+    result = model.generate(
+        messages=[
+            Message.assistant_tool_calls(
+                session_id="session-1",
+                content="Opening topic",
+                tool_calls=[
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "open_topic",
+                            "arguments": "{\"query\":\"内网\"}",
+                        },
+                    }
+                ],
+            ),
+            Message.tool(
+                session_id="session-1",
+                name="open_topic",
+                tool_call_id="call_123",
+                content='{"reply":"ok"}',
+            ),
+        ],
+        tools=[],
+    )
+
+    assert result.assistant_text == "done"
+    assert captured_request["json"]["messages"][0]["tool_calls"][0]["function"]["name"] == "open_topic"
+    assert captured_request["json"]["messages"][1]["tool_call_id"] == "call_123"

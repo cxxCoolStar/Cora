@@ -16,6 +16,7 @@ class Message(BaseModel):
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -30,6 +31,25 @@ class Message(BaseModel):
     @classmethod
     def assistant(cls, *, session_id: str, content: str, channel: str = "chat") -> "Message":
         return cls(session_id=session_id, role="assistant", content=content, channel=channel)
+
+    @classmethod
+    def assistant_tool_calls(
+        cls,
+        *,
+        session_id: str,
+        content: str,
+        tool_calls: list[dict[str, Any]],
+        channel: str = "chat",
+        metadata: dict[str, Any] | None = None,
+    ) -> "Message":
+        return cls(
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            channel=channel,
+            tool_calls=tool_calls,
+            metadata=metadata or {},
+        )
 
     @classmethod
     def tool(

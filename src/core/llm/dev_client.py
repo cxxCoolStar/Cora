@@ -12,13 +12,25 @@ from core.schemas.tool import ToolCall, ToolSpec
 class DevelopmentModelClient(ModelClient):
     """Simple local model stub for early development and manual testing."""
 
+    @staticmethod
+    def _tool_reply_text(content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+        if isinstance(payload, dict):
+            reply = payload.get("reply")
+            if isinstance(reply, str) and reply.strip():
+                return reply
+        return content
+
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
         latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
 
         if latest_tool is not None:
             tool_name = latest_tool.name or "tool"
-            return ModelResponse(assistant_text=f"Tool `{tool_name}` returned: {latest_tool.content}")
+            return ModelResponse(assistant_text=f"Tool `{tool_name}` returned: {self._tool_reply_text(latest_tool.content)}")
 
         if latest_user is None:
             return ModelResponse(assistant_text="How can I help?")

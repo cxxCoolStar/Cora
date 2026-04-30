@@ -23,6 +23,12 @@ from core.clawbot.tools import ArchiveToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
+from core.prompts import (
+    build_capture_clarification_router_messages,
+    build_reference_resolution_messages,
+    build_tool_loop_messages,
+    format_tool_result_payload,
+)
 from core.schemas.message import Message
 from core.schemas.tool import ToolSpec as ModelToolSpec
 from core.storage.models import SessionRecord
@@ -104,48 +110,26 @@ class ClawBotService:
         pending_payload: dict[str, Any] | None,
         tool_messages: list[Message],
     ) -> list[Message]:
-        system_prompt = (
-            "You are Cora, a personal wiki assistant for one user.\n"
-            "Your job is to decide whether to save, browse, open, read, summarize, or clarify using tools.\n"
-            "You must rely on tool calling instead of free-form guessing whenever an action is needed.\n"
-            "Guidelines:\n"
-            "- If the user is sending new material, call save_text, save_link, or save_file.\n"
-            "- If the user sends a long new passage and it is unclear whether they want it saved or summarized first, call clarify_capture_intent.\n"
-            "- If the user asks what is in the knowledge base, call overview_knowledge_base or list_topics.\n"
-            "- If the user wants to find previously saved material, call open_topic.\n"
-            "- If the user refers to an item already in the working_set or focus_item, call read_item or summarize_item.\n"
-            "- Use clarify_reference only when you truly cannot determine which current result the user means.\n"
-            "- After receiving tool results, provide a concise final answer grounded in the tool output.\n"
-            "- Never invent saved content, item ids, or topic names.\n"
-        )
-        state = {
-            "focus_item_id": context.get("focus_item_id"),
-            "focus_item_title": context.get("focus_item_title"),
-            "focus_item_summary": context.get("focus_item_summary"),
-            "last_action": context.get("last_action"),
-            "working_set": context.get("working_set", [])[:5],
-            "pending_clarification": pending_payload or {},
-        }
-        messages: list[Message] = [
-            Message.system(
-                session_id=session_id,
-                content=system_prompt + "\nConversation state:\n" + json.dumps(state, ensure_ascii=False),
-            )
-        ]
         history = self.message_repository.list_by_session(session_id=session_id)
         history = [msg for msg in history if msg.id][:][-6:]
         if history and history[-1].role == "user" and history[-1].content == user_text:
             history = history[:-1]
+        normalized_history: list[Message] = []
         for message in history:
             if message.role not in {"user", "assistant"}:
                 continue
             if message.role == "user":
-                messages.append(Message.user(session_id=session_id, content=message.content))
+                normalized_history.append(Message.user(session_id=session_id, content=message.content))
             else:
-                messages.append(Message.assistant(session_id=session_id, content=message.content))
-        messages.append(Message.user(session_id=session_id, content=user_text))
-        messages.extend(tool_messages)
-        return messages
+                normalized_history.append(Message.assistant(session_id=session_id, content=message.content))
+        return build_tool_loop_messages(
+            session_id=session_id,
+            user_text=user_text,
+            context=context,
+            pending_payload=pending_payload,
+            history=normalized_history,
+            tool_messages=tool_messages,
+        )
 
     async def _run_agent_loop(
         self,
@@ -179,6 +163,24 @@ class ClawBotService:
                 [(tool_call.tool_name, tool_call.arguments) for tool_call in response.tool_calls],
             )
             if response.tool_calls:
+                tool_messages.append(
+                    Message.assistant_tool_calls(
+                        session_id=session_id,
+                        content=(response.assistant_text or "").strip(),
+                        tool_calls=[
+                            {
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.tool_name,
+                                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tool_call in response.tool_calls
+                        ],
+                        metadata={"turn_type": "tool_calls"},
+                    )
+                )
                 for tool_call in response.tool_calls:
                     plan = ToolPlan(
                         tool=tool_call.tool_name,
@@ -209,8 +211,19 @@ class ClawBotService:
                             session_id=session_id,
                             name=tool_call.tool_name,
                             tool_call_id=tool_call.id,
-                            content=execution.reply,
-                            metadata={"action": execution.action, "item_id": execution.item_id},
+                            content=format_tool_result_payload(
+                                tool_name=tool_call.tool_name,
+                                action=execution.action,
+                                item_id=execution.item_id,
+                                needs_clarification=execution.needs_clarification,
+                                reply=execution.reply,
+                                context=latest_context,
+                            ),
+                            metadata={
+                                "action": execution.action,
+                                "item_id": execution.item_id,
+                                "tool_name": tool_call.tool_name,
+                            },
                         )
                     )
                     if execution.needs_clarification:
@@ -261,20 +274,8 @@ class ClawBotService:
         }
 
     def _interpret_clarification_reply(self, *, text: str) -> str | None:
-        prompt = (
-            "You are interpreting a user's reply to a clarification question.\n"
-            "Choose exactly one action from: capture, organize, cancel, unresolved.\n"
-            "Respond with strict JSON using keys: action, reason.\n"
-            "- capture: the user wants the earlier content saved.\n"
-            "- organize: the user wants the earlier content summarized or organized first.\n"
-            "- cancel: the user wants to stop.\n"
-            "- unresolved: the reply is still ambiguous.\n"
-        )
         response = self.model_client.generate(
-            messages=[
-                Message.system(session_id="clarification-router", content=prompt),
-                Message.user(session_id="clarification-router", content=text),
-            ],
+            messages=build_capture_clarification_router_messages(text=text),
             tools=[],
         )
         raw = (response.assistant_text or "").strip()
@@ -293,35 +294,8 @@ class ClawBotService:
         return action if action in {"capture", "organize", "cancel"} else None
 
     def _resolve_reference_candidate_via_llm(self, *, text: str, working_set: list[dict[str, Any]]) -> object | None:
-        prompt = (
-            "You are resolving a user's reply to a reference clarification.\n"
-            "Choose exactly one action from: select, unresolved.\n"
-            "If you can identify the intended item, return action=select and the rank of that item.\n"
-            "Use both ordinal phrases like '第一个/第二个' and title fragments.\n"
-            "Respond with strict JSON using keys: action, rank, reason.\n"
-        )
         response = self.model_client.generate(
-            messages=[
-                Message.system(session_id="reference-router", content=prompt),
-                Message.user(
-                    session_id="reference-router",
-                    content=json.dumps(
-                        {
-                            "user_reply": text,
-                            "working_set": [
-                                {
-                                    "rank": snapshot.get("rank"),
-                                    "title": snapshot.get("title"),
-                                    "summary": snapshot.get("summary"),
-                                }
-                                for snapshot in working_set[:5]
-                                if isinstance(snapshot, dict)
-                            ],
-                        },
-                        ensure_ascii=False,
-                    ),
-                ),
-            ],
+            messages=build_reference_resolution_messages(text=text, working_set=working_set),
             tools=[],
         )
         raw = (response.assistant_text or "").strip()

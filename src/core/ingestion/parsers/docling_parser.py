@@ -4,7 +4,7 @@ from core.ingestion.parsers.base import FileSource, ParsedContent
 
 
 class DoclingFileParser:
-    """Parse DOCX/MD (and more in the future) using Docling."""
+    """Parse DOCX/MD/PDF (and more in the future) using Docling."""
 
     def parse(self, source: FileSource) -> ParsedContent:
         # Import lazily so the rest of the app can still start even if docling isn't installed.
@@ -12,7 +12,7 @@ class DoclingFileParser:
             from docling.chunking import HybridChunker
             from docling.document_converter import DocumentConverter
         except Exception as exc:  # pragma: no cover
-            raise RuntimeError("docling is required to parse DOCX/MD files") from exc
+            raise RuntimeError("docling is required to parse DOCX/MD/PDF files") from exc
 
         converter = DocumentConverter()
         result = converter.convert(source=str(source.path))
@@ -42,4 +42,3 @@ class DoclingFileParser:
             normalized_text=markdown,
             metadata=metadata,
         )
-
