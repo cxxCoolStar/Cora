@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 import logging
 import uuid
+from pathlib import Path
 
 import httpx
 
+from core.channels.wechat.context_token_store import WechatContextTokenStore
 from core.channels.wechat.types import WechatInboundEvent
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ class WechatIlinkConfig:
     base_url: str = "https://ilinkai.weixin.qq.com"
     app_id: str = "bot"
     poll_timeout_seconds: int = 35
+    context_tokens_path: Path | None = None
 
 
 class WechatIlinkClient:
@@ -26,6 +29,11 @@ class WechatIlinkClient:
         self.config = config
         self._http = httpx.AsyncClient(timeout=40.0)
         self._sync_buf = ""
+        self._token_store = (
+            WechatContextTokenStore(config.context_tokens_path)
+            if config.context_tokens_path is not None
+            else None
+        )
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -45,6 +53,8 @@ class WechatIlinkClient:
         for update in updates:
             event = self._parse_update(update)
             if event is not None:
+                if self._token_store is not None and event.context_token:
+                    self._token_store.set(event.user_id, event.context_token)
                 events.append(event)
             else:
                 logger.info("wechat skipped non-text update keys=%s", list(update.keys())[:10] if isinstance(update, dict) else type(update))
@@ -53,6 +63,9 @@ class WechatIlinkClient:
         return events
 
     async def send_text(self, *, peer_user_id: str, text: str, context_token: str | None = None) -> dict[str, Any]:
+        resolved_context_token = context_token
+        if not resolved_context_token and self._token_store is not None:
+            resolved_context_token = self._token_store.get(peer_user_id)
         message: dict[str, Any] = {
             "from_user_id": "",
             "to_user_id": peer_user_id,
@@ -61,8 +74,8 @@ class WechatIlinkClient:
             "message_state": 2,
             "item_list": [{"type": 1, "text_item": {"text": text}}],
         }
-        if context_token:
-            message["context_token"] = context_token
+        if resolved_context_token:
+            message["context_token"] = resolved_context_token
         payload = {
             "base_info": {"channel_version": "2.2.0"},
             "msg": message,

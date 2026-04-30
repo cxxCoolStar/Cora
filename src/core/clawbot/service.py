@@ -135,7 +135,7 @@ class ClawBotService:
         decision = self.intent_router.decide(text=text, has_upload=has_upload, context=context)
 
         if decision.intent == "chat":
-            reply = "你好，我可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。"
+            reply = "你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。"
             self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence=decision.confidence, reason=decision.reason, source=decision.source, tool="chat", tool_arguments={}, context=context))
             return IngestResponse(reply=reply, action="chat", decision_source=decision.source)
 
