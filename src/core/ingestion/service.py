@@ -13,13 +13,15 @@ from fastapi import UploadFile
 from core.ingestion.parsers.base import FileSource, ParsedContent
 from core.ingestion.parsers.doc_parser import DocFileParser
 from core.ingestion.parsers.docling_parser import DoclingFileParser
+from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
-from core.storage.repositories import ItemChunkRepository, ItemRepository, MessageRepository, UserSignalRepository
+from core.storage.repositories import ItemRepository, MessageRepository, UserSignalRepository
 from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
 
 @dataclass(slots=True)
@@ -34,14 +36,13 @@ class IngestionService:
         self,
         *,
         item_repository: ItemRepository,
-        item_chunk_repository: ItemChunkRepository,
         message_repository: MessageRepository,
         user_signal_repository: UserSignalRepository,
         storage_dir: Path,
+        image_parser: ImageFileParser | None = None,
         topic_organizer: TopicOrganizerService | None = None,
     ) -> None:
         self.item_repository = item_repository
-        self.item_chunk_repository = item_chunk_repository
         self.message_repository = message_repository
         self.user_signal_repository = user_signal_repository
         self.storage_dir = Path(storage_dir)
@@ -52,6 +53,7 @@ class IngestionService:
         self.txt_parser = TxtFileParser()
         self.docling_parser = DoclingFileParser()
         self.doc_parser = DocFileParser()
+        self.image_parser = image_parser or ImageFileParser(describer=None)
 
     async def ingest(
         self,
@@ -73,7 +75,6 @@ class IngestionService:
         summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
         tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
         locator_hint = self._build_locator_hint(parsed)
-        chunk_texts = parsed.metadata.pop("_chunk_texts", None)
         document_key = self._build_document_key(parsed=parsed)
         previous_current = None
         next_version = 1
@@ -107,13 +108,7 @@ class IngestionService:
             tags=tags,
             title=item.title,
         )
-        if isinstance(chunk_texts, list) and any(str(c).strip() for c in chunk_texts):
-            chunks = [str(c).strip() for c in chunk_texts if str(c).strip()]
-        else:
-            chunks = self._chunk_text(parsed.normalized_text)
-        for index, chunk in enumerate(chunks):
-            self.item_chunk_repository.create(item_id=item.id, chunk_index=index, content=chunk, metadata={"title": item.title})
-        logger.info("ingestion stored item_id=%s chunks=%d item_type=%s", item.id, len(chunks), parsed.item_type)
+        logger.info("ingestion stored item_id=%s item_type=%s", item.id, parsed.item_type)
         topic_name: str | None = None
         if self.topic_organizer is not None:
             assignment = self.topic_organizer.assign_item_to_topic(session_id=session_id, item=item)
@@ -154,6 +149,23 @@ class IngestionService:
             source = FileSource(path=target, filename=upload.filename or target.name)
             if suffix == ".txt":
                 parsed = self.txt_parser.parse(source)
+            elif suffix in IMAGE_EXTENSIONS:
+                try:
+                    parsed = await anyio.to_thread.run_sync(self.image_parser.parse, source)
+                except Exception as exc:
+                    return ParsedContent(
+                        item_type="file_upload",
+                        title=upload.filename or target.name,
+                        raw_content="",
+                        normalized_text="",
+                        metadata={
+                            "parse_status": "failed",
+                            "file_suffix": suffix or "unknown",
+                            "original_file_name": upload.filename or target.name,
+                            "stored_file_path": str(target),
+                            "parse_error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
             elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
                 try:
                     parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
@@ -237,13 +249,6 @@ class IngestionService:
             if keyword in lowered:
                 tags.append(keyword)
         return sorted(set(tags))
-
-    @staticmethod
-    def _chunk_text(text: str) -> list[str]:
-        parts = [part.strip() for part in text.split("\n\n") if part.strip()]
-        if parts:
-            return parts
-        return [text.strip()] if text.strip() else []
 
     @staticmethod
     def _build_locator_hint(parsed: ParsedContent) -> str | None:

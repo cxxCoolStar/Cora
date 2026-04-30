@@ -175,18 +175,6 @@
                     {% endif %}
                 </section>
                 <section class="card">
-                    <h2>Chunks</h2>
-                    {% for chunk in selected_session.chunks %}
-                    <div class="entry">
-                        <div class="label">item {{ chunk.item_id[:8] }} · chunk {{ chunk.chunk_index }}</div>
-                        <div>{{ chunk.content }}</div>
-                    </div>
-                    {% endfor %}
-                    {% if not selected_session.chunks %}
-                    <div class="empty">No chunks generated yet.</div>
-                    {% endif %}
-                </section>
-                <section class="card">
                     <h2>User Signals</h2>
                     {% for signal in selected_session.user_signals %}
                     <div class="entry">

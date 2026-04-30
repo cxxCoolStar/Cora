@@ -8,13 +8,14 @@ from fastapi import Request
 from core.config import CoreSettings
 from core.clawbot.service import ClawBotService
 from core.clawbot.tools import ArchiveToolExecutor
+from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
+from core.llm.openai_vision_client import OpenAIVisionClient
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
     ClarificationRepository,
-    ItemChunkRepository,
     ItemRepository,
     MessageRepository,
     SessionRepository,
@@ -34,7 +35,6 @@ class ClawBotContainer:
     session_repository: SessionRepository
     message_repository: MessageRepository
     item_repository: ItemRepository
-    item_chunk_repository: ItemChunkRepository
     clarification_repository: ClarificationRepository
     user_signal_repository: UserSignalRepository
     topic_repository: TopicRepository
@@ -58,18 +58,31 @@ def get_clawbot_container() -> ClawBotContainer:
         session_repository = SessionRepository(database)
         message_repository = MessageRepository(database)
         item_repository = ItemRepository(database)
-        item_chunk_repository = ItemChunkRepository(database)
         clarification_repository = ClarificationRepository(database)
         user_signal_repository = UserSignalRepository(database)
         topic_repository = TopicRepository(database)
         topic_item_repository = TopicItemRepository(database)
         topic_activity_repository = TopicActivityRepository(database)
+        image_parser = ImageFileParser(describer=None)
+        vision_model = (settings.auxiliary_vision_model or "").strip()
+        if vision_model:
+            provider = (settings.auxiliary_vision_provider or "openai").strip().lower()
+            if provider in {"openai", "openai_compatible"}:
+                vision_api_key = (settings.auxiliary_vision_api_key or settings.openai_api_key or "").strip()
+                if vision_api_key:
+                    vision_client = OpenAIVisionClient(
+                        api_key=vision_api_key,
+                        model=vision_model,
+                        base_url=(settings.auxiliary_vision_base_url or settings.openai_base_url),
+                        timeout=float(max(10, settings.auxiliary_vision_timeout_seconds)),
+                    )
+                    image_parser = ImageFileParser(describer=vision_client)
         ingestion_service = IngestionService(
             item_repository=item_repository,
-            item_chunk_repository=item_chunk_repository,
             message_repository=message_repository,
             user_signal_repository=user_signal_repository,
             storage_dir=settings.files_storage_dir,
+            image_parser=image_parser,
         )
         model_client = None
         if settings.model_provider == "openai" or (settings.openai_api_key and settings.model):
@@ -103,7 +116,6 @@ def get_clawbot_container() -> ClawBotContainer:
             session_repository=session_repository,
             message_repository=message_repository,
             item_repository=item_repository,
-            item_chunk_repository=item_chunk_repository,
             ingestion_service=ingestion_service,
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,
@@ -120,7 +132,6 @@ def get_clawbot_container() -> ClawBotContainer:
             session_repository=session_repository,
             message_repository=message_repository,
             item_repository=item_repository,
-            item_chunk_repository=item_chunk_repository,
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,
             topic_repository=topic_repository,

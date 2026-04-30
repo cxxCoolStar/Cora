@@ -14,6 +14,11 @@ class CoreSettings(BaseSettings):
     model: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
+    auxiliary_vision_provider: str | None = None
+    auxiliary_vision_model: str | None = None
+    auxiliary_vision_api_key: str | None = None
+    auxiliary_vision_base_url: str | None = None
+    auxiliary_vision_timeout_seconds: int = 60
     debug: bool = False
     wechat_enabled: bool = False
     wechat_token: str | None = None

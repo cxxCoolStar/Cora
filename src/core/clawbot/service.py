@@ -6,7 +6,6 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.clawbot.schemas import (
-    ChunkDebugResponse,
     DecisionDebugResponse,
     IngestResponse,
     ItemDetailResponse,
@@ -34,7 +33,6 @@ from core.schemas.tool import ToolSpec as ModelToolSpec
 from core.storage.models import SessionRecord
 from core.storage.repositories import (
     ClarificationRepository,
-    ItemChunkRepository,
     ItemRepository,
     MessageRepository,
     SessionRepository,
@@ -57,7 +55,6 @@ class ClawBotService:
         session_repository: SessionRepository,
         message_repository: MessageRepository,
         item_repository: ItemRepository,
-        item_chunk_repository: ItemChunkRepository,
         ingestion_service: IngestionService,
         clarification_repository: ClarificationRepository,
         user_signal_repository: UserSignalRepository,
@@ -69,7 +66,6 @@ class ClawBotService:
         self.session_repository = session_repository
         self.message_repository = message_repository
         self.item_repository = item_repository
-        self.item_chunk_repository = item_chunk_repository
         self.ingestion_service = ingestion_service
         self.clarification_repository = clarification_repository
         self.user_signal_repository = user_signal_repository
@@ -468,7 +464,6 @@ class ClawBotService:
         session = self.session_repository.get(session_id)
         messages = self.message_repository.list_by_session(session_id=session_id)
         items = self.item_repository.list_by_session(session_id=session_id)
-        chunks = self.item_chunk_repository.list_by_item_ids(item_ids=[item.id for item in items])
         signals = self.user_signal_repository.list_by_session(session_id=session_id)
         topics = self.topic_repository.list_by_session(session_id=session_id)
         profile = self.user_profile_aggregator.build(signals=signals)
@@ -495,16 +490,6 @@ class ClawBotService:
                     created_at=item.created_at,
                 )
                 for item in items
-            ],
-            chunks=[
-                ChunkDebugResponse(
-                    id=chunk.id,
-                    item_id=chunk.item_id,
-                    chunk_index=chunk.chunk_index,
-                    content=chunk.content,
-                    created_at=chunk.created_at,
-                )
-                for chunk in chunks
             ],
             user_signals=[
                 UserSignalDebugResponse(

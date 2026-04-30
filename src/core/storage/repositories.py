@@ -9,7 +9,6 @@ from core.storage.models import (
     ChannelEventRecord,
     ChannelSessionMapRecord,
     ClarificationStateRecord,
-    ItemChunkRecord,
     ItemRecord,
     MessageRecord,
     SessionRecord,
@@ -210,36 +209,6 @@ class ItemRepository:
                 .order_by(desc(ItemRecord.created_at))
             )
             return list(session.scalars(stmt))
-
-
-class ItemChunkRepository:
-    def __init__(self, database: DatabaseManager) -> None:
-        self.database = database
-
-    def create(self, *, item_id: str, chunk_index: int, content: str, metadata: dict[str, Any]) -> ItemChunkRecord:
-        with self.database.session() as session:
-            record = ItemChunkRecord(
-                item_id=item_id,
-                chunk_index=chunk_index,
-                content=content,
-                metadata_json=metadata,
-            )
-            session.add(record)
-            session.commit()
-            session.refresh(record)
-            return record
-
-    def list_by_item_ids(self, *, item_ids: list[str]) -> list[ItemChunkRecord]:
-        if not item_ids:
-            return []
-        with self.database.session() as session:
-            stmt = (
-                select(ItemChunkRecord)
-                .where(ItemChunkRecord.item_id.in_(item_ids))
-                .order_by(ItemChunkRecord.item_id, ItemChunkRecord.chunk_index)
-            )
-            return list(session.scalars(stmt))
-
 
 class TopicRepository:
     def __init__(self, database: DatabaseManager) -> None:

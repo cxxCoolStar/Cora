@@ -12,7 +12,7 @@ class CreateSessionResponse(BaseModel):
 
 class ItemSummaryResponse(BaseModel):
     id: str
-    item_type: Literal["text_note", "link", "document"]
+    item_type: Literal["text_note", "link", "document", "image", "file_upload"]
     title: str
     summary: str
     created_at: datetime
@@ -41,15 +41,6 @@ class MessageDebugResponse(BaseModel):
     role: str
     content: str
     created_at: datetime
-
-
-class ChunkDebugResponse(BaseModel):
-    id: str
-    item_id: str
-    chunk_index: int
-    content: str
-    created_at: datetime
-
 
 class UserSignalDebugResponse(BaseModel):
     id: str
@@ -86,7 +77,6 @@ class SessionDebugResponse(BaseModel):
     created_at: datetime
     messages: list[MessageDebugResponse]
     items: list[ItemDetailResponse]
-    chunks: list[ChunkDebugResponse]
     user_signals: list[UserSignalDebugResponse]
     user_profile: list[UserProfileSection]
     topics: list[TopicDebugResponse]

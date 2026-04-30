@@ -98,17 +98,6 @@ class TopicActivityRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
-class ItemChunkRecord(Base):
-    __tablename__ = "clawbot_item_chunks"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
-    item_id: Mapped[str] = mapped_column(ForeignKey("clawbot_items.id"), index=True)
-    chunk_index: Mapped[int]
-    content: Mapped[str] = mapped_column(Text)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-
 class ClarificationStateRecord(Base):
     __tablename__ = "clawbot_clarification_states"
 

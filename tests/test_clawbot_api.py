@@ -25,9 +25,10 @@ from core.clawbot.intent_router import IntentRouter  # noqa: E402
 from core.clawbot.planner import AgentPlanner  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
 from core.clawbot.tools import ArchiveToolExecutor  # noqa: E402
+from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
@@ -141,7 +142,17 @@ class StubPlannerModelClient(ModelClient):
         )
 
 
-def build_test_container(tmp_path: Path) -> ClawBotContainer:
+class FakeVisionDescriber:
+    def describe_image(self, *, image_path: Path, mime_type: str) -> str:
+        return (
+            f"scene: synthetic test image\n"
+            f"mime: {mime_type}\n"
+            f"filename: {image_path.name}\n"
+            "keywords: test, diagram, screenshot"
+        )
+
+
+def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -> ClawBotContainer:
     settings = CoreSettings(
         clawbot_database_path=tmp_path / "clawbot.db",
         files_storage_dir=tmp_path / "files",
@@ -150,7 +161,6 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
     session_repository = SessionRepository(database)
     message_repository = MessageRepository(database)
     item_repository = ItemRepository(database)
-    item_chunk_repository = ItemChunkRepository(database)
     clarification_repository = ClarificationRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
@@ -163,12 +173,13 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         topic_activity_repository=topic_activity_repository,
         item_repository=item_repository,
     )
+    image_parser = ImageFileParser(describer=FakeVisionDescriber() if enable_image_vision else None)
     ingestion_service = IngestionService(
         item_repository=item_repository,
-        item_chunk_repository=item_chunk_repository,
         message_repository=message_repository,
         user_signal_repository=user_signal_repository,
         storage_dir=settings.files_storage_dir,
+        image_parser=image_parser,
         topic_organizer=topic_organizer,
     )
     tool_executor = ArchiveToolExecutor(
@@ -182,7 +193,6 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         session_repository=session_repository,
         message_repository=message_repository,
         item_repository=item_repository,
-        item_chunk_repository=item_chunk_repository,
         ingestion_service=ingestion_service,
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
@@ -197,7 +207,6 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         session_repository=session_repository,
         message_repository=message_repository,
         item_repository=item_repository,
-        item_chunk_repository=item_chunk_repository,
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
@@ -727,6 +736,44 @@ def test_upload_pdf_is_routed_through_docling_not_marked_unsupported(tmp_path):
     else:
         assert item.item_type == "document"
         assert item.title == "note"
+
+
+def test_upload_png_is_parsed_as_image_with_aux_vision(tmp_path):
+    deps._container = build_test_container(tmp_path, enable_image_vision=True)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("diagram.png", BytesIO(b"\x89PNG\r\n\x1a\nfakepngbytes"), "image/png")}
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    assert payload["item_id"]
+
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    assert item.item_type == "image"
+    assert "Visual description:" in item.normalized_text
+    assert "keywords: test, diagram, screenshot" in item.normalized_text
+
+
+def test_upload_png_without_aux_vision_falls_back_to_file_upload(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("diagram.png", BytesIO(b"\x89PNG\r\n\x1a\nfakepngbytes"), "image/png")}
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    assert payload["item_id"]
+
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    assert item.item_type == "file_upload"
+    assert item.metadata_json.get("parse_status") == "failed"
+    assert item.metadata_json.get("file_suffix") == ".png"
 
 
 def test_reupload_same_document_creates_new_version_and_hides_old_from_default_listing(tmp_path):
