@@ -11,6 +11,9 @@ from core.schemas.message import Message
 class RewrittenQuery:
     keywords: list[str]
     reasoning: str
+    core_entities: list[str]
+    supporting_terms: list[str]
+    negative_terms: list[str]
 
 
 class QueryRewriter:
@@ -23,10 +26,11 @@ class QueryRewriter:
         """Extract search keywords from user query using LLM."""
         prompt = (
             "You are helping to search a personal archive. "
-            "Rewrite the user's query into a small set of search keywords that maximize recall.\n\n"
+            "Rewrite the user's query into structured retrieval hints.\n\n"
             "Goal:\n"
-            "- Produce keywords that are likely to literally appear in stored notes/files.\n"
-            "- Do light expansion with Chinese/English synonyms so the search can match both languages.\n\n"
+            "- Extract the core entities the user really wants.\n"
+            "- Add light Chinese/English expansion to improve recall.\n"
+            "- Avoid over-general words that match everything.\n\n"
             "Rules:\n"
             "1. Remove filler words like '请', '帮我', '告诉我', '一下', '能不能', '的信息'\n"
             "2. Keep concrete entities and technical terms (product names, topics, protocols, IDs, file names)\n"
@@ -35,13 +39,22 @@ class QueryRewriter:
             "   - If the query contains English terms, add common Chinese equivalents (e.g. server -> 服务器)\n"
             "   - Include common abbreviations/aliases if they are standard (e.g. Retrieval-Augmented Generation -> RAG)\n"
             "4. Do NOT add unrelated concepts; only expansions that preserve the same intent\n"
-            "5. Return 2-8 keywords (deduplicated). Prefer shorter keyword tokens\n\n"
+            "5. Prefer precise entities over generic words like 文件/资料/内容/data/document\n"
+            "6. Return JSON with these keys:\n"
+            "   - core_entities: 1-4 strong entity terms that best represent user intent\n"
+            "   - supporting_terms: 0-6 secondary useful terms/synonyms\n"
+            "   - negative_terms: 0-4 terms that are likely unrelated themes to down-rank (not hard block)\n"
+            "   - reasoning: short explanation\n\n"
             "Examples:\n"
-            '- "帮我找一下linux服务器的信息" -> ["linux", "服务器", "server"]\n'
-            '- "我之前保存的面试题" -> ["面试题", "interview questions"]\n'
-            '- "关于Agent和RAG的资料" -> ["agent", "智能体", "rag", "检索增强生成"]\n'
-            '- "帮我找一下内网的信息" -> ["内网", "intranet"]\n\n'
-            "Respond with strict JSON only using keys: keywords (array of strings), reasoning (string)."
+            '- query: "帮我找一下linux服务器的信息"\n'
+            '  core_entities: ["linux", "服务器"]\n'
+            '  supporting_terms: ["server"]\n'
+            '  negative_terms: []\n'
+            '- query: "帮我找一下内网的信息"\n'
+            '  core_entities: ["内网"]\n'
+            '  supporting_terms: ["intranet"]\n'
+            '  negative_terms: ["面试"]\n\n'
+            "Output strict JSON only."
         )
         response = self.model_client.generate(
             messages=[
@@ -61,13 +74,29 @@ class QueryRewriter:
                 payload = json.loads(fenced)
             except json.JSONDecodeError:
                 return None
-        keywords = payload.get("keywords", [])
-        if not isinstance(keywords, list):
-            return None
-        keywords = [str(k).strip().lower() for k in keywords if str(k).strip()]
-        if not keywords:
+        core_entities = payload.get("core_entities", [])
+        supporting_terms = payload.get("supporting_terms", [])
+        negative_terms = payload.get("negative_terms", [])
+        legacy_keywords = payload.get("keywords", [])
+        if not isinstance(core_entities, list):
+            core_entities = []
+        if not isinstance(supporting_terms, list):
+            supporting_terms = []
+        if not isinstance(negative_terms, list):
+            negative_terms = []
+        if not core_entities and not supporting_terms and isinstance(legacy_keywords, list):
+            supporting_terms = legacy_keywords
+
+        core_entities = [str(k).strip().lower() for k in core_entities if str(k).strip()]
+        supporting_terms = [str(k).strip().lower() for k in supporting_terms if str(k).strip()]
+        negative_terms = [str(k).strip().lower() for k in negative_terms if str(k).strip()]
+        keywords = list(dict.fromkeys([*core_entities, *supporting_terms]))
+        if not keywords and not negative_terms:
             return None
         return RewrittenQuery(
             keywords=keywords,
             reasoning=str(payload.get("reasoning", "")),
+            core_entities=core_entities,
+            supporting_terms=supporting_terms,
+            negative_terms=negative_terms,
         )

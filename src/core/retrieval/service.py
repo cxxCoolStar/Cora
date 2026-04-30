@@ -83,10 +83,14 @@ class RetrievalService:
 
     def search_candidates(self, *, session_id: str, query: str, top_k: int = 3) -> list[RetrievalResult]:
         tokens: list[str]
+        core_tokens: list[str] = []
+        negative_tokens: list[str] = []
         if self.query_rewriter is not None:
             rewritten = self.query_rewriter.rewrite(query=query)
             if rewritten is not None and rewritten.keywords:
                 tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
+                core_tokens = [k for k in rewritten.core_entities if k not in self.STOP_TOKENS]
+                negative_tokens = [k for k in rewritten.negative_terms if k not in self.STOP_TOKENS]
             else:
                 tokens = self._tokenize(query)
         else:
@@ -95,7 +99,6 @@ class RetrievalService:
         if not items:
             return []
 
-        strong_tokens = self._strong_tokens(tokens)
         item_scores: list[tuple[ItemRecord, int]] = []
         for item in items:
             haystack = " ".join(
@@ -107,11 +110,12 @@ class RetrievalService:
                     " ".join((item.metadata_json or {}).get("tags", [])),
                 ]
             ).lower()
-            score = self._score_text(haystack, tokens)
-            if strong_tokens:
-                matched_strong = sum(1 for token in strong_tokens if token in haystack)
-                if matched_strong == 0:
-                    continue
+            score = self._score_text(
+                haystack,
+                tokens=tokens,
+                core_tokens=core_tokens,
+                negative_tokens=negative_tokens,
+            )
             if score > 0:
                 item_scores.append((item, score))
 
@@ -146,6 +150,8 @@ class RetrievalService:
         )
 
         tokens: list[str]
+        core_tokens: list[str] = []
+        negative_tokens: list[str] = []
         if self.query_rewriter is None:
             result.rewrite_reasoning = "QueryRewriter not configured; using direct tokenization fallback."
             tokens = self._tokenize(query)
@@ -163,6 +169,8 @@ class RetrievalService:
                     tokens = self._tokenize(query)
                 else:
                     tokens = [k for k in rewritten.keywords if k not in self.STOP_TOKENS]
+                    core_tokens = [k for k in rewritten.core_entities if k not in self.STOP_TOKENS]
+                    negative_tokens = [k for k in rewritten.negative_terms if k not in self.STOP_TOKENS]
         result.tokens_used_for_search = tokens
 
         if not tokens:
@@ -175,7 +183,6 @@ class RetrievalService:
             result.error = "No items in the database"
             return result
 
-        strong_tokens = self._strong_tokens(tokens)
         item_scores: list[tuple[ItemRecord, int]] = []
         for item in items:
             haystack = " ".join(
@@ -187,7 +194,12 @@ class RetrievalService:
                     " ".join((item.metadata_json or {}).get("tags", [])),
                 ]
             ).lower()
-            score = self._score_text(haystack, tokens)
+            score = self._score_text(
+                haystack,
+                tokens=tokens,
+                core_tokens=core_tokens,
+                negative_tokens=negative_tokens,
+            )
             preview = haystack[:200] + "..." if len(haystack) > 200 else haystack
             result.items_scored.append(
                 ItemScoreDebug(
@@ -197,10 +209,6 @@ class RetrievalService:
                     matched_text_preview=preview,
                 )
             )
-            if strong_tokens:
-                matched_strong = sum(1 for token in strong_tokens if token in haystack)
-                if matched_strong == 0:
-                    continue
             if score > 0:
                 item_scores.append((item, score))
 
@@ -229,24 +237,34 @@ class RetrievalService:
         best_chunk: ItemChunkRecord | None = None
         best_score = -1
         for chunk in chunks:
-            score = self._score_text(chunk.content.lower(), tokens)
+            score = self._score_text(chunk.content.lower(), tokens=tokens, core_tokens=[], negative_tokens=[])
             if score > best_score:
                 best_score = score
                 best_chunk = chunk
         return best_chunk
 
     @staticmethod
-    def _score_text(text: str, tokens: list[str]) -> int:
+    def _score_text(
+        text: str,
+        *,
+        tokens: list[str],
+        core_tokens: list[str],
+        negative_tokens: list[str],
+    ) -> int:
         if not tokens:
             return 0
         score = 0
-        matched_tokens = 0
         for token in tokens:
             if token and token in text:
-                matched_tokens += 1
                 weight = len(token) ** 2
                 score += weight * text.count(token)
-        if matched_tokens == 0:
+        for token in core_tokens:
+            if token and token in text:
+                score += (len(token) ** 2) * 3
+        for token in negative_tokens:
+            if token and token in text:
+                score -= (len(token) ** 2) * 2
+        if score <= 0:
             return 0
         return score
 
@@ -277,8 +295,3 @@ class RetrievalService:
             text = text.replace(token, " ")
         normalized = " ".join(text.split())
         return normalized or query
-
-    @staticmethod
-    def _strong_tokens(tokens: list[str]) -> list[str]:
-        # Keep only discriminative tokens; generic words are removed by STOP_TOKENS.
-        return [t for t in tokens if len(t.strip()) >= 2]
