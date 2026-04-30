@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from fastapi import UploadFile
 
 from core.clawbot.schemas import (
@@ -24,6 +26,8 @@ from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.prompts import (
     build_capture_clarification_router_messages,
+    build_input_followup_router_messages,
+    build_input_interpretation_messages,
     build_reference_resolution_messages,
     build_tool_loop_messages,
     format_tool_result_payload,
@@ -44,6 +48,8 @@ from core.tools.toolsets import resolve_toolsets
 from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 class ClawBotService:
@@ -326,6 +332,78 @@ class ClawBotService:
             return None
         return self.item_repository.get_any(item_id=item_id)
 
+    def _detect_media_kind(self, *, upload: UploadFile | None) -> str | None:
+        if upload is None or not (upload.filename or "").strip():
+            return None
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix in IMAGE_EXTENSIONS:
+            return "image"
+        return "file"
+
+    def _interpret_initial_input(
+        self,
+        *,
+        text: str | None,
+        upload: UploadFile | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        response = self.model_client.generate(
+            messages=build_input_interpretation_messages(
+                text=text,
+                has_upload=upload is not None and bool((upload.filename or "").strip()),
+                upload_filename=upload.filename if upload is not None else None,
+                media_kind=self._detect_media_kind(upload=upload),
+                context=context,
+            ),
+            tools=[],
+        )
+        raw = (response.assistant_text or "").strip()
+        logger.info("clawbot input_interpreter_raw text=%s upload=%s output=%s", (text or "")[:120], getattr(upload, "filename", None), raw[:800])
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            try:
+                payload = json.loads(fenced)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _interpret_pending_input_reply(self, *, text: str, pending_payload: dict[str, Any]) -> dict[str, Any] | None:
+        response = self.model_client.generate(
+            messages=build_input_followup_router_messages(text=text, pending_payload=pending_payload),
+            tools=[],
+        )
+        raw = (response.assistant_text or "").strip()
+        logger.info("clawbot pending_input_raw text=%s output=%s", text[:120], raw[:800])
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            try:
+                payload = json.loads(fenced)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    async def _persist_pending_upload(self, *, upload: UploadFile) -> dict[str, str]:
+        target_dir = self.ingestion_service.storage_dir / "pending"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = (upload.filename or "unnamed.bin").strip() or "unnamed.bin"
+        suffix = Path(filename).suffix
+        target = target_dir / f"{uuid4()}{suffix}"
+        data = await upload.read()
+        target.write_bytes(data)
+        return {"upload_path": str(target), "upload_filename": filename}
+
     async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None) -> IngestResponse:
         logger.info(
             "clawbot ingest_start session_id=%s has_text=%s has_upload=%s",
@@ -366,6 +444,66 @@ class ClawBotService:
                     self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=assistant_metadata)
                     return IngestResponse(reply=reply, action="retrieve", item_id=resolved_item.id, decision_source="llm_tool_call")
 
+            if pending_payload.get("type") == "input_interpretation":
+                interpretation = self._interpret_pending_input_reply(text=text, pending_payload=pending_payload)
+                action = str((interpretation or {}).get("action") or "").strip()
+                note = str((interpretation or {}).get("note") or "").strip()
+                if action == "capture":
+                    upload_path = str(pending_payload.get("upload_path") or "").strip()
+                    upload_filename = str(pending_payload.get("upload_filename") or "").strip()
+                    if upload_path and upload_filename:
+                        saved_item = await self.ingestion_service.ingest_saved_upload(
+                            session_id=session_id,
+                            source_message_id=pending.source_message_id,
+                            file_path=Path(upload_path),
+                            filename=upload_filename,
+                            user_note=note or text,
+                        )
+                        reply = saved_item.reply
+                    else:
+                        original_text = str(pending_payload.get("original_text") or "").strip()
+                        saved_item = await self.ingestion_service.ingest(
+                            session_id=session_id,
+                            source_message_id=pending.source_message_id,
+                            text=original_text,
+                            upload=None,
+                        )
+                        reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
+                    self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                    self.message_repository.add_assistant_message(
+                        session_id=session_id,
+                        content=reply,
+                        metadata=self._build_assistant_metadata(
+                            action="capture",
+                            confidence="high",
+                            reason="Input clarification resolved pending content handling.",
+                            source="llm_tool_call",
+                            tool="save_content",
+                            tool_arguments={"text": str(pending_payload.get('original_text') or note or '')},
+                            context=context,
+                        ),
+                    )
+                    return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
+                if action == "cancel":
+                    reply = "Okay, I will leave that pending content alone."
+                    self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
+                    self.message_repository.add_assistant_message(
+                        session_id=session_id,
+                        content=reply,
+                        metadata=self._build_assistant_metadata(
+                            action="chat",
+                            confidence="high",
+                            reason="Input clarification cancelled by user.",
+                            source="llm_tool_call",
+                            tool="clarify_capture_intent",
+                            tool_arguments={},
+                            context=context,
+                        ),
+                    )
+                    return IngestResponse(reply=reply, action="chat", decision_source="llm_tool_call")
+                reply = str(pending_payload.get("clarification_question") or pending.question)
+                return IngestResponse(reply=reply, action="clarify", needs_clarification=True, decision_source="llm_tool_call")
+
             action = self._interpret_clarification_reply(text=text)
             if action == "capture":
                 pending_text = pending.pending_payload_json.get("text", "")
@@ -393,6 +531,33 @@ class ClawBotService:
                 return IngestResponse(reply=reply, action="chat", decision_source="llm_tool_call")
 
         has_upload = upload is not None and bool((upload.filename or "").strip())
+        if pending is None:
+            interpretation = self._interpret_initial_input(text=text, upload=upload, context=context)
+            if interpretation and bool(interpretation.get("needs_clarification")):
+                question = str(interpretation.get("clarification_question") or "").strip()
+                if question:
+                    pending_payload: dict[str, Any] = {
+                        "type": "input_interpretation",
+                        "pending_input_type": "upload" if has_upload else "text",
+                        "media_kind": self._detect_media_kind(upload=upload) or ("text" if text else "unknown"),
+                        "original_text": text or "",
+                        "clarification_question": question,
+                    }
+                    if has_upload and upload is not None:
+                        pending_payload.update(await self._persist_pending_upload(upload=upload))
+                    self.clarification_repository.create(
+                        session_id=session_id,
+                        source_message_id=user_message.id,
+                        question=question,
+                        candidate_intents=["capture", "cancel"],
+                        pending_payload=pending_payload,
+                    )
+                    return IngestResponse(
+                        reply=question,
+                        action="clarify",
+                        needs_clarification=True,
+                        decision_source="llm_tool_call",
+                    )
         user_text_for_model = text.strip() if text and text.strip() else f"[file upload: {(upload.filename if upload else '') or 'unnamed'}]"
         agent_result = await self._run_agent_loop(
             session_id=session_id,

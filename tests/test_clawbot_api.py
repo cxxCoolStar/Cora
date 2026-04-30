@@ -95,6 +95,61 @@ class StubTopicModelClient(ModelClient):
                 return ModelResponse(tool_calls=[ToolCall(tool_name="clarify_capture_intent", arguments={"question": "这段内容你是想让我先保存，还是先帮你总结一下？"})])
             return ModelResponse(tool_calls=[ToolCall(tool_name="save_content", arguments={"text": user_text})])
 
+        if session_id == "input-interpreter":
+            try:
+                payload = json.loads(user_text)
+            except json.JSONDecodeError:
+                payload = {}
+            input_text = str(payload.get("text") or "")
+            has_upload = bool(payload.get("has_upload"))
+            media_kind = str(payload.get("media_kind") or "")
+            if has_upload and not input_text.strip():
+                question = (
+                    "这张图片你希望我怎么处理？我可以先保存，也可以按你的说明备注后再保存。"
+                    if media_kind == "image"
+                    else "这份文件你希望我怎么处理？我可以先保存，也可以按你的说明一起记录。"
+                )
+                return ModelResponse(
+                    assistant_text=json.dumps(
+                        {
+                            "needs_clarification": True,
+                            "clarification_question": question,
+                            "intent": "save",
+                            "content_role": "new_material",
+                            "reason": "Bare upload needs one handling question first.",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            if len(input_text) >= 120 or ("\n" in input_text and len(input_text) >= 40):
+                return ModelResponse(
+                    assistant_text='{"needs_clarification":true,"clarification_question":"这段内容你是想让我先保存下来，还是把它当成当前指令来处理？","intent":"unclear","content_role":"unknown","reason":"Long standalone text is ambiguous."}'
+                )
+            return ModelResponse(
+                assistant_text='{"needs_clarification":false,"clarification_question":"","intent":"chat","content_role":"instruction_only","reason":"Enough information to continue."}'
+            )
+
+        if session_id == "input-followup-router":
+            try:
+                payload = json.loads(user_text)
+            except json.JSONDecodeError:
+                payload = {}
+            reply = str(payload.get("user_reply") or "")
+            if any(token in reply for token in ["取消", "不用", "算了"]):
+                return ModelResponse(assistant_text='{"action":"cancel","note":"","reason":"The user cancelled the pending content."}')
+            if any(token in reply for token in ["保存", "记一下", "记住"]) and len(reply.strip()) <= 8:
+                return ModelResponse(assistant_text='{"action":"capture","note":"","reason":"The user explicitly asked to save the pending content."}')
+            return ModelResponse(
+                assistant_text=json.dumps(
+                    {
+                        "action": "capture",
+                        "note": reply,
+                        "reason": "The user described the pending content, which should be kept with that note.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
         if session_id == "clarification-router":
             if "保存" in user_text:
                 return ModelResponse(assistant_text='{"action":"capture","reason":"The user wants the earlier content saved."}')
@@ -313,12 +368,22 @@ def test_txt_file_ingest_flow(tmp_path):
     app = create_app()
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
-    response = asyncio.run(
+    first = asyncio.run(
         api_request(
             app,
             "POST",
             f"/sessions/{session_id}/ingest",
             files={"file": ("note.txt", BytesIO(b"hello from a saved txt file"), "text/plain")},
+        )
+    )
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "保存"},
         )
     )
 
@@ -403,6 +468,61 @@ def test_clarification_reply_can_save_pending_text(tmp_path):
     assert payload["action"] == "capture"
     items = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items")).json()
     assert len(items) == 1
+
+
+def test_bare_file_upload_triggers_clarification(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("resume.txt", BytesIO(b"resume content"), "text/plain")},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "clarify"
+    assert payload["needs_clarification"] is True
+    assert "文件" in payload["reply"]
+
+
+def test_bare_file_upload_reply_can_save_with_note(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("resume.txt", BytesIO(b"resume content"), "text/plain")},
+        )
+    )
+    assert first.json()["action"] == "clarify"
+
+    second = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "这是我的简历"},
+        )
+    )
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["action"] == "capture"
+    item_id = payload["item_id"]
+    assert item_id
+    detail = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items/{item_id}"))
+    assert detail.status_code == 200
+    assert "这是我的简历" in detail.json()["normalized_text"]
 
 
 def test_debug_page_renders_saved_data(tmp_path):
@@ -697,7 +817,10 @@ def test_upload_doc_is_parsed_as_document_when_possible(tmp_path):
 
     # .doc should be accepted; depending on the environment it may be parsed to text or saved as file upload.
     files = {"file": ("resume.doc", BytesIO(b"fake doc bytes"), "application/msword")}
-    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
 
     assert response.status_code == 200
     payload = response.json()
@@ -712,7 +835,10 @@ def test_upload_md_is_parsed_as_document(tmp_path):
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
     files = {"file": ("note.md", BytesIO(b"# Title\n\nSome content about Agent and RAG."), "text/markdown")}
-    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
 
     assert response.status_code == 200
     payload = response.json()
@@ -731,7 +857,10 @@ def test_upload_pdf_is_routed_through_docling_not_marked_unsupported(tmp_path):
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
     files = {"file": ("note.pdf", BytesIO(b"%PDF-1.4\nfake pdf bytes"), "application/pdf")}
-    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
 
     assert response.status_code == 200
     payload = response.json()
@@ -754,7 +883,10 @@ def test_upload_png_is_parsed_as_image_with_aux_vision(tmp_path):
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
     files = {"file": ("diagram.png", BytesIO(b"\x89PNG\r\n\x1a\nfakepngbytes"), "image/png")}
-    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
 
     assert response.status_code == 200
     payload = response.json()
@@ -773,7 +905,10 @@ def test_upload_png_without_aux_vision_falls_back_to_file_upload(tmp_path):
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
     files = {"file": ("diagram.png", BytesIO(b"\x89PNG\r\n\x1a\nfakepngbytes"), "image/png")}
-    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
 
     assert response.status_code == 200
     payload = response.json()
@@ -792,7 +927,7 @@ def test_reupload_same_document_creates_new_version_and_hides_old_from_default_l
 
     session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
 
-    first = asyncio.run(
+    first_prompt = asyncio.run(
         api_request(
             app,
             "POST",
@@ -800,12 +935,32 @@ def test_reupload_same_document_creates_new_version_and_hides_old_from_default_l
             files={"file": ("resume_v1.md", BytesIO(b"# Resume\n\nfirst version"), "text/markdown")},
         )
     )
-    second = asyncio.run(
+    assert first_prompt.status_code == 200
+    assert first_prompt.json()["action"] == "clarify"
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "保存"},
+        )
+    )
+    second_prompt = asyncio.run(
         api_request(
             app,
             "POST",
             f"/sessions/{session_id}/ingest",
             files={"file": ("resume_v2.md", BytesIO(b"# Resume\n\nsecond version updated"), "text/markdown")},
+        )
+    )
+    assert second_prompt.status_code == 200
+    assert second_prompt.json()["action"] == "clarify"
+    second = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "保存"},
         )
     )
 

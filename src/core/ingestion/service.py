@@ -62,6 +62,7 @@ class IngestionService:
         source_message_id: str,
         text: str | None,
         upload: UploadFile | None,
+        user_note: str | None = None,
     ) -> IngestedItemResult:
         logger.info(
             "ingestion start session_id=%s source_message_id=%s has_text=%s has_upload=%s",
@@ -72,6 +73,7 @@ class IngestionService:
         )
         parsed = await self._parse_input(text=text, upload=upload)
         logger.info("ingestion parsed item_type=%s title=%s", parsed.item_type, parsed.title)
+        parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
         summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
         tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
         locator_hint = self._build_locator_hint(parsed)
@@ -138,6 +140,80 @@ class IngestionService:
             reply += f" Topic: `{topic_name}`."
         return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
 
+    async def ingest_saved_upload(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        file_path: Path,
+        filename: str,
+        user_note: str | None = None,
+    ) -> IngestedItemResult:
+        parsed = await self._parse_saved_upload(file_path=file_path, filename=filename)
+        parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
+        summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
+        tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
+        locator_hint = self._build_locator_hint(parsed)
+        document_key = self._build_document_key(parsed=parsed)
+        previous_current = None
+        next_version = 1
+        if document_key:
+            previous_current = self.item_repository.find_current_by_document_key(
+                session_id=session_id,
+                document_key=document_key,
+            )
+            if previous_current is not None:
+                next_version = max(1, int(previous_current.version) + 1)
+        item = self.item_repository.create(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            item_type=parsed.item_type,
+            title=parsed.title,
+            raw_content=parsed.raw_content,
+            normalized_text=parsed.normalized_text,
+            summary=summary,
+            metadata={**parsed.metadata, "tags": tags},
+            locator_hint=locator_hint,
+            document_key=document_key,
+            version=next_version,
+            is_current=1,
+        )
+        if previous_current is not None and previous_current.id != item.id:
+            self.item_repository.mark_superseded(item_id=previous_current.id, superseded_by_item_id=item.id)
+        self._record_user_signals(
+            session_id=session_id,
+            item_id=item.id,
+            item_type=parsed.item_type,
+            tags=tags,
+            title=item.title,
+        )
+        topic_name: str | None = None
+        if self.topic_organizer is not None:
+            assignment = self.topic_organizer.assign_item_to_topic(session_id=session_id, item=item)
+            topic_name = assignment.topic.name
+        if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
+            original_name = parsed.metadata.get("original_file_name", item.title)
+            suffix = parsed.metadata.get("file_suffix", "")
+            parse_status = parsed.metadata.get("parse_status")
+            parse_error = parsed.metadata.get("parse_error")
+            error_hint = f" (parse error: {parse_error})" if parse_status == "failed" and parse_error else ""
+            reply = (
+                f"Saved `{original_name}` as a file upload ({suffix or 'unknown'}). "
+                f"I can't extract searchable text from this file type yet{error_hint}, but I kept the original file so you can find it later. "
+                f"Summary: {summary}"
+            )
+        else:
+            if previous_current is not None:
+                reply = (
+                    f"Updated `{item.title}` to v{item.version} (previous version kept as history). "
+                    f"Summary: {summary}"
+                )
+            else:
+                reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
+        if topic_name:
+            reply += f" Topic: `{topic_name}`."
+        return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
+
     async def _parse_input(self, *, text: str | None, upload: UploadFile | None) -> ParsedContent:
         has_real_upload = upload is not None and bool((upload.filename or "").strip())
         if has_real_upload:
@@ -146,78 +222,7 @@ class IngestionService:
             data = await upload.read()
             target.write_bytes(data)
             logger.info("ingestion upload_saved filename=%s suffix=%s path=%s bytes=%d", upload.filename, suffix, target, len(data))
-            source = FileSource(path=target, filename=upload.filename or target.name)
-            if suffix == ".txt":
-                parsed = self.txt_parser.parse(source)
-            elif suffix in IMAGE_EXTENSIONS:
-                try:
-                    parsed = await anyio.to_thread.run_sync(self.image_parser.parse, source)
-                except Exception as exc:
-                    return ParsedContent(
-                        item_type="file_upload",
-                        title=upload.filename or target.name,
-                        raw_content="",
-                        normalized_text="",
-                        metadata={
-                            "parse_status": "failed",
-                            "file_suffix": suffix or "unknown",
-                            "original_file_name": upload.filename or target.name,
-                            "stored_file_path": str(target),
-                            "parse_error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
-            elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
-                try:
-                    parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
-                except Exception as exc:
-                    # If docling isn't installed or parsing fails, keep the original file.
-                    return ParsedContent(
-                        item_type="file_upload",
-                        title=upload.filename or target.name,
-                        raw_content="",
-                        normalized_text="",
-                        metadata={
-                            "parse_status": "failed",
-                            "file_suffix": suffix or "unknown",
-                            "original_file_name": upload.filename or target.name,
-                            "stored_file_path": str(target),
-                            "parse_error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
-            elif suffix == ".doc":
-                try:
-                    parsed = await anyio.to_thread.run_sync(self.doc_parser.parse, source)
-                except Exception as exc:
-                    # Keep the original file even if parsing fails (bad file, unsupported on this machine, etc).
-                    return ParsedContent(
-                        item_type="file_upload",
-                        title=upload.filename or target.name,
-                        raw_content="",
-                        normalized_text="",
-                        metadata={
-                            "parse_status": "failed",
-                            "file_suffix": suffix or "unknown",
-                            "original_file_name": upload.filename or target.name,
-                            "stored_file_path": str(target),
-                            "parse_error": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-            else:
-                # Keep the original file even if we can't parse it yet.
-                return ParsedContent(
-                    item_type="file_upload",
-                    title=upload.filename or target.name,
-                    raw_content="",
-                    normalized_text="",
-                    metadata={
-                        "parse_status": "unsupported",
-                        "file_suffix": suffix or "unknown",
-                        "original_file_name": upload.filename or target.name,
-                        "stored_file_path": str(target),
-                    },
-                )
-            parsed.metadata["stored_file_path"] = str(target)
-            parsed.metadata["original_file_name"] = upload.filename or target.name
+            parsed = await self._parse_saved_upload(file_path=target, filename=upload.filename or target.name)
             return parsed
         if text is None or not text.strip():
             raise ValueError("Either text or a supported file is required.")
@@ -225,6 +230,79 @@ class IngestionService:
         if self._looks_like_url(stripped):
             return self.link_parser.parse(stripped)
         return self.text_parser.parse(stripped)
+
+    async def _parse_saved_upload(self, *, file_path: Path, filename: str) -> ParsedContent:
+        suffix = file_path.suffix.lower()
+        source = FileSource(path=file_path, filename=filename)
+        if suffix == ".txt":
+            parsed = self.txt_parser.parse(source)
+        elif suffix in IMAGE_EXTENSIONS:
+            try:
+                parsed = await anyio.to_thread.run_sync(self.image_parser.parse, source)
+            except Exception as exc:
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=filename or file_path.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "failed",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": filename or file_path.name,
+                        "stored_file_path": str(file_path),
+                        "parse_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+        elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
+            try:
+                parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
+            except Exception as exc:
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=filename or file_path.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "failed",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": filename or file_path.name,
+                        "stored_file_path": str(file_path),
+                        "parse_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+        elif suffix == ".doc":
+            try:
+                parsed = await anyio.to_thread.run_sync(self.doc_parser.parse, source)
+            except Exception as exc:
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=filename or file_path.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "failed",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": filename or file_path.name,
+                        "stored_file_path": str(file_path),
+                        "parse_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+        else:
+            return ParsedContent(
+                item_type="file_upload",
+                title=filename or file_path.name,
+                raw_content="",
+                normalized_text="",
+                metadata={
+                    "parse_status": "unsupported",
+                    "file_suffix": suffix or "unknown",
+                    "original_file_name": filename or file_path.name,
+                    "stored_file_path": str(file_path),
+                },
+            )
+        parsed.metadata["stored_file_path"] = str(file_path)
+        parsed.metadata["original_file_name"] = filename or file_path.name
+        return parsed
 
     @staticmethod
     def _looks_like_url(value: str) -> bool:
@@ -252,6 +330,9 @@ class IngestionService:
 
     @staticmethod
     def _build_locator_hint(parsed: ParsedContent) -> str | None:
+        user_locator_hint = parsed.metadata.get("user_locator_hint")
+        if user_locator_hint:
+            return str(user_locator_hint)
         original_name = parsed.metadata.get("original_file_name")
         if original_name:
             return f"Look for the file message named `{original_name}` on the saved date."
@@ -273,6 +354,33 @@ class IngestionService:
         stem = re.sub(r"[\s_\-]*(v\d+|final\d*|copy\d*|\d{4}[-_]\d{2}[-_]\d{2})$", "", stem)
         stem = re.sub(r"\s+", " ", stem).strip()
         return stem or None
+
+    @staticmethod
+    def _apply_user_note(*, parsed: ParsedContent, user_note: str | None) -> ParsedContent:
+        note = (user_note or "").strip()
+        if not note:
+            return parsed
+        metadata = dict(parsed.metadata or {})
+        metadata["user_note"] = note
+        normalized = parsed.normalized_text.strip()
+        if parsed.item_type in {"document", "image", "file_upload"}:
+            combined = f"{note}\n\n{normalized}".strip() if normalized else note
+            locator = metadata.get("user_locator_hint") or f"Look for this item using: {note}"
+            metadata["user_locator_hint"] = locator
+            return ParsedContent(
+                item_type=parsed.item_type,
+                title=parsed.title,
+                raw_content=parsed.raw_content,
+                normalized_text=combined,
+                metadata=metadata,
+            )
+        return ParsedContent(
+            item_type=parsed.item_type,
+            title=parsed.title,
+            raw_content=parsed.raw_content,
+            normalized_text=normalized,
+            metadata=metadata,
+        )
 
     def _record_user_signals(
         self,
