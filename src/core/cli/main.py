@@ -33,16 +33,12 @@ def serve(
     uvicorn.run("core.api.app:app", host=host, port=port, reload=reload)
 
 
-@app.command("wechat-poll")
-def wechat_poll() -> None:
-    """Start WeChat iLink long-poll worker."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
-    settings = CoreSettings()
-    if not settings.wechat_enabled:
-        raise typer.BadParameter("Set CORA_WECHAT_ENABLED=true in .env first.")
+def _build_wechat_runtime(
+    *,
+    settings: CoreSettings,
+    container=None,
+):
+    """Build the runtime objects needed by the WeChat poller."""
     account_store = WechatAccountStore(settings.wechat_accounts_dir)
     persisted = account_store.load(name=settings.wechat_account_name)
     token = settings.wechat_token or (persisted.token if persisted else None)
@@ -54,17 +50,11 @@ def wechat_poll() -> None:
             "No wechat token found. Run `python -m core.cli.main wechat-login` first, "
             "or set CORA_WECHAT_TOKEN in .env."
         )
-    typer.echo(
-        f"Starting wechat poller (account={settings.wechat_account_name}, base_url={base_url})"
-    )
 
-    container = get_clawbot_container()
-    container.initialize()
-    gateway = WechatGatewayService(
-        clawbot_service=container.clawbot_service,
-        event_repository=ChannelEventRepository(container.database),
-        session_map_repository=ChannelSessionMapRepository(container.database),
-    )
+    active_container = container or get_clawbot_container()
+    active_container.initialize()
+
+    session_map_repository = ChannelSessionMapRepository(active_container.database)
     client = WechatIlinkClient(
         WechatIlinkConfig(
             token=token,
@@ -74,7 +64,31 @@ def wechat_poll() -> None:
             download_dir=settings.files_storage_dir / "wechat_inbox",
         )
     )
+    gateway = WechatGatewayService(
+        clawbot_service=active_container.clawbot_service,
+        event_repository=ChannelEventRepository(active_container.database),
+        session_map_repository=session_map_repository,
+        ilink_client=client,
+    )
+    active_container.configure_gateway(gateway, session_map_repository)
     poller = WechatPoller(client=client, gateway_service=gateway)
+    return active_container, client, gateway, poller, base_url
+
+
+@app.command("wechat-poll")
+def wechat_poll() -> None:
+    """Start WeChat iLink long-poll worker."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    settings = CoreSettings()
+    if not settings.wechat_enabled:
+        raise typer.BadParameter("Set CORA_WECHAT_ENABLED=true in .env first.")
+    _, client, _, poller, base_url = _build_wechat_runtime(settings=settings)
+    typer.echo(
+        f"Starting wechat poller (account={settings.wechat_account_name}, base_url={base_url})"
+    )
     try:
         import asyncio
 

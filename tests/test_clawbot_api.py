@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.api.app import create_app  # noqa: E402
+from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
 from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
 from core.clawbot import dependencies as deps  # noqa: E402
@@ -212,6 +213,7 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
         topic_repository=topic_repository,
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,
+        tool_executor=tool_executor,
         templates_dir=str(ROOT / "src" / "core" / "api" / "templates"),
         templates_static_dir=str(ROOT / "src" / "core" / "api" / "static"),
     )
@@ -1082,3 +1084,31 @@ def test_wechat_gateway_ingests_file_event(tmp_path):
 
     assert result.deduplicated is False
     assert result.action == "capture"
+
+
+def test_build_wechat_runtime_wires_file_delivery_tool(tmp_path):
+    class _SpyWechatIlinkClient:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        async def aclose(self) -> None:
+            return None
+
+    container = build_test_container(tmp_path)
+    settings = CoreSettings(
+        clawbot_database_path=tmp_path / "clawbot.db",
+        files_storage_dir=tmp_path / "files",
+        wechat_enabled=True,
+        wechat_token="test-token",
+    )
+
+    original_client_cls = sys.modules["core.cli.main"].WechatIlinkClient
+    sys.modules["core.cli.main"].WechatIlinkClient = _SpyWechatIlinkClient
+    try:
+        _, client, gateway, _, _ = _build_wechat_runtime(settings=settings, container=container)
+    finally:
+        sys.modules["core.cli.main"].WechatIlinkClient = original_client_cls
+
+    assert gateway._ilink_client is client
+    assert container.tool_executor.gateway_service is gateway
+    assert container.tool_executor.session_map_repository is not None

@@ -13,6 +13,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Read or summarize known items already selected from the wiki.",
         "tools": ["read_item", "summarize_item"],
     },
+    "channel_delivery": {
+        "description": "Deliver previously saved files back to the user through a supported channel.",
+        "tools": ["send_file_to_user"],
+    },
     "agent_state": {
         "description": "Clarification and short-term conversation state management.",
         "tools": ["clarify_reference", "clarify_capture_intent"],
