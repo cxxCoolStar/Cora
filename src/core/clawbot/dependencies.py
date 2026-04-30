@@ -14,10 +14,20 @@ from core.clawbot.tools import ArchiveToolExecutor
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
-from core.retrieval.query_rewriter import QueryRewriter
-from core.retrieval.service import RetrievalService
 from core.storage.db import DatabaseManager
-from core.storage.repositories import ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository
+from core.storage.repositories import (
+    ClarificationRepository,
+    ItemChunkRepository,
+    ItemRepository,
+    MessageRepository,
+    SessionRepository,
+    TopicActivityRepository,
+    TopicItemRepository,
+    TopicRepository,
+    UserSignalRepository,
+)
+from core.topics.classifier import TopicClassifier
+from core.topics.service import TopicOrganizerService
 
 
 @dataclass
@@ -30,8 +40,8 @@ class ClawBotContainer:
     item_chunk_repository: ItemChunkRepository
     clarification_repository: ClarificationRepository
     user_signal_repository: UserSignalRepository
+    topic_repository: TopicRepository
     ingestion_service: IngestionService
-    retrieval_service: RetrievalService
     clawbot_service: ClawBotService
     templates_dir: str
     templates_static_dir: str
@@ -54,6 +64,9 @@ def get_clawbot_container() -> ClawBotContainer:
         item_chunk_repository = ItemChunkRepository(database)
         clarification_repository = ClarificationRepository(database)
         user_signal_repository = UserSignalRepository(database)
+        topic_repository = TopicRepository(database)
+        topic_item_repository = TopicItemRepository(database)
+        topic_activity_repository = TopicActivityRepository(database)
         ingestion_service = IngestionService(
             item_repository=item_repository,
             item_chunk_repository=item_chunk_repository,
@@ -71,21 +84,24 @@ def get_clawbot_container() -> ClawBotContainer:
         elif settings.debug:
             model_client = DevelopmentModelClient()
 
-        query_rewriter = QueryRewriter(model_client=model_client) if model_client else None
-        retrieval_service = RetrievalService(
+        topic_classifier = TopicClassifier(model_client=model_client)
+        topic_organizer = TopicOrganizerService(
+            classifier=topic_classifier,
+            topic_repository=topic_repository,
+            topic_item_repository=topic_item_repository,
+            topic_activity_repository=topic_activity_repository,
             item_repository=item_repository,
-            item_chunk_repository=item_chunk_repository,
-            query_rewriter=query_rewriter,
         )
+        ingestion_service.topic_organizer = topic_organizer
 
         llm_classifier = LLMIntentClassifier(model_client=model_client) if model_client else None
         intent_router = IntentRouter(llm_classifier=llm_classifier)
         planner = AgentPlanner(model_client=model_client)
         tool_executor = ArchiveToolExecutor(
             ingestion_service=ingestion_service,
-            retrieval_service=retrieval_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
+            topic_organizer=topic_organizer,
         )
         clawbot_service = ClawBotService(
             session_repository=session_repository,
@@ -95,10 +111,11 @@ def get_clawbot_container() -> ClawBotContainer:
             ingestion_service=ingestion_service,
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,
-            retrieval_service=retrieval_service,
+            topic_repository=topic_repository,
             intent_router=intent_router,
             planner=planner,
             tool_executor=tool_executor,
+            topic_organizer=topic_organizer,
         )
         templates_dir = str(Path(__file__).resolve().parents[1] / "api" / "templates")
         static_dir = str(Path(__file__).resolve().parents[1] / "api" / "static")
@@ -111,8 +128,8 @@ def get_clawbot_container() -> ClawBotContainer:
             item_chunk_repository=item_chunk_repository,
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,
+            topic_repository=topic_repository,
             ingestion_service=ingestion_service,
-            retrieval_service=retrieval_service,
             clawbot_service=clawbot_service,
             templates_dir=templates_dir,
             templates_static_dir=static_dir,

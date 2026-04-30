@@ -17,6 +17,7 @@ from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
 from core.storage.repositories import ItemChunkRepository, ItemRepository, MessageRepository, UserSignalRepository
+from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 class IngestedItemResult:
     item_id: str
     reply: str
+    topic_name: str | None = None
 
 
 class IngestionService:
@@ -36,6 +38,7 @@ class IngestionService:
         message_repository: MessageRepository,
         user_signal_repository: UserSignalRepository,
         storage_dir: Path,
+        topic_organizer: TopicOrganizerService | None = None,
     ) -> None:
         self.item_repository = item_repository
         self.item_chunk_repository = item_chunk_repository
@@ -43,6 +46,7 @@ class IngestionService:
         self.user_signal_repository = user_signal_repository
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.topic_organizer = topic_organizer
         self.text_parser = TextParser()
         self.link_parser = LinkParser()
         self.txt_parser = TxtFileParser()
@@ -110,6 +114,11 @@ class IngestionService:
         for index, chunk in enumerate(chunks):
             self.item_chunk_repository.create(item_id=item.id, chunk_index=index, content=chunk, metadata={"title": item.title})
         logger.info("ingestion stored item_id=%s chunks=%d item_type=%s", item.id, len(chunks), parsed.item_type)
+        topic_name: str | None = None
+        if self.topic_organizer is not None:
+            assignment = self.topic_organizer.assign_item_to_topic(session_id=session_id, item=item)
+            topic_name = assignment.topic.name
+            logger.info("ingestion topic_assignment item_id=%s topic=%s created=%s", item.id, assignment.topic.slug, assignment.created)
 
         if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
             original_name = parsed.metadata.get("original_file_name", item.title)
@@ -130,7 +139,9 @@ class IngestionService:
                 )
             else:
                 reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
-        return IngestedItemResult(item_id=item.id, reply=reply)
+        if topic_name:
+            reply += f" Topic: `{topic_name}`."
+        return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
 
     async def _parse_input(self, *, text: str | None, upload: UploadFile | None) -> ParsedContent:
         has_real_upload = upload is not None and bool((upload.filename or "").strip())

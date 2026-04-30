@@ -13,6 +13,9 @@ from core.storage.models import (
     ItemRecord,
     MessageRecord,
     SessionRecord,
+    TopicActivityRecord,
+    TopicItemRecord,
+    TopicRecord,
     UserSignalRecord,
 )
 
@@ -197,6 +200,17 @@ class ItemRepository:
                 return record
         return records[0] if records else None
 
+    def list_current_by_ids(self, *, item_ids: list[str]) -> list[ItemRecord]:
+        if not item_ids:
+            return []
+        with self.database.session() as session:
+            stmt = (
+                select(ItemRecord)
+                .where(ItemRecord.id.in_(item_ids), ItemRecord.is_current == 1)
+                .order_by(desc(ItemRecord.created_at))
+            )
+            return list(session.scalars(stmt))
+
 
 class ItemChunkRepository:
     def __init__(self, database: DatabaseManager) -> None:
@@ -225,6 +239,152 @@ class ItemChunkRepository:
                 .order_by(ItemChunkRecord.item_id, ItemChunkRecord.chunk_index)
             )
             return list(session.scalars(stmt))
+
+
+class TopicRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        slug: str,
+        summary: str,
+        tags: list[str],
+        metadata: dict[str, Any],
+    ) -> TopicRecord:
+        with self.database.session() as session:
+            record = TopicRecord(
+                session_id=session_id,
+                name=name,
+                slug=slug,
+                summary=summary,
+                tags_json=tags,
+                metadata_json=metadata,
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def find_by_slug(self, *, slug: str) -> TopicRecord | None:
+        with self.database.session() as session:
+            stmt = (
+                select(TopicRecord)
+                .where(TopicRecord.slug == slug)
+                .order_by(desc(TopicRecord.updated_at))
+                .limit(1)
+            )
+            return session.scalar(stmt)
+
+    def list_by_session(self, *, session_id: str) -> list[TopicRecord]:
+        with self.database.session() as session:
+            stmt = select(TopicRecord).where(TopicRecord.session_id == session_id).order_by(desc(TopicRecord.updated_at))
+            return list(session.scalars(stmt))
+
+    def list_all(self) -> list[TopicRecord]:
+        with self.database.session() as session:
+            stmt = select(TopicRecord).order_by(desc(TopicRecord.updated_at))
+            return list(session.scalars(stmt))
+
+    def search(self, *, query: str, session_id: str, limit: int = 3) -> list[TopicRecord]:
+        lowered = query.lower()
+        with self.database.session() as session:
+            stmt = select(TopicRecord).where(TopicRecord.session_id == session_id).order_by(desc(TopicRecord.updated_at))
+            topics = list(session.scalars(stmt))
+        scored: list[tuple[TopicRecord, int]] = []
+        for topic in topics:
+            haystack = " ".join([topic.name or "", topic.slug or "", topic.summary or "", " ".join(topic.tags_json or [])]).lower()
+            score = 0
+            compact_query = "".join(lowered.split())
+            compact_haystack = haystack.replace(" ", "")
+            if compact_query and (topic.name.lower() in compact_query or topic.slug.lower() in compact_query):
+                score += max(len(topic.name), len(topic.slug)) ** 2 * 3
+            if compact_query and compact_query in compact_haystack:
+                score += len(compact_query) ** 2
+            for token in [t for t in lowered.replace("，", " ").split() if t]:
+                if token in haystack:
+                    score += len(token) ** 2
+            if query.lower() in haystack:
+                score += len(query.strip()) ** 2
+            if score > 0:
+                scored.append((topic, score))
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [topic for topic, _ in scored[:limit]]
+
+    def update_summary_and_tags(self, *, topic_id: str, summary: str, tags: list[str]) -> None:
+        with self.database.session() as session:
+            record = session.get(TopicRecord, topic_id)
+            if record is None:
+                raise KeyError(f"Topic not found: {topic_id}")
+            record.summary = summary
+            record.tags_json = tags
+            session.commit()
+
+
+class TopicItemRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def link_item(self, *, topic_id: str, item_id: str, confidence: str, reason: str) -> TopicItemRecord:
+        with self.database.session() as session:
+            stmt = (
+                select(TopicItemRecord)
+                .where(TopicItemRecord.topic_id == topic_id, TopicItemRecord.item_id == item_id)
+                .limit(1)
+            )
+            existing = session.scalar(stmt)
+            if existing is not None:
+                return existing
+            record = TopicItemRecord(topic_id=topic_id, item_id=item_id, confidence=confidence, reason=reason)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def list_item_ids_for_topic(self, *, topic_id: str, limit: int = 20) -> list[str]:
+        with self.database.session() as session:
+            stmt = (
+                select(TopicItemRecord)
+                .where(TopicItemRecord.topic_id == topic_id)
+                .order_by(desc(TopicItemRecord.created_at))
+                .limit(limit)
+            )
+            return [record.item_id for record in session.scalars(stmt)]
+
+    def list_topics_for_item(self, *, item_id: str) -> list[TopicItemRecord]:
+        with self.database.session() as session:
+            stmt = select(TopicItemRecord).where(TopicItemRecord.item_id == item_id).order_by(desc(TopicItemRecord.created_at))
+            return list(session.scalars(stmt))
+
+
+class TopicActivityRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create(
+        self,
+        *,
+        topic_id: str,
+        item_id: str | None,
+        activity_type: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TopicActivityRecord:
+        with self.database.session() as session:
+            record = TopicActivityRecord(
+                topic_id=topic_id,
+                item_id=item_id,
+                activity_type=activity_type,
+                message=message,
+                metadata_json=metadata or {},
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
 
 
 class ClarificationRepository:

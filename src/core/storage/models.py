@@ -61,6 +61,43 @@ class ItemRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TopicRecord(Base):
+    __tablename__ = "clawbot_topics"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    slug: Mapped[str] = mapped_column(String(255), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TopicItemRecord(Base):
+    __tablename__ = "clawbot_topic_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("clawbot_topics.id"), index=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("clawbot_items.id"), index=True)
+    confidence: Mapped[str] = mapped_column(String(32), default="medium")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TopicActivityRecord(Base):
+    __tablename__ = "clawbot_topic_activity"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("clawbot_topics.id"), index=True)
+    item_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_items.id"), nullable=True, index=True)
+    activity_type: Mapped[str] = mapped_column(String(64), index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 class ItemChunkRecord(Base):
     __tablename__ = "clawbot_item_chunks"
 

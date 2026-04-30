@@ -65,6 +65,15 @@ class UserProfileSection(BaseModel):
     values: list[str]
 
 
+class TopicDebugResponse(BaseModel):
+    id: str
+    name: str
+    slug: str
+    summary: str
+    tags: list[str]
+    created_at: datetime
+
+
 class DecisionDebugResponse(BaseModel):
     action: str
     confidence: str
@@ -80,4 +89,5 @@ class SessionDebugResponse(BaseModel):
     chunks: list[ChunkDebugResponse]
     user_signals: list[UserSignalDebugResponse]
     user_profile: list[UserProfileSection]
+    topics: list[TopicDebugResponse]
     recent_decisions: list[DecisionDebugResponse]

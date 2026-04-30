@@ -115,7 +115,7 @@
     <main class="shell">
         <aside class="panel sidebar">
             <h1>Debug Explorer</h1>
-            <p>Inspect saved sessions, messages, items, and chunks.</p>
+                    <p>Inspect saved sessions, messages, items, topics, and routing logs.</p>
             <div class="session-list">
                 {% for session in sessions %}
                 <a class="session-link {% if selected_session and selected_session.session_id == session.id %}active{% endif %}" href="/debug?session_id={{ session.id }}">
@@ -139,7 +139,6 @@
                     {% endif %}
                 </div>
                 <a href="/">Back To Chat</a>
-                <a href="/debug/retrieval">Retrieval Debug</a>
             </div>
             {% if selected_session %}
             <div class="grid">

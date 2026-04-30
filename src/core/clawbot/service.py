@@ -12,6 +12,7 @@ from core.clawbot.schemas import (
     MessageDebugResponse,
     SessionDebugResponse,
     SessionReplyResponse,
+    TopicDebugResponse,
     UserSignalDebugResponse,
     UserProfileSection,
 )
@@ -20,7 +21,6 @@ from core.clawbot.planner import AgentPlanner, ToolPlan
 from core.clawbot.tools import ArchiveToolExecutor, ToolExecutionResult
 from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
-from core.retrieval.service import RetrievalService
 from core.storage.models import SessionRecord
 from core.storage.repositories import (
     ClarificationRepository,
@@ -28,8 +28,10 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     SessionRepository,
+    TopicRepository,
     UserSignalRepository,
 )
+from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +49,11 @@ class ClawBotService:
         ingestion_service: IngestionService,
         clarification_repository: ClarificationRepository,
         user_signal_repository: UserSignalRepository,
-        retrieval_service: RetrievalService,
+        topic_repository: TopicRepository,
         intent_router: IntentRouter | None = None,
         planner: AgentPlanner | None = None,
         tool_executor: ArchiveToolExecutor | None = None,
+        topic_organizer: TopicOrganizerService | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -59,15 +62,15 @@ class ClawBotService:
         self.ingestion_service = ingestion_service
         self.clarification_repository = clarification_repository
         self.user_signal_repository = user_signal_repository
-        self.retrieval_service = retrieval_service
+        self.topic_repository = topic_repository
         self.intent_router = intent_router or IntentRouter()
         self.planner = planner or AgentPlanner()
         self.tool_executor = tool_executor or ArchiveToolExecutor(
             ingestion_service=ingestion_service,
-            retrieval_service=retrieval_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
         )
+        self.topic_organizer = topic_organizer
         self.user_profile_aggregator = UserProfileAggregator()
 
     def create_session(self) -> SessionRecord:
@@ -260,6 +263,7 @@ class ClawBotService:
         items = self.item_repository.list_by_session(session_id=session_id)
         chunks = self.item_chunk_repository.list_by_item_ids(item_ids=[item.id for item in items])
         signals = self.user_signal_repository.list_by_session(session_id=session_id)
+        topics = self.topic_repository.list_by_session(session_id=session_id)
         profile = self.user_profile_aggregator.build(signals=signals)
         return SessionDebugResponse(
             session_id=session.id,
@@ -309,6 +313,17 @@ class ClawBotService:
             user_profile=[
                 UserProfileSection(name=section.name, values=section.values)
                 for section in profile
+            ],
+            topics=[
+                TopicDebugResponse(
+                    id=topic.id,
+                    name=topic.name,
+                    slug=topic.slug,
+                    summary=topic.summary,
+                    tags=list(topic.tags_json or []),
+                    created_at=topic.created_at,
+                )
+                for topic in topics
             ],
             recent_decisions=[
                 DecisionDebugResponse(

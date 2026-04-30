@@ -7,6 +7,7 @@ from typing import Any
 
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.tools.toolsets import resolve_toolsets
 
 
 @dataclass(slots=True)
@@ -18,7 +19,7 @@ class ToolPlan:
 
 
 class AgentPlanner:
-    """Choose a constrained archive tool based on the user turn and session state."""
+    """Choose a constrained wiki tool based on the user turn and session state."""
 
     REFERENCE_CUES = (
         "这里面",
@@ -38,8 +39,10 @@ class AgentPlanner:
         "展开讲讲",
         "写了什么",
     )
-    SUMMARY_CUES = ("总结", "概括", "提炼", "重点", "写了什么", "讲了什么", "说了什么")
     FULL_TEXT_CUES = ("全文", "原文", "完整", "全部内容", "具体内容")
+    KNOWLEDGE_OVERVIEW_CUES = ("知识库中有什么", "知识库里有什么", "知识库概览", "我这里都存了什么", "现在都有什么")
+    LIST_TOPIC_CUES = ("有哪些topic", "有哪些主题", "列出topic", "列出主题", "topic列表", "主题列表")
+    DEFAULT_TOOLSETS = ["capture", "wiki_browse", "wiki_read", "agent_state"]
 
     def __init__(self, model_client: ModelClient | None = None) -> None:
         self.model_client = model_client
@@ -78,18 +81,22 @@ class AgentPlanner:
         rank = self._extract_rank(content)
         if rank is not None and working_set:
             mode = "full_text" if self._wants_full_text(content) else "summary"
-            tool = "get_item" if mode == "full_text" else "summarize_item"
+            tool = "read_item" if mode == "full_text" else "summarize_item"
             return ToolPlan(
                 tool=tool,
-                arguments={"target": {"type": "working_set_rank", "value": rank}, "mode": mode if tool == "get_item" else None, "style": "brief" if tool == "summarize_item" else None},
-                reason="The user referenced a ranked search result.",
+                arguments={
+                    "target": {"type": "working_set_rank", "value": rank},
+                    "mode": mode if tool == "read_item" else None,
+                    "style": "brief" if tool == "summarize_item" else None,
+                },
+                reason="The user referenced a ranked working-set result.",
             )
 
         if self._looks_like_reference_followup(content):
             if focus_item_id:
                 if self._wants_full_text(content):
                     return ToolPlan(
-                        tool="get_item",
+                        tool="read_item",
                         arguments={"target": {"type": "focus_item", "value": ""}, "mode": "full_text"},
                         reason="Follow-up question about the current focus item.",
                     )
@@ -106,10 +113,22 @@ class AgentPlanner:
                 )
 
         if coarse_intent == "retrieve":
+            if self._looks_like_knowledge_overview(content):
+                return ToolPlan(
+                    tool="overview_knowledge_base",
+                    arguments={},
+                    reason="The user is asking for a knowledge-base overview.",
+                )
+            if self._looks_like_topic_listing(content):
+                return ToolPlan(
+                    tool="list_topics",
+                    arguments={},
+                    reason="The user is asking for the current topic list.",
+                )
             return ToolPlan(
-                tool="search_items",
+                tool="open_topic",
                 arguments={"query": content, "top_k": 3},
-                reason="The user is asking to find previously saved material.",
+                reason="The user is asking to open or find relevant material in the topic/wiki index.",
             )
 
         if coarse_intent == "organize" and focus_item_id:
@@ -120,9 +139,9 @@ class AgentPlanner:
             )
 
         return ToolPlan(
-            tool="save_text_or_link",
-            arguments={"text": content, "force_type": "auto"},
-            reason="Default archive action for incoming content.",
+            tool="save_link" if self._looks_like_link(content) else "save_text",
+            arguments={"text": content},
+            reason="Default wiki capture action for incoming content.",
         )
 
     def _llm_plan(
@@ -135,12 +154,16 @@ class AgentPlanner:
     ) -> ToolPlan | None:
         if self.model_client is None or not content:
             return None
+        allowed_tools = ", ".join(resolve_toolsets(self.DEFAULT_TOOLSETS))
         prompt = (
-            "You are choosing one archive tool for a personal archive assistant.\n"
-            "Allowed tools: save_text_or_link, save_file, search_items, get_item, summarize_item, clarify_reference.\n"
+            "You are choosing one tool for a personal wiki assistant.\n"
+            f"Allowed tools: {allowed_tools}.\n"
             "Rules:\n"
-            "- If the user asks to find earlier material, use search_items.\n"
-            "- If the user asks about a current file/result ('this', 'that', 'the second one', 'full text'), prefer get_item or summarize_item.\n"
+            "- If the user asks what exists in the knowledge base, use overview_knowledge_base or list_topics.\n"
+            "- If the user asks to find or open earlier material, prefer open_topic.\n"
+            "- If the user asks about a current file/result ('this', 'that', 'the second one', 'full text'), prefer read_item or summarize_item.\n"
+            "- If the user submits a standalone URL, prefer save_link.\n"
+            "- Otherwise, new material should usually be saved with save_text or save_file.\n"
             "- If the target is ambiguous and there are multiple active candidates, use clarify_reference.\n"
             "- Do not invent item IDs.\n"
             "- Return strict JSON with keys: tool, arguments, reason.\n"
@@ -176,23 +199,32 @@ class AgentPlanner:
         arguments = payload.get("arguments") or {}
         if not isinstance(arguments, dict):
             return None
-        reason = str(payload.get("reason") or "LLM selected an archive tool.").strip()
+        reason = str(payload.get("reason") or "LLM selected a wiki tool.").strip()
         return ToolPlan(tool=tool, arguments=arguments, reason=reason, source="llm")
 
     def _sanitize_plan(self, plan: ToolPlan, *, fallback: ToolPlan) -> ToolPlan:
-        allowed = {"save_text_or_link", "save_file", "search_items", "get_item", "summarize_item", "clarify_reference"}
-        if plan.tool not in allowed:
+        alias_map = {
+            "save_text_or_link": "save_text",
+            "search_items": "open_topic",
+            "get_item": "read_item",
+        }
+        normalized_tool = alias_map.get(plan.tool, plan.tool)
+        allowed = set(resolve_toolsets(self.DEFAULT_TOOLSETS))
+        if normalized_tool not in allowed:
             return fallback
-        if plan.tool == "save_file":
-            return ToolPlan(tool="save_file", arguments={}, reason=plan.reason or fallback.reason, source=plan.source)
-        if plan.tool == "search_items":
+
+        if normalized_tool in {"save_file", "overview_knowledge_base", "list_topics"}:
+            return ToolPlan(tool=normalized_tool, arguments={}, reason=plan.reason or fallback.reason, source=plan.source)
+
+        if normalized_tool == "open_topic":
             query = str(plan.arguments.get("query") or "").strip()
             if not query:
                 return fallback
             top_k = int(plan.arguments.get("top_k") or 3)
             top_k = max(1, min(5, top_k))
-            return ToolPlan(tool="search_items", arguments={"query": query, "top_k": top_k}, reason=plan.reason, source=plan.source)
-        if plan.tool in {"get_item", "summarize_item"}:
+            return ToolPlan(tool="open_topic", arguments={"query": query, "top_k": top_k}, reason=plan.reason, source=plan.source)
+
+        if normalized_tool in {"read_item", "summarize_item"}:
             target = plan.arguments.get("target")
             if not isinstance(target, dict):
                 return fallback
@@ -201,7 +233,7 @@ class AgentPlanner:
             if target_type not in {"item_id", "focus_item", "working_set_rank"}:
                 return fallback
             args: dict[str, Any] = {"target": {"type": target_type, "value": target_value}}
-            if plan.tool == "get_item":
+            if normalized_tool == "read_item":
                 mode = str(plan.arguments.get("mode") or "summary").strip()
                 if mode not in {"summary", "full_text", "key_points"}:
                     mode = "summary"
@@ -211,23 +243,23 @@ class AgentPlanner:
                 if style not in {"brief", "structured", "interview_notes"}:
                     style = "brief"
                 args["style"] = style
-            return ToolPlan(tool=plan.tool, arguments=args, reason=plan.reason, source=plan.source)
-        if plan.tool == "clarify_reference":
+            return ToolPlan(tool=normalized_tool, arguments=args, reason=plan.reason, source=plan.source)
+
+        if normalized_tool == "clarify_reference":
             return ToolPlan(
                 tool="clarify_reference",
                 arguments={"reference_text": str(plan.arguments.get("reference_text") or "").strip()},
                 reason=plan.reason,
                 source=plan.source,
             )
+
         text = str(plan.arguments.get("text") or "").strip()
         if not text:
             return fallback
-        force_type = str(plan.arguments.get("force_type") or "auto").strip()
-        if force_type not in {"auto", "text", "link"}:
-            force_type = "auto"
+        chosen = normalized_tool if normalized_tool in {"save_text", "save_link"} else "save_text"
         return ToolPlan(
-            tool="save_text_or_link",
-            arguments={"text": text, "force_type": force_type},
+            tool=chosen,
+            arguments={"text": text},
             reason=plan.reason,
             source=plan.source,
         )
@@ -261,3 +293,15 @@ class AgentPlanner:
     def _wants_full_text(cls, content: str) -> bool:
         return any(token in content for token in cls.FULL_TEXT_CUES)
 
+    @classmethod
+    def _looks_like_knowledge_overview(cls, content: str) -> bool:
+        return any(token in content for token in cls.KNOWLEDGE_OVERVIEW_CUES)
+
+    @classmethod
+    def _looks_like_topic_listing(cls, content: str) -> bool:
+        compact = content.replace(" ", "").lower()
+        return any(token in compact for token in cls.LIST_TOPIC_CUES)
+
+    @staticmethod
+    def _looks_like_link(content: str) -> bool:
+        return content.startswith(("http://", "https://")) and " " not in content and "\n" not in content

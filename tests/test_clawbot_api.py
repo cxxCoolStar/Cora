@@ -21,10 +21,16 @@ from core.config import CoreSettings  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
+from core.clawbot.tools import ArchiveToolExecutor  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
-from core.retrieval.service import RetrievalService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemChunkRepository, ItemRepository, MessageRepository, SessionRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.topics.classifier import TopicClassifier  # noqa: E402
+from core.topics.service import TopicOrganizerService  # noqa: E402
+from core.llm.base import ModelClient  # noqa: E402
+from core.schemas.message import Message  # noqa: E402
+from core.schemas.model import ModelResponse  # noqa: E402
+from core.schemas.tool import ToolSpec  # noqa: E402
 
 
 class FakeLLMIntentClassifier:
@@ -33,6 +39,27 @@ class FakeLLMIntentClassifier:
 
     def classify(self, *, text: str):
         return self.result
+
+
+class StubTopicModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        system_prompt = messages[0].content if messages else ""
+        user_text = messages[-1].content if messages else ""
+        if "topic-query-router" in (messages[0].session_id if messages else "") or "existing_topics" in user_text and "query" in user_text:
+            if "网络配置" in user_text or "内网" in user_text:
+                return ModelResponse(assistant_text='{"topic_slugs":["网络配置"],"reason":"Query is asking about network configuration."}')
+            if "面试" in user_text:
+                return ModelResponse(assistant_text='{"topic_slugs":["面试"],"reason":"Query is about interview materials."}')
+            if "agent" in user_text.lower() or "react" in user_text.lower() or "memory" in user_text.lower():
+                return ModelResponse(assistant_text='{"topic_slugs":["ai资料"],"reason":"Query is about AI learning materials."}')
+            return ModelResponse(assistant_text='{"topic_slugs":[],"reason":"No matching topic."}')
+        if "network" in user_text.lower() or "内网" in user_text or "dns" in user_text.lower() or "网关" in user_text:
+            return ModelResponse(assistant_text='{"topic_name":"网络配置","slug":"网络配置","summary":"内网、DNS、网关等网络配置资料。","tags":["network"],"reason":"The item is about network configuration."}')
+        if "面试" in user_text:
+            return ModelResponse(assistant_text='{"topic_name":"面试","slug":"面试","summary":"面试题和面试宝典资料。","tags":["interview"],"reason":"The item is about interviews."}')
+        if "agent" in user_text.lower() or "react" in user_text.lower() or "memory" in user_text.lower():
+            return ModelResponse(assistant_text='{"topic_name":"AI资料","slug":"ai资料","summary":"Agent、ReAct、Memory 等 AI 学习资料。","tags":["agent","ai"],"reason":"The item is about AI learning materials."}')
+        return ModelResponse(assistant_text='{"topic_name":"杂项资料","slug":"杂项资料","summary":"一般资料。","tags":[],"reason":"Generic archive item."}')
 
 
 def build_test_container(tmp_path: Path) -> ClawBotContainer:
@@ -47,16 +74,29 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
     item_chunk_repository = ItemChunkRepository(database)
     clarification_repository = ClarificationRepository(database)
     user_signal_repository = UserSignalRepository(database)
+    topic_repository = TopicRepository(database)
+    topic_item_repository = TopicItemRepository(database)
+    topic_activity_repository = TopicActivityRepository(database)
+    topic_organizer = TopicOrganizerService(
+        classifier=TopicClassifier(model_client=StubTopicModelClient()),
+        topic_repository=topic_repository,
+        topic_item_repository=topic_item_repository,
+        topic_activity_repository=topic_activity_repository,
+        item_repository=item_repository,
+    )
     ingestion_service = IngestionService(
         item_repository=item_repository,
         item_chunk_repository=item_chunk_repository,
         message_repository=message_repository,
         user_signal_repository=user_signal_repository,
         storage_dir=settings.files_storage_dir,
+        topic_organizer=topic_organizer,
     )
-    retrieval_service = RetrievalService(
+    tool_executor = ArchiveToolExecutor(
+        ingestion_service=ingestion_service,
         item_repository=item_repository,
-        item_chunk_repository=item_chunk_repository,
+        clarification_repository=clarification_repository,
+        topic_organizer=topic_organizer,
     )
     clawbot_service = ClawBotService(
         session_repository=session_repository,
@@ -66,7 +106,9 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         ingestion_service=ingestion_service,
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
-        retrieval_service=retrieval_service,
+        topic_repository=topic_repository,
+        tool_executor=tool_executor,
+        topic_organizer=topic_organizer,
     )
     container = ClawBotContainer(
         settings=settings,
@@ -77,8 +119,8 @@ def build_test_container(tmp_path: Path) -> ClawBotContainer:
         item_chunk_repository=item_chunk_repository,
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
+        topic_repository=topic_repository,
         ingestion_service=ingestion_service,
-        retrieval_service=retrieval_service,
         clawbot_service=clawbot_service,
         templates_dir=str(ROOT / "src" / "core" / "api" / "templates"),
         templates_static_dir=str(ROOT / "src" / "core" / "api" / "static"),
@@ -391,7 +433,7 @@ def test_retrieve_short_material_returns_full_text(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "retrieve"
-    assert "内容较短，直接给你全文" in payload["reply"]
+    assert "全文" in payload["reply"]
     assert "10.30.1.127" in payload["reply"]
 
 
@@ -615,6 +657,116 @@ def test_reupload_same_document_creates_new_version_and_hides_old_from_default_l
     items = items_response.json()
     assert len(items) == 1
     assert items[0]["title"] == "resume_v2"
+
+
+def test_ingest_creates_topic_assignment_visible_in_debug(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存内网地址：10.30.1.127，网关10.30.0.1，DNS 114.114.114.114"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert "Topic:" in response.json()["reply"]
+
+    debug = deps._container.clawbot_service.get_session_debug(session_id=session_id)
+    assert debug.topics
+    assert any(topic.name in {"网络配置", "AI资料", "杂项资料"} for topic in debug.topics)
+
+
+def test_search_can_use_topic_first(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存这份内网配置：地址10.30.1.127，网关10.30.0.1"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "帮我找一下网络配置"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "10.30.1.127" in payload["reply"]
+
+
+def test_knowledge_overview_routes_to_overview_tool(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存这份内网配置：地址10.30.1.127，网关10.30.0.1"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "现在知识库中有什么"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "知识库里共有" in payload["reply"]
+    assert "topic" in payload["reply"].lower()
+
+
+def test_list_topics_routes_to_topic_listing(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存这份内网配置：地址10.30.1.127，网关10.30.0.1"},
+        )
+    )
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "有哪些主题"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "retrieve"
+    assert "当前共有" in payload["reply"]
 
 def test_llm_router_can_promote_ambiguous_text_to_capture():
     router = IntentRouter(
