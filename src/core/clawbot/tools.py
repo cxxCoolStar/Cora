@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -53,6 +54,9 @@ class ArchiveToolExecutor:
         self.channel_name = channel_name
         register_builtin_tools()
 
+    def can_send_files_to_user(self) -> bool:
+        return self.gateway_service is not None and self.session_map_repository is not None
+
     async def execute(
         self,
         *,
@@ -86,7 +90,7 @@ class ArchiveToolExecutor:
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if invocation.upload is None:
             return ToolExecutionResult(
-                reply="没有可保存的文件。如果你的意图是保存文本内容，请使用 save_text 工具。",
+                reply="没有可保存的文件。如果你的意图是保存文本内容，请使用 save_content 工具。",
                 action="chat",
             )
         saved = await self.ingestion_service.ingest(
@@ -109,7 +113,7 @@ class ArchiveToolExecutor:
             },
         )
 
-    async def _tool_save_text(self, invocation: ToolInvocation) -> ToolExecutionResult:
+    async def _tool_save_content(self, invocation: ToolInvocation) -> ToolExecutionResult:
         saved = await self.ingestion_service.ingest(
             session_id=invocation.session_id,
             source_message_id=invocation.source_message_id,
@@ -125,28 +129,7 @@ class ArchiveToolExecutor:
                 "context": {
                     "working_set": [self._item_snapshot(item, rank=1)],
                     "focus_item_id": saved.item_id,
-                    "last_action": "save_text",
-                }
-            },
-        )
-
-    async def _tool_save_link(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        saved = await self.ingestion_service.ingest(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            text=str(invocation.plan.arguments.get("text") or invocation.text or ""),
-            upload=None,
-        )
-        item = self.item_repository.get_any(item_id=saved.item_id)
-        return ToolExecutionResult(
-            reply=saved.reply,
-            action="capture",
-            item_id=saved.item_id,
-            metadata={
-                "context": {
-                    "working_set": [self._item_snapshot(item, rank=1)],
-                    "focus_item_id": saved.item_id,
-                    "last_action": "save_link",
+                    "last_action": "save_content",
                 }
             },
         )
@@ -315,104 +298,73 @@ class ArchiveToolExecutor:
     async def _tool_send_file_to_user(self, invocation: ToolInvocation) -> ToolExecutionResult:
         """Send a file from the wiki to the user via WeChat."""
         if self.gateway_service is None:
-            return ToolExecutionResult(
-                reply="文件发送功能未配置。",
-                action="chat",
-            )
-
-        # Resolve target item
-        target = invocation.plan.arguments.get("target") or {}
-        target_type = str(target.get("type") or "focus_item").strip()
-        target_value = target.get("value")
+            return ToolExecutionResult(reply="??????????", action="chat")
 
         try:
-            if target_type == "item_id":
-                item = self.item_repository.get_any(item_id=str(target_value))
-            elif target_type == "working_set_rank":
-                working_set = invocation.context.get("working_set") or []
-                rank = int(target_value or 1)
-                if 1 <= rank <= len(working_set):
-                    item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
-                    if item_id:
-                        item = self.item_repository.get_any(item_id=item_id)
-                    else:
-                        raise KeyError(f"Working-set item not found for rank {rank}")
-                else:
-                    raise KeyError(f"Working-set rank {rank} out of range")
-            else:
-                # focus_item
-                focus_item_id = str(invocation.context.get("focus_item_id") or "").strip()
-                if not focus_item_id:
-                    raise KeyError("No focus item is available")
-                item = self.item_repository.get_any(item_id=focus_item_id)
+            item = self._resolve_target_item(
+                session_id=invocation.session_id,
+                plan=invocation.plan,
+                context=invocation.context,
+            )
         except KeyError as e:
-            return ToolExecutionResult(reply=f"无法找到要发送的文件: {e}", action="chat")
+            title_hint = str(invocation.plan.arguments.get("target_title_hint") or "").strip()
+            if not title_hint:
+                return ToolExecutionResult(reply=f"??????????: {e}", action="chat")
+            try:
+                item = self._resolve_item_by_title_hint(
+                    session_id=invocation.session_id,
+                    title_hint=title_hint,
+                    context=invocation.context,
+                )
+            except KeyError:
+                return ToolExecutionResult(reply=f"??????????: {e}", action="chat")
 
-        # Get stored file path from item metadata
         metadata = item.metadata_json or {}
         stored_path = metadata.get("stored_file_path")
-
         if not stored_path:
             return ToolExecutionResult(
-                reply=f"文件 `{item.title}` 没有可发送的存储路径。它可能是纯文本内容而非文件上传。",
+                reply=f"?? `{item.title}` ???????????????????????????",
                 action="chat",
             )
 
-        # Check if file exists
         path = Path(stored_path)
         if not path.exists():
             return ToolExecutionResult(
-                reply=f"文件 `{item.title}` 的存储路径已失效，可能已被移动或删除。",
+                reply=f"?? `{item.title}` ???????????????????",
                 action="chat",
             )
 
-        # Get caption from arguments
         caption = str(invocation.plan.arguments.get("caption") or "").strip()
-
-        # Get user_id from session mapping
         if self.session_map_repository is None:
-            return ToolExecutionResult(
-                reply="会话映射未配置，无法发送文件。",
-                action="chat",
-            )
+            return ToolExecutionResult(reply="???????????????", action="chat")
 
         user_id = self.session_map_repository.get_external_user_id(
             channel=self.channel_name,
             session_id=invocation.session_id,
         )
-
         if not user_id:
             return ToolExecutionResult(
-                reply="无法找到当前会话对应的用户，请确保通过正确的渠道发起对话。",
+                reply="?????????????????????????????",
                 action="chat",
             )
 
-        # Send file via gateway service
         try:
             result = await self.gateway_service.send_file_to_user(
                 user_id=user_id,
                 file_path=str(path),
-                caption=caption or f"这是您请求的文件：{item.title}",
+                caption=caption or f"?????????{item.title}",
             )
-
             if result.get("ret") in (0, None) and result.get("errcode") in (0, None):
                 return ToolExecutionResult(
-                    reply=f"✅ 文件 `{item.title}` 已发送成功！",
+                    reply=f"?? `{item.title}` ??????",
                     action="retrieve",
                     item_id=item.id,
                 )
-            else:
-                error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
-                return ToolExecutionResult(
-                    reply=f"❌ 文件发送失败：{error_msg}",
-                    action="chat",
-                )
+            error_msg = result.get("errmsg") or result.get("msg") or "????"
+            return ToolExecutionResult(reply=f"???????{error_msg}", action="chat")
         except Exception as exc:
             logger.exception("Failed to send file to user")
-            return ToolExecutionResult(
-                reply=f"❌ 文件发送出错：{exc}",
-                action="chat",
-            )
+            return ToolExecutionResult(reply=f"???????{exc}", action="chat")
 
     def try_resolve_reference_clarification(self, *, text: str, pending_payload: dict[str, Any]) -> ItemRecord | None:
         working_set = pending_payload.get("working_set") or []
@@ -452,6 +404,29 @@ class ArchiveToolExecutor:
         if not focus_item_id:
             raise KeyError("No focus item is available for this follow-up.")
         return self.item_repository.get_any(item_id=focus_item_id)
+
+    def _resolve_item_by_title_hint(self, *, session_id: str, title_hint: str, context: dict[str, Any]) -> ItemRecord:
+        normalized_hint = title_hint.strip().lower()
+        if not normalized_hint:
+            raise KeyError("Empty title hint.")
+
+        working_set = context.get("working_set") or []
+        for snapshot in working_set:
+            title = str(snapshot.get("title") or "").strip()
+            if title and normalized_hint in title.lower():
+                item_id = str(snapshot.get("item_id") or "").strip()
+                if item_id:
+                    return self.item_repository.get_any(item_id=item_id)
+
+        focus_item_id = str(context.get("focus_item_id") or "").strip()
+        focus_item_title = str(context.get("focus_item_title") or "").strip()
+        if focus_item_id and focus_item_title and normalized_hint in focus_item_title.lower():
+            return self.item_repository.get_any(item_id=focus_item_id)
+
+        item = self.item_repository.search_latest_by_text(session_id=session_id, query=title_hint)
+        if item is None:
+            raise KeyError(f"No item matched title hint: {title_hint}")
+        return item
 
     def _format_item_reply(self, *, item: ItemRecord, mode: str) -> str:
         normalized_text = (item.normalized_text or "").strip()

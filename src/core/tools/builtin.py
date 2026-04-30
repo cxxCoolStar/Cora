@@ -4,39 +4,23 @@ from core.tools.registry import ToolSpec, registry
 
 
 def register_builtin_tools() -> None:
-    if registry.get("save_text") is not None:
+    if registry.get("save_content") is not None:
         return
 
     registry.register(
         ToolSpec(
-            name="save_text",
+            name="save_content",
             toolset="capture",
-            description="Save plain text content into the personal wiki.",
+            description="Save standalone text or a standalone link into the personal wiki.",
             schema={
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "The text content to save into the wiki."},
+                    "text": {"type": "string", "description": "The text or standalone URL to save into the wiki."},
                 },
                 "required": ["text"],
                 "additionalProperties": False,
             },
-            handler=lambda executor, invocation: executor._tool_save_text(invocation),
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="save_link",
-            toolset="capture",
-            description="Save a standalone link into the personal wiki.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "The standalone URL to save into the wiki."},
-                },
-                "required": ["text"],
-                "additionalProperties": False,
-            },
-            handler=lambda executor, invocation: executor._tool_save_link(invocation),
+            handler=lambda executor, invocation: executor._tool_save_content(invocation),
         )
     )
     registry.register(
@@ -199,7 +183,7 @@ def register_builtin_tools() -> None:
     registry.register(
         ToolSpec(
             name="send_file_to_user",
-            toolset="wiki_read",
+            toolset="channel_delivery",
             description="Send a file (document, image, video) from the personal wiki back to the user via WeChat. Use when the user asks to view, download, or receive a previously saved file.",
             schema={
                 "type": "object",
@@ -222,6 +206,10 @@ def register_builtin_tools() -> None:
                     "caption": {
                         "type": "string",
                         "description": "Optional text to send along with the file.",
+                    },
+                    "target_title_hint": {
+                        "type": "string",
+                        "description": "Optional title fragment to help resolve which file to send when the target reference is ambiguous.",
                     },
                 },
                 "required": ["target"],

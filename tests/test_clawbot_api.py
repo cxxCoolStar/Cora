@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import httpx
+from fastapi import UploadFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -23,9 +24,9 @@ from core.config import CoreSettings  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentClassifier  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
-from core.clawbot.planner import AgentPlanner  # noqa: E402
+from core.clawbot.planner import AgentPlanner, ToolPlan  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
-from core.clawbot.tools import ArchiveToolExecutor  # noqa: E402
+from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
@@ -83,7 +84,7 @@ class StubTopicModelClient(ModelClient):
             if "这里面写了什么" in user_text or "展开讲讲" in user_text:
                 return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "focus_item", "value": ""}, "mode": "full_text"})])
             if user_text.startswith("http://") or user_text.startswith("https://"):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="save_link", arguments={"text": user_text})])
+                return ModelResponse(tool_calls=[ToolCall(tool_name="save_content", arguments={"text": user_text})])
             if "帮我找" in user_text or "帮我查" in user_text or "查一下" in user_text or "告诉我" in user_text:
                 return ModelResponse(tool_calls=[ToolCall(tool_name="open_topic", arguments={"query": user_text, "top_k": 3})])
             if "总结" in user_text:
@@ -92,7 +93,7 @@ class StubTopicModelClient(ModelClient):
                 return ModelResponse(assistant_text="你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。")
             if len(user_text) >= 120 or ("\n" in user_text and len(user_text) >= 40):
                 return ModelResponse(tool_calls=[ToolCall(tool_name="clarify_capture_intent", arguments={"question": "这段内容你是想让我先保存，还是先帮你总结一下？"})])
-            return ModelResponse(tool_calls=[ToolCall(tool_name="save_text", arguments={"text": user_text})])
+            return ModelResponse(tool_calls=[ToolCall(tool_name="save_content", arguments={"text": user_text})])
 
         if session_id == "clarification-router":
             if "保存" in user_text:
@@ -140,6 +141,13 @@ class StubPlannerModelClient(ModelClient):
             )
         return ModelResponse(
             assistant_text='{"tool":"open_topic","reason":"默认按主题打开相关资料。","query":"' + user_text.replace('"', '\\"') + '","top_k":3}'
+        )
+
+
+class StubSendFilePlannerModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        return ModelResponse(
+            assistant_text='{"tool":"send_file_to_user","reason":"The user wants the original file delivered back over the channel.","reference_strategy":"working_set_selection","target_rank":2,"target_title_hint":"resume.pdf","caption":"Here is the original file."}'
         )
 
 
@@ -1112,3 +1120,100 @@ def test_build_wechat_runtime_wires_file_delivery_tool(tmp_path):
     assert gateway._ilink_client is client
     assert container.tool_executor.gateway_service is gateway
     assert container.tool_executor.session_map_repository is not None
+
+
+def test_send_file_tool_is_hidden_until_gateway_is_configured(tmp_path):
+    container = build_test_container(tmp_path)
+
+    hidden_names = {spec.name for spec in container.clawbot_service._build_tool_specs()}
+    assert "send_file_to_user" not in hidden_names
+
+    class _Gateway:
+        async def send_file_to_user(self, **kwargs):
+            return {"ret": 0, "errcode": 0}
+
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    container.configure_gateway(_Gateway(), session_map_repository)
+
+    visible_names = {spec.name for spec in container.clawbot_service._build_tool_specs()}
+    assert "send_file_to_user" in visible_names
+
+
+def test_planner_accepts_send_file_to_user_tool():
+    planner = AgentPlanner(model_client=StubSendFilePlannerModelClient())
+
+    plan = planner.plan(
+        text="???? resume.pdf ???",
+        has_upload=False,
+        coarse_intent="retrieve",
+        context={
+            "last_action": "open_topic",
+            "working_set": [
+                {"rank": 1, "item_id": "item-1", "title": "notes.md", "summary": "notes"},
+                {"rank": 2, "item_id": "item-2", "title": "resume.pdf", "summary": "resume"},
+            ],
+        },
+    )
+
+    assert plan is not None
+    assert plan.tool == "send_file_to_user"
+    assert plan.arguments["target"]["type"] == "working_set_rank"
+    assert plan.arguments["target"]["value"] == 2
+    assert plan.arguments["target_title_hint"] == "resume.pdf"
+    assert plan.arguments["caption"] == "Here is the original file."
+
+
+def test_send_file_tool_can_resolve_title_hint_and_deliver(tmp_path):
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_file_to_user(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"ret": 0, "errcode": 0}
+
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="upload resume")
+    saved = asyncio.run(
+        container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            text=None,
+            upload=UploadFile(filename="resume.pdf", file=BytesIO(b"%PDF-1.4 fake bytes")),
+        )
+    )
+    item = container.item_repository.get_any(item_id=saved.item_id)
+
+    gateway = _Gateway()
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
+    container.configure_gateway(gateway, session_map_repository)
+
+    plan = ToolPlan(
+        tool="send_file_to_user",
+        arguments={
+            "target": {"type": "focus_item", "value": ""},
+            "target_title_hint": "resume",
+            "caption": "send the source file",
+        },
+        reason="test",
+    )
+    result = asyncio.run(
+        container.tool_executor._tool_send_file_to_user(
+            ToolInvocation(
+                session_id=session.id,
+                source_message_id=source_message.id,
+                plan=plan,
+                text="? resume ???",
+                upload=None,
+                context={"working_set": [], "focus_item_id": "", "focus_item_title": ""},
+            )
+        )
+    )
+
+    assert result.action == "retrieve"
+    assert result.item_id == item.id
+    assert gateway.calls
+    assert gateway.calls[0]["user_id"] == "wx-user-1"
+    assert gateway.calls[0]["file_path"] == item.metadata_json["stored_file_path"]

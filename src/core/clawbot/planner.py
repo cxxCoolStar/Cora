@@ -22,7 +22,7 @@ class ToolPlan:
 
 class AgentPlanner:
     """Choose a constrained wiki tool based on the user turn and session state."""
-    DEFAULT_TOOLSETS = ["capture", "wiki_browse", "wiki_read", "agent_state"]
+    DEFAULT_TOOLSETS = ["capture", "wiki_browse", "wiki_read", "channel_delivery", "agent_state"]
 
     def __init__(self, model_client: ModelClient | None = None) -> None:
         self.model_client = model_client
@@ -69,9 +69,10 @@ class AgentPlanner:
             "- If the user refers to earlier results using phrases like '第一个', '第二个', '这个', '那个', '上一个', or a title fragment, treat it as a reference to the current working_set or focus_item rather than a new search.\n"
             "- If the user asks to '看看', '打开', '给我看', '展开', or asks for the full content, prefer read_item.\n"
             "- If the user asks to summarize, outline, or extract key points, prefer summarize_item.\n"
+            "- If the user asks you to send, forward, deliver, or let them receive a previously saved file, prefer send_file_to_user.\n"
             "- If a ranked reference and a title hint both appear, treat that as a high-confidence reference and do not ask for clarification.\n"
-            "- If the user submits a standalone URL, prefer save_link.\n"
-            "- Otherwise, new material should usually be saved with save_text or save_file.\n"
+            "- If the user submits new standalone text or a standalone URL, prefer save_content.\n"
+            "- Otherwise, new material should usually be saved with save_content or save_file.\n"
             "- Use clarify_reference only when the target truly cannot be resolved from the current working_set or focus_item.\n"
             "- Do not invent item IDs.\n"
             "- Return strict JSON with keys: tool, reason, and optionally query, text, target_rank, target_title_hint, reference_strategy, mode, style, reference_text.\n"
@@ -135,7 +136,7 @@ class AgentPlanner:
             arguments = {}
 
         tool = str(payload.get("tool") or "").strip()
-        if tool in {"save_text", "save_link"}:
+        if tool in {"save_content", "save_text", "save_link"}:
             return {"text": str(payload.get("text") or arguments.get("text") or content).strip()}
 
         if tool == "open_topic":
@@ -143,7 +144,7 @@ class AgentPlanner:
             top_k = payload.get("top_k") or arguments.get("top_k") or 3
             return {"query": query, "top_k": top_k}
 
-        if tool in {"read_item", "summarize_item"}:
+        if tool in {"read_item", "summarize_item", "send_file_to_user"}:
             target = arguments.get("target")
             if not isinstance(target, dict):
                 reference_strategy = str(payload.get("reference_strategy") or "").strip()
@@ -158,10 +159,14 @@ class AgentPlanner:
             built: dict[str, Any] = {"target": target}
             if tool == "read_item":
                 built["mode"] = str(payload.get("mode") or arguments.get("mode") or "summary").strip()
-            else:
+            elif tool == "summarize_item":
                 built["style"] = str(payload.get("style") or arguments.get("style") or "brief").strip()
             if payload.get("target_title_hint"):
                 built["target_title_hint"] = str(payload.get("target_title_hint"))
+            if tool == "send_file_to_user":
+                caption = str(payload.get("caption") or arguments.get("caption") or "").strip()
+                if caption:
+                    built["caption"] = caption
             return built
 
         if tool == "clarify_reference":
@@ -171,7 +176,9 @@ class AgentPlanner:
 
     def _sanitize_plan(self, plan: ToolPlan) -> ToolPlan:
         alias_map = {
-            "save_text_or_link": "save_text",
+            "save_text_or_link": "save_content",
+            "save_text": "save_content",
+            "save_link": "save_content",
             "search_items": "open_topic",
             "get_item": "read_item",
         }
@@ -191,7 +198,7 @@ class AgentPlanner:
             top_k = max(1, min(5, top_k))
             return ToolPlan(tool="open_topic", arguments={"query": query, "top_k": top_k}, reason=plan.reason, source=plan.source)
 
-        if normalized_tool in {"read_item", "summarize_item"}:
+        if normalized_tool in {"read_item", "summarize_item", "send_file_to_user"}:
             target = plan.arguments.get("target")
             if not isinstance(target, dict):
                 raise ValueError(f"Planner selected {normalized_tool} without a target object.")
@@ -208,11 +215,15 @@ class AgentPlanner:
                 if mode not in {"summary", "full_text", "key_points"}:
                     mode = "summary"
                 args["mode"] = mode
-            else:
+            elif normalized_tool == "summarize_item":
                 style = str(plan.arguments.get("style") or "brief").strip()
                 if style not in {"brief", "structured", "interview_notes"}:
                     style = "brief"
                 args["style"] = style
+            else:
+                caption = str(plan.arguments.get("caption") or "").strip()
+                if caption:
+                    args["caption"] = caption
             return ToolPlan(tool=normalized_tool, arguments=args, reason=plan.reason, source=plan.source)
 
         if normalized_tool == "clarify_reference":
@@ -226,7 +237,7 @@ class AgentPlanner:
         text = str(plan.arguments.get("text") or "").strip()
         if not text:
             raise ValueError(f"Planner selected {normalized_tool} without text.")
-        chosen = normalized_tool if normalized_tool in {"save_text", "save_link"} else "save_text"
+        chosen = normalized_tool if normalized_tool == "save_content" else "save_content"
         return ToolPlan(
             tool=chosen,
             arguments={"text": text},

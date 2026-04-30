@@ -85,7 +85,10 @@ class ClawBotService:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        tool_names = resolve_toolsets(["capture", "wiki_browse", "wiki_read", "agent_state"])
+        toolsets = ["capture", "wiki_browse", "wiki_read", "agent_state"]
+        if self.tool_executor.can_send_files_to_user():
+            toolsets.append("channel_delivery")
+        tool_names = resolve_toolsets(toolsets)
         specs = []
         for registered in registry.get_many(tool_names):
             specs.append(
@@ -96,6 +99,9 @@ class ClawBotService:
                 )
             )
         return specs
+
+    def refresh_tool_specs(self) -> None:
+        self._tool_specs = self._build_tool_specs()
 
     def _build_agent_messages(
         self,
@@ -371,7 +377,7 @@ class ClawBotService:
                 )
                 reply = f"{saved_item.reply} I used your clarification to save the earlier content."
                 self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="llm_tool_call", tool="save_text", tool_arguments={"text": pending_text}, context=context))
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="llm_tool_call", tool="save_content", tool_arguments={"text": pending_text}, context=context))
                 return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
             if action == "organize":
                 pending_text = pending.pending_payload_json.get("text", "")

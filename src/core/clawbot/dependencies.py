@@ -53,6 +53,7 @@ class ClawBotContainer:
         self.tool_executor.gateway_service = gateway_service
         self.tool_executor.session_map_repository = session_map_repository
         self.tool_executor.channel_name = "wechat"
+        self.clawbot_service.refresh_tool_specs()
 
 
 _container: ClawBotContainer | None = None

@@ -248,13 +248,10 @@ class WechatIlinkClient:
                 elif item_type == ITEM_FILE:
                     file_item = item.get("file_item") or {}
                     file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
-                    media = file_item.get("media") or {}
-                    full_url = str(media.get("full_url") or "").strip()
-                    if full_url:
-                        downloaded = await self._download_file(full_url=full_url, file_name=file_name)
-                        if downloaded is not None:
-                            file_path = downloaded
-                            file_mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+                    downloaded = await self._download_file(item)
+                    if downloaded is not None:
+                        file_path = downloaded
+                        file_mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
                     break
 
         if not text.strip() and not file_path:
@@ -271,21 +268,48 @@ class WechatIlinkClient:
             raw_payload=update,
         )
 
-    async def _download_file(self, *, full_url: str, file_name: str) -> str | None:
+    async def _download_file(self, item: dict[str, Any]) -> str | None:
+        """Download WeChat file, handling AES decryption if needed."""
+        file_item = item.get("file_item") or {}
+        file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
+        media = file_item.get("media") or {}
+
+        full_url = str(media.get("full_url") or "").strip()
+        encrypt_query_param = str(media.get("encrypt_query_param") or "").strip()
+
+        aes_key_b64: str | None = None
+        aeskey_hex = file_item.get("aeskey")
+        if aeskey_hex:
+            try:
+                aes_key_b64 = base64.b64encode(bytes.fromhex(str(aeskey_hex))).decode("ascii")
+            except Exception:
+                pass
+        if not aes_key_b64:
+            media_aes_key = str(media.get("aes_key") or "").strip()
+            aes_key_b64 = media_aes_key or None
+
         try:
-            resp = await self._http.get(full_url)
-            resp.raise_for_status()
+            data = await self._download_media_bytes(
+                full_url=full_url,
+                encrypt_query_param=encrypt_query_param or None,
+            )
+            if data is None:
+                logger.warning("wechat file has no download URL")
+                return None
+
+            if aes_key_b64 and _CRYPTO_AVAILABLE:
+                try:
+                    key = _parse_aes_key(aes_key_b64)
+                    data = _aes128_ecb_decrypt(data, key)
+                except Exception as exc:
+                    logger.warning("wechat file decryption failed: %s", exc)
+            elif aes_key_b64 and not _CRYPTO_AVAILABLE:
+                logger.warning("wechat file encrypted but cryptography library not available")
+
+            return self._write_downloaded_bytes(data=data, file_name=file_name)
         except Exception as exc:
             logger.warning("wechat file download failed: %s", exc)
             return None
-        suffix = Path(file_name).suffix
-        if self.config.download_dir is not None:
-            target = self.config.download_dir / f"{uuid.uuid4().hex}_{Path(file_name).name}"
-            target.write_bytes(resp.content)
-            return str(target)
-        with NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
-            tmp.write(resp.content)
-            return tmp.name
 
     async def _download_image(self, item: dict[str, Any]) -> str | None:
         """Download WeChat image, handling AES decryption if needed."""
@@ -308,18 +332,11 @@ class WechatIlinkClient:
             aes_key_b64 = media.get("aes_key")
 
         try:
-            if encrypt_query_param:
-                # Download via CDN with encrypted query param
-                cdn_url = f"{self.config.cdn_base_url.rstrip('/')}/download?encrypted_query_param={encrypt_query_param}"
-                resp = await self._http.get(cdn_url)
-                resp.raise_for_status()
-                data = resp.content
-            elif full_url:
-                # Direct download
-                resp = await self._http.get(full_url)
-                resp.raise_for_status()
-                data = resp.content
-            else:
+            data = await self._download_media_bytes(
+                full_url=str(full_url or "").strip(),
+                encrypt_query_param=str(encrypt_query_param or "").strip() or None,
+            )
+            if data is None:
                 logger.warning("wechat image has no download URL")
                 return None
 
@@ -335,17 +352,38 @@ class WechatIlinkClient:
                 logger.warning("wechat image encrypted but cryptography library not available")
 
             # Save to file
-            if self.config.download_dir is not None:
-                target = self.config.download_dir / f"{uuid.uuid4().hex}_wechat_image.jpg"
-                target.write_bytes(data)
-                return str(target)
-            with NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                tmp.write(data)
-                return tmp.name
+            return self._write_downloaded_bytes(data=data, file_name="wechat_image.jpg")
 
         except Exception as exc:
             logger.warning("wechat image download failed: %s", exc)
             return None
+
+    async def _download_media_bytes(
+        self,
+        *,
+        full_url: str,
+        encrypt_query_param: str | None,
+    ) -> bytes | None:
+        if encrypt_query_param:
+            cdn_url = f"{self.config.cdn_base_url.rstrip('/')}/download?encrypted_query_param={encrypt_query_param}"
+            resp = await self._http.get(cdn_url)
+            resp.raise_for_status()
+            return resp.content
+        if full_url:
+            resp = await self._http.get(full_url)
+            resp.raise_for_status()
+            return resp.content
+        return None
+
+    def _write_downloaded_bytes(self, *, data: bytes, file_name: str) -> str:
+        suffix = Path(file_name).suffix
+        if self.config.download_dir is not None:
+            target = self.config.download_dir / f"{uuid.uuid4().hex}_{Path(file_name).name}"
+            target.write_bytes(data)
+            return str(target)
+        with NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
+            tmp.write(data)
+            return tmp.name
 
     # ===== File Sending Methods =====
 

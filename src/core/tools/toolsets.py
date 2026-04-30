@@ -3,7 +3,7 @@ from __future__ import annotations
 TOOLSETS: dict[str, dict[str, object]] = {
     "capture": {
         "description": "Capture new source materials into the personal wiki.",
-        "tools": ["save_text", "save_link", "save_file"],
+        "tools": ["save_content", "save_file"],
     },
     "wiki_browse": {
         "description": "Browse the knowledge base structure and topics.",
