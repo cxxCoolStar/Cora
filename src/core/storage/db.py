@@ -28,6 +28,10 @@ class DatabaseManager:
             if not isinstance(raw, sqlite3.Connection):
                 return
             self._ensure_column(raw, "clawbot_messages", "metadata_json", "JSON NOT NULL DEFAULT '{}'")
+            self._ensure_column(raw, "clawbot_items", "document_key", "VARCHAR(255)")
+            self._ensure_column(raw, "clawbot_items", "version", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(raw, "clawbot_items", "is_current", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(raw, "clawbot_items", "superseded_by_item_id", "VARCHAR")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:

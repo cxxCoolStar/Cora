@@ -99,6 +99,10 @@ class ItemRepository:
         summary: str,
         metadata: dict[str, Any],
         locator_hint: str | None,
+        document_key: str | None = None,
+        version: int = 1,
+        is_current: int = 1,
+        superseded_by_item_id: str | None = None,
     ) -> ItemRecord:
         with self.database.session() as session:
             record = ItemRecord(
@@ -111,21 +115,54 @@ class ItemRepository:
                 summary=summary,
                 metadata_json=metadata,
                 locator_hint=locator_hint,
+                document_key=document_key,
+                version=version,
+                is_current=is_current,
+                superseded_by_item_id=superseded_by_item_id,
             )
             session.add(record)
             session.commit()
             session.refresh(record)
             return record
 
-    def list_by_session(self, *, session_id: str) -> list[ItemRecord]:
+    def list_by_session(self, *, session_id: str, current_only: bool = False) -> list[ItemRecord]:
         with self.database.session() as session:
-            stmt = select(ItemRecord).where(ItemRecord.session_id == session_id).order_by(desc(ItemRecord.created_at))
+            stmt = select(ItemRecord).where(ItemRecord.session_id == session_id)
+            if current_only:
+                stmt = stmt.where(ItemRecord.is_current == 1)
+            stmt = stmt.order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
 
-    def list_all(self) -> list[ItemRecord]:
+    def list_all(self, *, current_only: bool = False) -> list[ItemRecord]:
         with self.database.session() as session:
-            stmt = select(ItemRecord).order_by(desc(ItemRecord.created_at))
+            stmt = select(ItemRecord)
+            if current_only:
+                stmt = stmt.where(ItemRecord.is_current == 1)
+            stmt = stmt.order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
+
+    def find_current_by_document_key(self, *, session_id: str, document_key: str) -> ItemRecord | None:
+        with self.database.session() as session:
+            stmt = (
+                select(ItemRecord)
+                .where(
+                    ItemRecord.session_id == session_id,
+                    ItemRecord.document_key == document_key,
+                    ItemRecord.is_current == 1,
+                )
+                .order_by(desc(ItemRecord.created_at))
+                .limit(1)
+            )
+            return session.scalar(stmt)
+
+    def mark_superseded(self, *, item_id: str, superseded_by_item_id: str) -> None:
+        with self.database.session() as session:
+            record = session.get(ItemRecord, item_id)
+            if record is None:
+                raise KeyError(f"Item not found: {item_id}")
+            record.is_current = 0
+            record.superseded_by_item_id = superseded_by_item_id
+            session.commit()
 
     def get_any(self, *, item_id: str) -> ItemRecord:
         with self.database.session() as session:

@@ -51,6 +51,19 @@ class RetrievalService:
         "那个",
         "多少",
         "是什么",
+        "保存",
+        "之前",
+        "文件",
+        "资料",
+        "内容",
+        "东西",
+        "数据",
+        "记录",
+        "文档",
+        "message",
+        "file",
+        "document",
+        "data",
     }
 
     def __init__(
@@ -78,10 +91,11 @@ class RetrievalService:
                 tokens = self._tokenize(query)
         else:
             tokens = self._tokenize(query)
-        items = self.item_repository.list_all()
+        items = self.item_repository.list_all(current_only=True)
         if not items:
             return []
 
+        strong_tokens = self._strong_tokens(tokens)
         item_scores: list[tuple[ItemRecord, int]] = []
         for item in items:
             haystack = " ".join(
@@ -94,6 +108,10 @@ class RetrievalService:
                 ]
             ).lower()
             score = self._score_text(haystack, tokens)
+            if strong_tokens:
+                matched_strong = sum(1 for token in strong_tokens if token in haystack)
+                if matched_strong == 0:
+                    continue
             if score > 0:
                 item_scores.append((item, score))
 
@@ -152,11 +170,12 @@ class RetrievalService:
             return result
 
         # Step 2: Retrieve and score all items
-        items = self.item_repository.list_all()
+        items = self.item_repository.list_all(current_only=True)
         if not items:
             result.error = "No items in the database"
             return result
 
+        strong_tokens = self._strong_tokens(tokens)
         item_scores: list[tuple[ItemRecord, int]] = []
         for item in items:
             haystack = " ".join(
@@ -178,6 +197,10 @@ class RetrievalService:
                     matched_text_preview=preview,
                 )
             )
+            if strong_tokens:
+                matched_strong = sum(1 for token in strong_tokens if token in haystack)
+                if matched_strong == 0:
+                    continue
             if score > 0:
                 item_scores.append((item, score))
 
@@ -254,3 +277,8 @@ class RetrievalService:
             text = text.replace(token, " ")
         normalized = " ".join(text.split())
         return normalized or query
+
+    @staticmethod
+    def _strong_tokens(tokens: list[str]) -> list[str]:
+        # Keep only discriminative tokens; generic words are removed by STOP_TOKENS.
+        return [t for t in tokens if len(t.strip()) >= 2]

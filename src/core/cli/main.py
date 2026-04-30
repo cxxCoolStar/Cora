@@ -71,6 +71,7 @@ def wechat_poll() -> None:
             base_url=base_url,
             poll_timeout_seconds=settings.wechat_poll_timeout_seconds,
             context_tokens_path=settings.wechat_accounts_dir / f"{settings.wechat_account_name}.context-tokens.json",
+            download_dir=settings.files_storage_dir / "wechat_inbox",
         )
     )
     poller = WechatPoller(client=client, gateway_service=gateway)

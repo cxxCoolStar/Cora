@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
+import re
 from urllib.parse import urlparse
 import uuid
 
@@ -15,6 +17,8 @@ from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
 from core.storage.repositories import ItemChunkRepository, ItemRepository, MessageRepository, UserSignalRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -53,11 +57,29 @@ class IngestionService:
         text: str | None,
         upload: UploadFile | None,
     ) -> IngestedItemResult:
+        logger.info(
+            "ingestion start session_id=%s source_message_id=%s has_text=%s has_upload=%s",
+            session_id,
+            source_message_id,
+            bool(text and text.strip()),
+            bool(upload and (upload.filename or "").strip()),
+        )
         parsed = await self._parse_input(text=text, upload=upload)
+        logger.info("ingestion parsed item_type=%s title=%s", parsed.item_type, parsed.title)
         summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
         tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
         locator_hint = self._build_locator_hint(parsed)
         chunk_texts = parsed.metadata.pop("_chunk_texts", None)
+        document_key = self._build_document_key(parsed=parsed)
+        previous_current = None
+        next_version = 1
+        if document_key:
+            previous_current = self.item_repository.find_current_by_document_key(
+                session_id=session_id,
+                document_key=document_key,
+            )
+            if previous_current is not None:
+                next_version = max(1, int(previous_current.version) + 1)
         item = self.item_repository.create(
             session_id=session_id,
             source_message_id=source_message_id,
@@ -68,7 +90,12 @@ class IngestionService:
             summary=summary,
             metadata={**parsed.metadata, "tags": tags},
             locator_hint=locator_hint,
+            document_key=document_key,
+            version=next_version,
+            is_current=1,
         )
+        if previous_current is not None and previous_current.id != item.id:
+            self.item_repository.mark_superseded(item_id=previous_current.id, superseded_by_item_id=item.id)
         self._record_user_signals(
             session_id=session_id,
             item_id=item.id,
@@ -82,6 +109,7 @@ class IngestionService:
             chunks = self._chunk_text(parsed.normalized_text)
         for index, chunk in enumerate(chunks):
             self.item_chunk_repository.create(item_id=item.id, chunk_index=index, content=chunk, metadata={"title": item.title})
+        logger.info("ingestion stored item_id=%s chunks=%d item_type=%s", item.id, len(chunks), parsed.item_type)
 
         if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
             original_name = parsed.metadata.get("original_file_name", item.title)
@@ -95,7 +123,13 @@ class IngestionService:
                 f"Summary: {summary}"
             )
         else:
-            reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
+            if previous_current is not None:
+                reply = (
+                    f"Updated `{item.title}` to v{item.version} (previous version kept as history). "
+                    f"Summary: {summary}"
+                )
+            else:
+                reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
         return IngestedItemResult(item_id=item.id, reply=reply)
 
     async def _parse_input(self, *, text: str | None, upload: UploadFile | None) -> ParsedContent:
@@ -105,6 +139,7 @@ class IngestionService:
             target = self.storage_dir / f"{uuid.uuid4()}_{upload.filename}"
             data = await upload.read()
             target.write_bytes(data)
+            logger.info("ingestion upload_saved filename=%s suffix=%s path=%s bytes=%d", upload.filename, suffix, target, len(data))
             source = FileSource(path=target, filename=upload.filename or target.name)
             if suffix == ".txt":
                 parsed = self.txt_parser.parse(source)
@@ -208,6 +243,20 @@ class IngestionService:
         if url:
             return f"Look for the link message containing {url}."
         return None
+
+    @staticmethod
+    def _build_document_key(*, parsed: ParsedContent) -> str | None:
+        item_type = parsed.item_type or ""
+        if item_type not in {"document", "file_upload"}:
+            return None
+        original_name = str(parsed.metadata.get("original_file_name") or "").strip()
+        if not original_name:
+            return None
+        stem = Path(original_name).stem.lower().strip()
+        # normalize common update suffixes: v2, final, final2, 2026-04-30, copy
+        stem = re.sub(r"[\s_\-]*(v\d+|final\d*|copy\d*|\d{4}[-_]\d{2}[-_]\d{2})$", "", stem)
+        stem = re.sub(r"\s+", " ", stem).strip()
+        return stem or None
 
     def _record_user_signals(
         self,

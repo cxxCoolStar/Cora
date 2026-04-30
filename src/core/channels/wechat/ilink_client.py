@@ -5,6 +5,8 @@ from typing import Any
 import logging
 import uuid
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+import mimetypes
 
 import httpx
 
@@ -20,6 +22,7 @@ class WechatIlinkConfig:
     app_id: str = "bot"
     poll_timeout_seconds: int = 35
     context_tokens_path: Path | None = None
+    download_dir: Path | None = None
 
 
 class WechatIlinkClient:
@@ -34,6 +37,8 @@ class WechatIlinkClient:
             if config.context_tokens_path is not None
             else None
         )
+        if config.download_dir is not None:
+            config.download_dir.mkdir(parents=True, exist_ok=True)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -51,7 +56,7 @@ class WechatIlinkClient:
         updates = data.get("msgs") or data.get("updates") or []
         events: list[WechatInboundEvent] = []
         for update in updates:
-            event = self._parse_update(update)
+            event = await self._parse_update(update)
             if event is not None:
                 if self._token_store is not None and event.context_token:
                     self._token_store.set(event.user_id, event.context_token)
@@ -100,8 +105,7 @@ class WechatIlinkClient:
                 raise RuntimeError(f"iLink ret {data.get('ret')}: {data.get('errmsg')}")
         return data if isinstance(data, dict) else {}
 
-    @staticmethod
-    def _parse_update(update: dict[str, Any]) -> WechatInboundEvent | None:
+    async def _parse_update(self, update: dict[str, Any]) -> WechatInboundEvent | None:
         event_id = str(update.get("message_id") or update.get("update_id") or update.get("msg_id") or "")
         if not event_id:
             return None
@@ -126,13 +130,51 @@ class WechatIlinkClient:
             text = str(msg.get("text") or "").strip()
         if not text:
             text = str(update.get("text") or "").strip()
-        if not text.strip():
+        file_name: str | None = None
+        file_path: str | None = None
+        file_mime: str | None = None
+        if isinstance(item_list, list):
+            for item in item_list:
+                if not isinstance(item, dict):
+                    continue
+                if int(item.get("type") or 0) == 4:
+                    file_item = item.get("file_item") or {}
+                    file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
+                    media = file_item.get("media") or {}
+                    full_url = str(media.get("full_url") or "").strip()
+                    if full_url:
+                        downloaded = await self._download_file(full_url=full_url, file_name=file_name)
+                        if downloaded is not None:
+                            file_path = downloaded
+                            file_mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+                    break
+
+        if not text.strip() and not file_path:
             return None
 
         return WechatInboundEvent(
             event_id=event_id,
             user_id=from_user,
-            text=text.strip(),
+            text=text.strip() or None,
             context_token=str(context_token) if context_token else None,
+            file_name=file_name,
+            file_path=file_path,
+            file_mime=file_mime,
             raw_payload=update,
         )
+
+    async def _download_file(self, *, full_url: str, file_name: str) -> str | None:
+        try:
+            resp = await self._http.get(full_url)
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("wechat file download failed: %s", exc)
+            return None
+        suffix = Path(file_name).suffix
+        if self.config.download_dir is not None:
+            target = self.config.download_dir / f"{uuid.uuid4().hex}_{Path(file_name).name}"
+            target.write_bytes(resp.content)
+            return str(target)
+        with NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
+            tmp.write(resp.content)
+            return tmp.name

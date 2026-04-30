@@ -139,7 +139,7 @@ def test_greeting_is_not_saved_as_item(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "chat"
-    assert "我可以帮你保存文本" in payload["reply"]
+    assert "可以帮你保存文本" in payload["reply"]
 
     items = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items")).json()
     assert items == []
@@ -582,6 +582,40 @@ def test_upload_md_is_parsed_as_document(tmp_path):
     assert items[0]["item_type"] == "document"
     assert items[0]["title"] == "note"
 
+
+def test_reupload_same_document_creates_new_version_and_hides_old_from_default_listing(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("resume_v1.md", BytesIO(b"# Resume\n\nfirst version"), "text/markdown")},
+        )
+    )
+    second = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("resume_v2.md", BytesIO(b"# Resume\n\nsecond version updated"), "text/markdown")},
+        )
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "Updated" in second.json()["reply"]
+    assert "v2" in second.json()["reply"]
+
+    items_response = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items"))
+    items = items_response.json()
+    assert len(items) == 1
+    assert items[0]["title"] == "resume_v2"
+
 def test_llm_router_can_promote_ambiguous_text_to_capture():
     router = IntentRouter(
         llm_classifier=FakeLLMIntentClassifier(
@@ -669,3 +703,30 @@ def test_wechat_gateway_deduplicates_same_event_id(tmp_path):
 
     assert first.deduplicated is False
     assert second.deduplicated is True
+
+
+def test_wechat_gateway_ingests_file_event(tmp_path):
+    container = build_test_container(tmp_path)
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+    )
+    local_file = tmp_path / "wechat_note.md"
+    local_file.write_text("# 微信资料\n\n这是从微信发来的文档内容。", encoding="utf-8")
+
+    result = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-file-1",
+                user_id="wx-user-file",
+                text="请保存这个文件",
+                file_name="wechat_note.md",
+                file_path=str(local_file),
+                file_mime="text/markdown",
+            )
+        )
+    )
+
+    assert result.deduplicated is False
+    assert result.action == "capture"

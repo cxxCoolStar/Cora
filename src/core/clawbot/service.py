@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from fastapi import UploadFile
 
 from core.clawbot.schemas import (
@@ -29,6 +30,8 @@ from core.storage.repositories import (
     SessionRepository,
     UserSignalRepository,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ClawBotService:
@@ -71,6 +74,12 @@ class ClawBotService:
         return self.session_repository.create()
 
     async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None) -> IngestResponse:
+        logger.info(
+            "clawbot ingest_start session_id=%s has_text=%s has_upload=%s",
+            session_id,
+            bool(text and text.strip()),
+            bool(upload and (upload.filename or "").strip()),
+        )
         self.session_repository.get(session_id)
         user_content = text or (upload.filename if upload and upload.filename else "")
         user_message = self.message_repository.add_user_message(session_id=session_id, content=user_content)
@@ -133,6 +142,14 @@ class ClawBotService:
 
         has_upload = upload is not None and bool((upload.filename or "").strip())
         decision = self.intent_router.decide(text=text, has_upload=has_upload, context=context)
+        logger.info(
+            "clawbot decision session_id=%s intent=%s confidence=%s source=%s reason=%s",
+            session_id,
+            decision.intent,
+            decision.confidence,
+            decision.source,
+            decision.reason,
+        )
 
         if decision.intent == "chat":
             reply = "你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。"
@@ -162,6 +179,13 @@ class ClawBotService:
             reply = "我暂时还不能理解这个请求，你可以换一种说法试试。"
             self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence="low", reason="Planner returned no action.", source="fallback", tool="chat", tool_arguments={}, context=context))
             return IngestResponse(reply=reply, action="chat", decision_source="fallback")
+        logger.info(
+            "clawbot plan session_id=%s tool=%s source=%s reason=%s",
+            session_id,
+            plan.tool,
+            plan.source,
+            plan.reason,
+        )
 
         execution = await self.tool_executor.execute(
             session_id=session_id,
@@ -181,6 +205,13 @@ class ClawBotService:
             context=(execution.metadata or {}).get("context") if execution.metadata else context,
         )
         self.message_repository.add_assistant_message(session_id=session_id, content=execution.reply, metadata=assistant_metadata)
+        logger.info(
+            "clawbot execution_done session_id=%s action=%s item_id=%s needs_clarification=%s",
+            session_id,
+            execution.action,
+            execution.item_id,
+            execution.needs_clarification,
+        )
         return IngestResponse(
             reply=execution.reply,
             action=execution.action,
@@ -195,7 +226,7 @@ class ClawBotService:
 
     def list_items(self, *, session_id: str) -> list[ItemSummaryResponse]:
         self.session_repository.get(session_id)
-        items = self.item_repository.list_by_session(session_id=session_id)
+        items = self.item_repository.list_by_session(session_id=session_id, current_only=True)
         return [
             ItemSummaryResponse(
                 id=item.id,

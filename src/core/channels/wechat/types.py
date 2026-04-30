@@ -8,8 +8,11 @@ from typing import Any
 class WechatInboundEvent:
     event_id: str
     user_id: str
-    text: str
+    text: str | None = None
     context_token: str | None = None
+    file_name: str | None = None
+    file_path: str | None = None
+    file_mime: str | None = None
     raw_payload: dict[str, Any] | None = None
 
 
