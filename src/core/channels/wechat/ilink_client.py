@@ -6,6 +6,8 @@ import logging
 import uuid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+import base64
+import hashlib
 import mimetypes
 
 import httpx
@@ -13,7 +15,58 @@ import httpx
 from core.channels.wechat.context_token_store import WechatContextTokenStore
 from core.channels.wechat.types import WechatInboundEvent
 
+# Item type constants
+ITEM_TEXT = 1
+ITEM_IMAGE = 2
+ITEM_VOICE = 3
+ITEM_FILE = 4
+ITEM_VIDEO = 5
+
 logger = logging.getLogger(__name__)
+
+WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+
+# --- AES-128-ECB utilities for WeChat media decryption ---
+try:
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    _CRYPTO_AVAILABLE = True
+except Exception:  # pragma: no cover
+    default_backend = None  # type: ignore[misc,assignment]
+    Cipher = None  # type: ignore[misc,assignment]
+    algorithms = None  # type: ignore[misc,assignment]
+    modes = None  # type: ignore[misc,assignment]
+    _CRYPTO_AVAILABLE = False
+
+
+def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
+
+
+def _aes128_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    if not _CRYPTO_AVAILABLE:
+        raise RuntimeError("cryptography library required for AES decryption")
+    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(ciphertext) + decryptor.finalize()
+    if not padded:
+        return padded
+    pad_len = padded[-1]
+    if 1 <= pad_len <= 16 and padded.endswith(bytes([pad_len]) * pad_len):
+        return padded[:-pad_len]
+    return padded
+
+
+def _parse_aes_key(aes_key_b64: str) -> bytes:
+    decoded = base64.b64decode(aes_key_b64)
+    if len(decoded) == 16:
+        return decoded
+    if len(decoded) == 32:
+        text = decoded.decode("ascii", errors="ignore")
+        if text and all(ch in "0123456789abcdefABCDEF" for ch in text):
+            return bytes.fromhex(text)
+    raise ValueError(f"unexpected aes_key format ({len(decoded)} decoded bytes)")
 
 @dataclass(slots=True)
 class WechatIlinkConfig:
@@ -23,6 +76,7 @@ class WechatIlinkConfig:
     poll_timeout_seconds: int = 35
     context_tokens_path: Path | None = None
     download_dir: Path | None = None
+    cdn_base_url: str = WEIXIN_CDN_BASE_URL
 
 
 class WechatIlinkClient:
@@ -137,7 +191,17 @@ class WechatIlinkClient:
             for item in item_list:
                 if not isinstance(item, dict):
                     continue
-                if int(item.get("type") or 0) == 4:
+                item_type = int(item.get("type") or 0)
+                # Handle image (type=2)
+                if item_type == ITEM_IMAGE:
+                    image_path = await self._download_image(item)
+                    if image_path:
+                        file_path = image_path
+                        file_name = "wechat_image.jpg"
+                        file_mime = "image/jpeg"
+                        break
+                # Handle file (type=4)
+                elif item_type == ITEM_FILE:
                     file_item = item.get("file_item") or {}
                     file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
                     media = file_item.get("media") or {}
@@ -178,3 +242,63 @@ class WechatIlinkClient:
         with NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
             tmp.write(resp.content)
             return tmp.name
+
+    async def _download_image(self, item: dict[str, Any]) -> str | None:
+        """Download WeChat image, handling AES decryption if needed."""
+        image_item = item.get("image_item") or {}
+        media = image_item.get("media") or {}
+
+        full_url = media.get("full_url")
+        encrypt_query_param = media.get("encrypt_query_param")
+
+        # Get AES key (if encryption is used)
+        aes_key_b64: str | None = None
+        # Some images have aeskey in hex format directly
+        aeskey_hex = image_item.get("aeskey")
+        if aeskey_hex:
+            try:
+                aes_key_b64 = base64.b64encode(bytes.fromhex(str(aeskey_hex))).decode("ascii")
+            except Exception:
+                pass
+        if not aes_key_b64:
+            aes_key_b64 = media.get("aes_key")
+
+        try:
+            if encrypt_query_param:
+                # Download via CDN with encrypted query param
+                cdn_url = f"{self.config.cdn_base_url.rstrip('/')}/download?encrypted_query_param={encrypt_query_param}"
+                resp = await self._http.get(cdn_url)
+                resp.raise_for_status()
+                data = resp.content
+            elif full_url:
+                # Direct download
+                resp = await self._http.get(full_url)
+                resp.raise_for_status()
+                data = resp.content
+            else:
+                logger.warning("wechat image has no download URL")
+                return None
+
+            # Decrypt if AES key is provided
+            if aes_key_b64 and _CRYPTO_AVAILABLE:
+                try:
+                    key = _parse_aes_key(aes_key_b64)
+                    data = _aes128_ecb_decrypt(data, key)
+                except Exception as exc:
+                    logger.warning("wechat image decryption failed: %s", exc)
+                    # Continue with raw data on decryption failure
+            elif aes_key_b64 and not _CRYPTO_AVAILABLE:
+                logger.warning("wechat image encrypted but cryptography library not available")
+
+            # Save to file
+            if self.config.download_dir is not None:
+                target = self.config.download_dir / f"{uuid.uuid4().hex}_wechat_image.jpg"
+                target.write_bytes(data)
+                return str(target)
+            with NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(data)
+                return tmp.name
+
+        except Exception as exc:
+            logger.warning("wechat image download failed: %s", exc)
+            return None

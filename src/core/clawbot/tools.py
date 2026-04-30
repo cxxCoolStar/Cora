@@ -74,6 +74,11 @@ class ArchiveToolExecutor:
             return ToolExecutionResult(reply="我暂时还不能处理这个请求。", action="chat")
 
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if invocation.upload is None:
+            return ToolExecutionResult(
+                reply="没有可保存的文件。如果你的意图是保存文本内容，请使用 save_text 工具。",
+                action="chat",
+            )
         saved = await self.ingestion_service.ingest(
             session_id=invocation.session_id,
             source_message_id=invocation.source_message_id,

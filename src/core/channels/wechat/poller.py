@@ -23,7 +23,8 @@ class WechatPoller:
                 if events:
                     logger.info("wechat poll received %d text event(s)", len(events))
                 for event in events:
-                    logger.info("wechat inbound: user=%s event=%s text=%s", event.user_id, event.event_id, event.text[:80])
+                    text_preview = event.text[:80] if event.text else "(none)"
+                    logger.info("wechat inbound: user=%s event=%s text=%s", event.user_id, event.event_id, text_preview)
                     result = await self.gateway_service.handle_inbound_event(event=event)
                     if result.deduplicated:
                         logger.info("wechat event deduplicated: %s", event.event_id)
