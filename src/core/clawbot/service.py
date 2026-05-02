@@ -40,6 +40,7 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     SessionRepository,
+    SourceEventRepository,
     TopicRepository,
     UserSignalRepository,
 )
@@ -60,6 +61,7 @@ class ClawBotService:
         *,
         session_repository: SessionRepository,
         message_repository: MessageRepository,
+        source_event_repository: SourceEventRepository,
         item_repository: ItemRepository,
         ingestion_service: IngestionService,
         clarification_repository: ClarificationRepository,
@@ -71,6 +73,7 @@ class ClawBotService:
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
+        self.source_event_repository = source_event_repository
         self.item_repository = item_repository
         self.ingestion_service = ingestion_service
         self.clarification_repository = clarification_repository
@@ -404,7 +407,38 @@ class ClawBotService:
         target.write_bytes(data)
         return {"upload_path": str(target), "upload_filename": filename}
 
-    async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None) -> IngestResponse:
+    def _create_source_event(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        text: str | None,
+        upload: UploadFile | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> object:
+        has_upload = upload is not None and bool((upload.filename or "").strip())
+        event_type = "file" if has_upload else "text"
+        media_kind = self._detect_media_kind(upload=upload)
+        if media_kind == "image":
+            event_type = "image"
+        elif text and text.strip():
+            stripped = text.strip()
+            if stripped.startswith("http://") or stripped.startswith("https://"):
+                event_type = "link"
+        return self.source_event_repository.create(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            channel=str((metadata or {}).get("channel") or "chat"),
+            external_event_id=(metadata or {}).get("external_event_id"),
+            external_user_id=(metadata or {}).get("external_user_id"),
+            event_type=event_type,
+            raw_text=text or "",
+            original_file_name=upload.filename if has_upload and upload is not None else None,
+            mime_type=getattr(upload, "content_type", None) if has_upload and upload is not None else None,
+            metadata=metadata or {},
+        )
+
+    async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None, source_metadata: dict[str, Any] | None = None) -> IngestResponse:
         logger.info(
             "clawbot ingest_start session_id=%s has_text=%s has_upload=%s",
             session_id,
@@ -414,8 +448,16 @@ class ClawBotService:
         self.session_repository.get(session_id)
         user_content = text or (upload.filename if upload and upload.filename else "")
         user_message = self.message_repository.add_user_message(session_id=session_id, content=user_content)
+        source_event = self._create_source_event(
+            session_id=session_id,
+            source_message_id=user_message.id,
+            text=text,
+            upload=upload,
+            metadata=source_metadata,
+        )
 
         context = self._load_context(session_id=session_id)
+        context["current_source_event_id"] = source_event.id
 
         pending = self.clarification_repository.get_latest_pending(session_id=session_id)
         if pending is not None and text and not upload:
@@ -428,6 +470,13 @@ class ClawBotService:
                 if resolved_item is not None:
                     reply = self.tool_executor._format_item_reply(item=resolved_item, mode="full_text")
                     self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                    resolved_context = self._compose_context(
+                        session_id=session_id,
+                        base_context=context,
+                        last_action="read_item",
+                        working_set=pending_payload.get("working_set") or [],
+                        selected_item_id=resolved_item.id,
+                    )
                     assistant_metadata = self._build_assistant_metadata(
                         action="retrieve",
                         confidence="high",
@@ -435,11 +484,7 @@ class ClawBotService:
                         source="llm_tool_call",
                         tool="read_item",
                         tool_arguments={"target": {"type": "item_id", "value": resolved_item.id}, "mode": "full_text"},
-                        context={
-                            "working_set": pending_payload.get("working_set") or [],
-                            "focus_item_id": resolved_item.id,
-                            "last_action": "read_item",
-                        },
+                        context=resolved_context,
                     )
                     self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=assistant_metadata)
                     return IngestResponse(reply=reply, action="retrieve", item_id=resolved_item.id, decision_source="llm_tool_call")
@@ -455,6 +500,7 @@ class ClawBotService:
                         saved_item = await self.ingestion_service.ingest_saved_upload(
                             session_id=session_id,
                             source_message_id=pending.source_message_id,
+                            source_event_id=str(pending_payload.get("source_event_id") or source_event.id),
                             file_path=Path(upload_path),
                             filename=upload_filename,
                             user_note=note or text,
@@ -465,11 +511,19 @@ class ClawBotService:
                         saved_item = await self.ingestion_service.ingest(
                             session_id=session_id,
                             source_message_id=pending.source_message_id,
+                            source_event_id=str(pending_payload.get("source_event_id") or source_event.id),
                             text=original_text,
                             upload=None,
                         )
                         reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
                     self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                    saved_context = self._compose_context(
+                        session_id=session_id,
+                        base_context=context,
+                        last_action="save_content",
+                        working_set=[self._item_snapshot(item=self.item_repository.get_any(item_id=saved_item.item_id), rank=1)],
+                        selected_item_id=saved_item.item_id,
+                    )
                     self.message_repository.add_assistant_message(
                         session_id=session_id,
                         content=reply,
@@ -480,7 +534,7 @@ class ClawBotService:
                             source="llm_tool_call",
                             tool="save_content",
                             tool_arguments={"text": str(pending_payload.get('original_text') or note or '')},
-                            context=context,
+                            context=saved_context,
                         ),
                     )
                     return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
@@ -510,19 +564,32 @@ class ClawBotService:
                 saved_item = await self.ingestion_service.ingest(
                     session_id=session_id,
                     source_message_id=pending.source_message_id,
+                    source_event_id=str(pending.pending_payload_json.get("source_event_id") or source_event.id),
                     text=pending_text,
                     upload=None,
                 )
                 reply = f"{saved_item.reply} I used your clarification to save the earlier content."
                 self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="llm_tool_call", tool="save_content", tool_arguments={"text": pending_text}, context=context))
+                saved_context = self._compose_context(
+                    session_id=session_id,
+                    base_context=context,
+                    last_action="save_content",
+                    working_set=[self._item_snapshot(item=self.item_repository.get_any(item_id=saved_item.item_id), rank=1)],
+                    selected_item_id=saved_item.item_id,
+                )
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="llm_tool_call", tool="save_content", tool_arguments={"text": pending_text}, context=saved_context))
                 return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
             if action == "organize":
                 pending_text = pending.pending_payload_json.get("text", "")
                 summary = self.ingestion_service.preview_summary(pending_text)
                 reply = f"Here is a quick summary of the earlier content: {summary}"
                 self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="organize", confidence="high", reason="Clarification reply resolved pending organization.", source="llm_tool_call", tool="summarize_item", tool_arguments={"target": {"type": "focus_item", "value": ""}}, context=context))
+                organize_context = self._compose_context(
+                    session_id=session_id,
+                    base_context=context,
+                    last_action="summarize_item",
+                )
+                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="organize", confidence="high", reason="Clarification reply resolved pending organization.", source="llm_tool_call", tool="summarize_item", tool_arguments={"target": {"type": "auto", "value": ""}}, context=organize_context))
                 return IngestResponse(reply=reply, action="organize", decision_source="llm_tool_call")
             if action == "cancel":
                 reply = "Okay, I will leave that earlier content alone."
@@ -542,6 +609,7 @@ class ClawBotService:
                         "media_kind": self._detect_media_kind(upload=upload) or ("text" if text else "unknown"),
                         "original_text": text or "",
                         "clarification_question": question,
+                        "source_event_id": source_event.id,
                     }
                     if has_upload and upload is not None:
                         pending_payload.update(await self._persist_pending_upload(upload=upload))
@@ -701,18 +769,151 @@ class ClawBotService:
         )
 
     def _load_context(self, *, session_id: str) -> dict:
-        context = self.message_repository.get_latest_assistant_context(session_id=session_id) or {}
-        working_set = context.get("working_set") or []
-        focus_item_id = str(context.get("focus_item_id") or "").strip() or None
-        if focus_item_id:
-            try:
-                item = self.item_repository.get_any(item_id=focus_item_id)
-                context["focus_item_title"] = item.title or ""
-                context["focus_item_summary"] = item.summary or ""
-            except Exception:
-                context["focus_item_id"] = None
-        context["working_set"] = [snapshot for snapshot in working_set if isinstance(snapshot, dict)]
+        base_context = self.message_repository.get_latest_assistant_context(session_id=session_id) or {}
+        return self._compose_context(session_id=session_id, base_context=base_context)
+
+    def _compose_context(
+        self,
+        *,
+        session_id: str,
+        base_context: dict[str, Any],
+        last_action: str | None = None,
+        working_set: list[dict[str, Any]] | None = None,
+        selected_item_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_working_set = [
+            snapshot for snapshot in (working_set if working_set is not None else base_context.get("working_set") or [])
+            if isinstance(snapshot, dict)
+        ]
+        recent_items = self._merge_recent_item_snapshots(
+            session_id=session_id,
+            selected_item_id=selected_item_id,
+            working_set=normalized_working_set,
+            prior_recent_items=base_context.get("recent_items") or [],
+        )
+        primary_focus = self._resolve_primary_focus(
+            session_id=session_id,
+            selected_item_id=selected_item_id,
+            base_context=base_context,
+            working_set=normalized_working_set,
+            recent_items=recent_items,
+        )
+        context = {
+            "working_set": normalized_working_set,
+            "recent_items": recent_items,
+            "recent_events": self._load_recent_event_snapshots(session_id=session_id),
+            "primary_focus": primary_focus,
+            "last_action": last_action or base_context.get("last_action"),
+        }
+        if base_context.get("current_source_event_id"):
+            context["current_source_event_id"] = base_context.get("current_source_event_id")
         return context
+
+    def _merge_recent_item_snapshots(
+        self,
+        *,
+        session_id: str,
+        selected_item_id: str | None,
+        working_set: list[dict[str, Any]],
+        prior_recent_items: list[dict[str, Any]],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_snapshot(snapshot: dict[str, Any] | None) -> None:
+            if not isinstance(snapshot, dict):
+                return
+            item_id = str(snapshot.get("item_id") or "").strip()
+            if not item_id or item_id in seen:
+                return
+            try:
+                item = self.item_repository.get_any(item_id=item_id)
+            except Exception:
+                return
+            seen.add(item_id)
+            merged.append(self._item_snapshot(item=item, rank=snapshot.get("rank")))
+
+        if selected_item_id:
+            try:
+                selected = self.item_repository.get_any(item_id=selected_item_id)
+                merged.append(self._item_snapshot(item=selected, rank=1))
+                seen.add(selected.id)
+            except Exception:
+                pass
+        for snapshot in working_set:
+            add_snapshot(snapshot)
+        for snapshot in prior_recent_items:
+            add_snapshot(snapshot if isinstance(snapshot, dict) else None)
+        for item in self.item_repository.list_by_session(session_id=session_id, current_only=True)[:limit]:
+            if item.id in seen:
+                continue
+            merged.append(self._item_snapshot(item=item, rank=None))
+            seen.add(item.id)
+            if len(merged) >= limit:
+                break
+        return merged[:limit]
+
+    def _resolve_primary_focus(
+        self,
+        *,
+        session_id: str,
+        selected_item_id: str | None,
+        base_context: dict[str, Any],
+        working_set: list[dict[str, Any]],
+        recent_items: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidate_ids: list[str] = []
+        if selected_item_id:
+            candidate_ids.append(selected_item_id)
+        primary_focus = base_context.get("primary_focus") or {}
+        primary_focus_id = str(primary_focus.get("item_id") or "").strip()
+        if primary_focus_id:
+            candidate_ids.append(primary_focus_id)
+        legacy_focus_id = str(base_context.get("focus_item_id") or "").strip()
+        if legacy_focus_id:
+            candidate_ids.append(legacy_focus_id)
+        for snapshot in working_set + recent_items:
+            item_id = str((snapshot or {}).get("item_id") or "").strip()
+            if item_id:
+                candidate_ids.append(item_id)
+        for item_id in candidate_ids:
+            try:
+                item = self.item_repository.get_any(item_id=item_id)
+                return self._item_snapshot(item=item, rank=None)
+            except Exception:
+                continue
+        return None
+
+    def _load_recent_event_snapshots(self, *, session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        for event in self.source_event_repository.list_by_session(session_id=session_id, limit=limit):
+            snapshots.append(
+                {
+                    "source_event_id": event.id,
+                    "event_type": event.event_type,
+                    "channel": event.channel,
+                    "raw_text": event.raw_text,
+                    "original_file_name": event.original_file_name,
+                    "mime_type": event.mime_type,
+                    "created_at": event.created_at.isoformat(),
+                }
+            )
+        return snapshots
+
+    @staticmethod
+    def _item_snapshot(item: object, rank: int | None) -> dict[str, Any]:
+        return {
+            "item_id": item.id,
+            "session_id": item.session_id,
+            "source_event_id": item.source_event_id,
+            "item_type": item.item_type,
+            "title": item.title,
+            "summary": item.summary,
+            "locator_hint": item.locator_hint,
+            "saved_at": item.created_at.isoformat(),
+            "rank": rank,
+        }
 
     def _build_assistant_metadata(
         self,

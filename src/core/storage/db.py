@@ -32,6 +32,7 @@ class DatabaseManager:
             self._ensure_column(raw, "clawbot_items", "version", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(raw, "clawbot_items", "is_current", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(raw, "clawbot_items", "superseded_by_item_id", "VARCHAR")
+            self._ensure_column(raw, "clawbot_items", "source_event_id", "VARCHAR")
 
     @staticmethod
     def _unwrap_sqlite_connection(raw: object) -> sqlite3.Connection | None:

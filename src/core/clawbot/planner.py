@@ -22,6 +22,7 @@ class ToolPlan:
 
 class AgentPlanner:
     """Choose a constrained wiki tool based on the user turn and session state."""
+
     DEFAULT_TOOLSETS = ["capture", "wiki_browse", "wiki_read", "channel_delivery", "agent_state"]
 
     def __init__(self, model_client: ModelClient | None = None) -> None:
@@ -66,25 +67,23 @@ class AgentPlanner:
             "Decision policy:\n"
             "- If the user asks what exists in the knowledge base, use overview_knowledge_base or list_topics.\n"
             "- If the user asks to find or open earlier material, prefer open_topic.\n"
-            "- If the user refers to earlier results using phrases like '第一个', '第二个', '这个', '那个', '上一个', or a title fragment, treat it as a reference to the current working_set or focus_item rather than a new search.\n"
-            "- If the user asks to '看看', '打开', '给我看', '展开', or asks for the full content, prefer read_item.\n"
+            "- If the user refers to earlier results using ordinal cues, title fragments, or phrases like this/that/previous, treat that as a reference to the current working_set or recent_items rather than a new search.\n"
+            "- If the user asks to read, open, inspect, or see the full content, prefer read_item.\n"
             "- If the user asks to summarize, outline, or extract key points, prefer summarize_item.\n"
             "- If the user asks you to send, forward, deliver, or let them receive a previously saved file, prefer send_file_to_user.\n"
             "- If a ranked reference and a title hint both appear, treat that as a high-confidence reference and do not ask for clarification.\n"
             "- If the user submits new standalone text or a standalone URL, prefer save_content.\n"
             "- Otherwise, new material should usually be saved with save_content or save_file.\n"
-            "- Use clarify_reference only when the target truly cannot be resolved from the current working_set or focus_item.\n"
+            "- Use clarify_reference only when the target truly cannot be resolved from the current working_set or recent_items.\n"
             "- Do not invent item IDs.\n"
             "- Return strict JSON with keys: tool, reason, and optionally query, text, target_rank, target_title_hint, reference_strategy, mode, style, reference_text.\n"
-            "- Valid reference_strategy values are: working_set_selection, focus_item, direct_item_id, ambiguous_reference.\n"
+            "- Valid reference_strategy values are: working_set_selection, recent_item, direct_item_id, ambiguous_reference, auto.\n"
         )
         state_json = json.dumps(
             {
                 "has_upload": has_upload,
                 "coarse_intent": coarse_intent,
-                "focus_item_id": context.get("focus_item_id"),
-                "focus_item_title": context.get("focus_item_title"),
-                "focus_item_summary": context.get("focus_item_summary"),
+                "primary_focus": context.get("primary_focus"),
                 "last_action": context.get("last_action"),
                 "working_set": [
                     {
@@ -94,6 +93,15 @@ class AgentPlanner:
                         "summary": snapshot.get("summary"),
                     }
                     for snapshot in working_set
+                ],
+                "recent_items": [
+                    {
+                        "item_id": snapshot.get("item_id"),
+                        "title": snapshot.get("title"),
+                        "summary": snapshot.get("summary"),
+                    }
+                    for snapshot in (context.get("recent_items") or [])[:5]
+                    if isinstance(snapshot, dict)
                 ],
             },
             ensure_ascii=False,
@@ -148,14 +156,14 @@ class AgentPlanner:
             target = arguments.get("target")
             if not isinstance(target, dict):
                 reference_strategy = str(payload.get("reference_strategy") or "").strip()
-                if reference_strategy == "focus_item":
-                    target = {"type": "focus_item", "value": ""}
+                if reference_strategy == "recent_item":
+                    target = {"type": "recent_item", "value": 1}
                 elif reference_strategy == "direct_item_id":
                     target = {"type": "item_id", "value": str(payload.get("target_item_id") or "").strip()}
                 elif payload.get("target_rank") is not None:
                     target = {"type": "working_set_rank", "value": payload.get("target_rank")}
                 else:
-                    target = {}
+                    target = {"type": "auto", "value": ""}
             built: dict[str, Any] = {"target": target}
             if tool == "read_item":
                 built["mode"] = str(payload.get("mode") or arguments.get("mode") or "summary").strip()
@@ -204,7 +212,10 @@ class AgentPlanner:
                 raise ValueError(f"Planner selected {normalized_tool} without a target object.")
             target_type = str(target.get("type") or "").strip()
             target_value = target.get("value")
-            if target_type not in {"item_id", "focus_item", "working_set_rank"}:
+            if target_type == "focus_item":
+                target_type = "recent_item"
+                target_value = 1
+            if target_type not in {"item_id", "working_set_rank", "recent_item", "auto"}:
                 raise ValueError(f"Planner selected {normalized_tool} with invalid target type: {target_type}")
             args: dict[str, Any] = {"target": {"type": target_type, "value": target_value}}
             title_hint = str(plan.arguments.get("target_title_hint") or "").strip()

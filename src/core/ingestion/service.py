@@ -60,6 +60,7 @@ class IngestionService:
         *,
         session_id: str,
         source_message_id: str,
+        source_event_id: str | None,
         text: str | None,
         upload: UploadFile | None,
         user_note: str | None = None,
@@ -90,6 +91,7 @@ class IngestionService:
         item = self.item_repository.create(
             session_id=session_id,
             source_message_id=source_message_id,
+            source_event_id=source_event_id,
             item_type=parsed.item_type,
             title=parsed.title,
             raw_content=parsed.raw_content,
@@ -145,6 +147,7 @@ class IngestionService:
         *,
         session_id: str,
         source_message_id: str,
+        source_event_id: str | None,
         file_path: Path,
         filename: str,
         user_note: str | None = None,
@@ -167,6 +170,7 @@ class IngestionService:
         item = self.item_repository.create(
             session_id=session_id,
             source_message_id=source_message_id,
+            source_event_id=source_event_id,
             item_type=parsed.item_type,
             title=parsed.title,
             raw_content=parsed.raw_content,

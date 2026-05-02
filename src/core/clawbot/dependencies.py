@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fastapi import Request
 
@@ -20,6 +21,7 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     SessionRepository,
+    SourceEventRepository,
     TopicActivityRepository,
     TopicItemRepository,
     TopicRepository,
@@ -35,6 +37,7 @@ class ClawBotContainer:
     database: DatabaseManager
     session_repository: SessionRepository
     message_repository: MessageRepository
+    source_event_repository: SourceEventRepository
     item_repository: ItemRepository
     clarification_repository: ClarificationRepository
     user_signal_repository: UserSignalRepository
@@ -66,6 +69,7 @@ def get_clawbot_container() -> ClawBotContainer:
         database = DatabaseManager(settings.clawbot_database_url)
         session_repository = SessionRepository(database)
         message_repository = MessageRepository(database)
+        source_event_repository = SourceEventRepository(database)
         item_repository = ItemRepository(database)
         clarification_repository = ClarificationRepository(database)
         user_signal_repository = UserSignalRepository(database)
@@ -124,6 +128,7 @@ def get_clawbot_container() -> ClawBotContainer:
         clawbot_service = ClawBotService(
             session_repository=session_repository,
             message_repository=message_repository,
+            source_event_repository=source_event_repository,
             item_repository=item_repository,
             ingestion_service=ingestion_service,
             clarification_repository=clarification_repository,
@@ -140,6 +145,7 @@ def get_clawbot_container() -> ClawBotContainer:
             database=database,
             session_repository=session_repository,
             message_repository=message_repository,
+            source_event_repository=source_event_repository,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
             user_signal_repository=user_signal_repository,

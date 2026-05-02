@@ -26,7 +26,7 @@ def build_input_interpretation_messages(
         "- If the user sends a long standalone text passage and it is unclear whether they want it saved or acted on, ask whether Cora should save it or handle it as an instruction.\n"
         "- If the user sends a file or image without enough surrounding explanation, ask what they want Cora to do with it.\n"
         "- If the user sends a file or image together with a clear description like '这是我的简历' or '这是我女朋友', that is enough to save it without clarification.\n"
-        "- If the user is obviously referring to a current focus item or working-set item, prefer update_existing or send instead of save.\n"
+        "- If the user is obviously referring to a recent item or working-set item, prefer update_existing or send instead of save.\n"
         "- The clarification question must be the smallest useful next question and should not mention internal tool names.\n"
     )
     payload = {
@@ -34,8 +34,7 @@ def build_input_interpretation_messages(
         "has_upload": has_upload,
         "upload_filename": upload_filename or "",
         "media_kind": media_kind or "none",
-        "focus_item_id": context.get("focus_item_id"),
-        "focus_item_title": context.get("focus_item_title"),
+        "primary_focus": context.get("primary_focus"),
         "last_action": context.get("last_action"),
         "working_set": [
             {
@@ -44,6 +43,24 @@ def build_input_interpretation_messages(
                 "summary": snapshot.get("summary"),
             }
             for snapshot in (context.get("working_set") or [])[:3]
+            if isinstance(snapshot, dict)
+        ],
+        "recent_items": [
+            {
+                "title": snapshot.get("title"),
+                "summary": snapshot.get("summary"),
+                "item_type": snapshot.get("item_type"),
+            }
+            for snapshot in (context.get("recent_items") or [])[:3]
+            if isinstance(snapshot, dict)
+        ],
+        "recent_events": [
+            {
+                "event_type": snapshot.get("event_type"),
+                "raw_text": snapshot.get("raw_text"),
+                "original_file_name": snapshot.get("original_file_name"),
+            }
+            for snapshot in (context.get("recent_events") or [])[:3]
             if isinstance(snapshot, dict)
         ],
     }

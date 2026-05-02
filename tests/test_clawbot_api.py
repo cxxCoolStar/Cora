@@ -30,7 +30,7 @@ from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
@@ -82,13 +82,13 @@ class StubTopicModelClient(ModelClient):
             if "第一个" in user_text and "面试宝典" in user_text:
                 return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "working_set_rank", "value": 1}, "mode": "full_text"})])
             if "这里面写了什么" in user_text or "展开讲讲" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "focus_item", "value": ""}, "mode": "full_text"})])
+                return ModelResponse(tool_calls=[ToolCall(tool_name="read_item", arguments={"target": {"type": "auto", "value": ""}, "mode": "full_text"})])
             if user_text.startswith("http://") or user_text.startswith("https://"):
                 return ModelResponse(tool_calls=[ToolCall(tool_name="save_content", arguments={"text": user_text})])
             if "帮我找" in user_text or "帮我查" in user_text or "查一下" in user_text or "告诉我" in user_text:
                 return ModelResponse(tool_calls=[ToolCall(tool_name="open_topic", arguments={"query": user_text, "top_k": 3})])
             if "总结" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="summarize_item", arguments={"target": {"type": "focus_item", "value": ""}, "style": "brief"})])
+                return ModelResponse(tool_calls=[ToolCall(tool_name="summarize_item", arguments={"target": {"type": "auto", "value": ""}, "style": "brief"})])
             if user_text in {"你好", "您好", "hi", "hello"}:
                 return ModelResponse(assistant_text="你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。")
             if len(user_text) >= 120 or ("\n" in user_text and len(user_text) >= 40):
@@ -224,6 +224,7 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
     database = DatabaseManager(settings.clawbot_database_url)
     session_repository = SessionRepository(database)
     message_repository = MessageRepository(database)
+    source_event_repository = SourceEventRepository(database)
     item_repository = ItemRepository(database)
     clarification_repository = ClarificationRepository(database)
     user_signal_repository = UserSignalRepository(database)
@@ -256,6 +257,7 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
     clawbot_service = ClawBotService(
         session_repository=session_repository,
         message_repository=message_repository,
+        source_event_repository=source_event_repository,
         item_repository=item_repository,
         ingestion_service=ingestion_service,
         clarification_repository=clarification_repository,
@@ -270,6 +272,7 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
         database=database,
         session_repository=session_repository,
         message_repository=message_repository,
+        source_event_repository=source_event_repository,
         item_repository=item_repository,
         clarification_repository=clarification_repository,
         user_signal_repository=user_signal_repository,
@@ -1130,7 +1133,7 @@ def test_planner_uses_llm_focus_item_for_follow_up_read():
     assert plan is not None
     assert plan.source == "llm"
     assert plan.tool == "read_item"
-    assert plan.arguments["target"]["type"] == "focus_item"
+    assert plan.arguments["target"]["type"] == "auto"
     assert plan.arguments["mode"] == "full_text"
 
 def test_llm_router_can_promote_ambiguous_text_to_capture():
@@ -1334,6 +1337,7 @@ def test_send_file_tool_can_resolve_title_hint_and_deliver(tmp_path):
         container.ingestion_service.ingest(
             session_id=session.id,
             source_message_id=source_message.id,
+            source_event_id=None,
             text=None,
             upload=UploadFile(filename="resume.pdf", file=BytesIO(b"%PDF-1.4 fake bytes")),
         )

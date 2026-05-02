@@ -75,7 +75,18 @@ class WechatGatewayService:
                     file=BytesIO(file_bytes),
                     headers=None,
                 )
-            response = await self.clawbot_service.ingest(session_id=session_id, text=event.text, upload=upload)
+            response = await self.clawbot_service.ingest(
+                session_id=session_id,
+                text=event.text,
+                upload=upload,
+                source_metadata={
+                    "channel": self.CHANNEL_NAME,
+                    "external_event_id": event.event_id,
+                    "external_user_id": event.user_id,
+                    "file_name": event.file_name,
+                    "file_mime": event.file_mime,
+                },
+            )
             logger.info("wechat gateway clawbot_done session_id=%s action=%s", session_id, response.action)
         finally:
             if upload is not None:

@@ -40,12 +40,32 @@ class MessageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class SourceEventRecord(Base):
+    __tablename__ = "clawbot_source_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    source_message_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_messages.id"), nullable=True, index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="chat", index=True)
+    external_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    external_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    raw_text: Mapped[str] = mapped_column(Text, default="")
+    original_file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stored_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class ItemRecord(Base):
     __tablename__ = "clawbot_items"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
     source_message_id: Mapped[str] = mapped_column(ForeignKey("clawbot_messages.id"), index=True)
+    source_event_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_source_events.id"), nullable=True, index=True)
     item_type: Mapped[str] = mapped_column(String(32))
     title: Mapped[str] = mapped_column(String(255))
     raw_content: Mapped[str] = mapped_column(Text)

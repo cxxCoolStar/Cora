@@ -12,6 +12,7 @@ from core.storage.models import (
     ItemRecord,
     MessageRecord,
     SessionRecord,
+    SourceEventRecord,
     TopicActivityRecord,
     TopicItemRecord,
     TopicRecord,
@@ -94,6 +95,7 @@ class ItemRepository:
         *,
         session_id: str,
         source_message_id: str,
+        source_event_id: str | None,
         item_type: str,
         title: str,
         raw_content: str,
@@ -110,6 +112,7 @@ class ItemRepository:
             record = ItemRecord(
                 session_id=session_id,
                 source_message_id=source_message_id,
+                source_event_id=source_event_id,
                 item_type=item_type,
                 title=title,
                 raw_content=raw_content,
@@ -190,7 +193,17 @@ class ItemRepository:
             stmt = stmt.order_by(desc(ItemRecord.created_at))
             records = list(session.scalars(stmt))
         for record in records:
-            haystack = " ".join([record.title, record.summary, record.normalized_text]).lower()
+            metadata = record.metadata_json or {}
+            metadata_values = " ".join(str(value) for value in metadata.values() if value is not None)
+            haystack = " ".join(
+                [
+                    record.title,
+                    record.summary,
+                    record.normalized_text,
+                    record.locator_hint or "",
+                    metadata_values,
+                ]
+            ).lower()
             compact_query = lowered.replace(" ", "")
             compact_haystack = haystack.replace(" ", "")
             if compact_query and compact_query in compact_haystack:
@@ -209,6 +222,62 @@ class ItemRepository:
                 .order_by(desc(ItemRecord.created_at))
             )
             return list(session.scalars(stmt))
+
+
+class SourceEventRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str | None,
+        channel: str,
+        event_type: str,
+        raw_text: str = "",
+        original_file_name: str | None = None,
+        stored_file_path: str | None = None,
+        mime_type: str | None = None,
+        external_event_id: str | None = None,
+        external_user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SourceEventRecord:
+        with self.database.session() as session:
+            record = SourceEventRecord(
+                session_id=session_id,
+                source_message_id=source_message_id,
+                channel=channel,
+                external_event_id=external_event_id,
+                external_user_id=external_user_id,
+                event_type=event_type,
+                raw_text=raw_text,
+                original_file_name=original_file_name,
+                stored_file_path=stored_file_path,
+                mime_type=mime_type,
+                metadata_json=metadata or {},
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def list_by_session(self, *, session_id: str, limit: int = 20) -> list[SourceEventRecord]:
+        with self.database.session() as session:
+            stmt = (
+                select(SourceEventRecord)
+                .where(SourceEventRecord.session_id == session_id)
+                .order_by(desc(SourceEventRecord.created_at))
+                .limit(limit)
+            )
+            return list(session.scalars(stmt))
+
+    def get_any(self, *, event_id: str) -> SourceEventRecord:
+        with self.database.session() as session:
+            record = session.get(SourceEventRecord, event_id)
+            if record is None:
+                raise KeyError(f"Source event not found: {event_id}")
+            return record
 
 class TopicRepository:
     def __init__(self, database: DatabaseManager) -> None:

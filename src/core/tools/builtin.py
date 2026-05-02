@@ -83,7 +83,7 @@ def register_builtin_tools() -> None:
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "enum": ["item_id", "working_set_rank", "recent_item", "auto"],
                                 "description": "How to identify the item to read.",
                             },
                             "value": {
@@ -119,7 +119,7 @@ def register_builtin_tools() -> None:
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "enum": ["item_id", "working_set_rank", "recent_item", "auto"],
                                 "description": "How to identify the item to summarize.",
                             },
                             "value": {
@@ -193,7 +193,7 @@ def register_builtin_tools() -> None:
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["item_id", "focus_item", "working_set_rank"],
+                                "enum": ["item_id", "working_set_rank", "recent_item", "auto"],
                                 "description": "How to identify the file item to send.",
                             },
                             "value": {
