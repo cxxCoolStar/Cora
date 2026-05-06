@@ -145,15 +145,15 @@ def test_openai_client_sends_assistant_tool_call_messages():
                         "id": "call_123",
                         "type": "function",
                         "function": {
-                            "name": "open_topic",
-                            "arguments": "{\"query\":\"内网\"}",
+                            "name": "archive",
+                            "arguments": "{\"action\":\"open\",\"query\":\"内网\"}",
                         },
                     }
                 ],
             ),
             Message.tool(
                 session_id="session-1",
-                name="open_topic",
+                name="archive",
                 tool_call_id="call_123",
                 content='{"reply":"ok"}',
             ),
@@ -162,5 +162,5 @@ def test_openai_client_sends_assistant_tool_call_messages():
     )
 
     assert result.assistant_text == "done"
-    assert captured_request["json"]["messages"][0]["tool_calls"][0]["function"]["name"] == "open_topic"
+    assert captured_request["json"]["messages"][0]["tool_calls"][0]["function"]["name"] == "archive"
     assert captured_request["json"]["messages"][1]["tool_call_id"] == "call_123"

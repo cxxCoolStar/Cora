@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import Request
 
+from core.archivefs.service import ArchiveImageWorkflow, ArchiveSkillScriptRunner
 from core.config import CoreSettings
 from core.clawbot.service import ClawBotService
 from core.clawbot.tools import ArchiveToolExecutor
@@ -95,8 +96,13 @@ def get_clawbot_container() -> ClawBotContainer:
             message_repository=message_repository,
             user_signal_repository=user_signal_repository,
             storage_dir=settings.files_storage_dir,
-            image_parser=image_parser,
         )
+        archive_runner = ArchiveSkillScriptRunner(archive_root=settings.archive_root_dir)
+        archive_image_workflow = ArchiveImageWorkflow(
+            image_parser=image_parser,
+            archive_runner=archive_runner,
+        )
+        ingestion_service.archive_image_workflow = archive_image_workflow
         model_client = None
         if settings.model_provider == "openai" or (settings.openai_api_key and settings.model):
             model_client = OpenAIChatModelClient(
@@ -124,6 +130,7 @@ def get_clawbot_container() -> ClawBotContainer:
             item_repository=item_repository,
             clarification_repository=clarification_repository,
             topic_organizer=topic_organizer,
+            archive_runner=archive_runner,
         )
         clawbot_service = ClawBotService(
             session_repository=session_repository,

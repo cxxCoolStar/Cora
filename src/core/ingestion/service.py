@@ -10,10 +10,10 @@ import uuid
 import anyio
 from fastapi import UploadFile
 
+from core.archivefs.service import ArchiveImageWorkflow
 from core.ingestion.parsers.base import FileSource, ParsedContent
 from core.ingestion.parsers.doc_parser import DocFileParser
 from core.ingestion.parsers.docling_parser import DoclingFileParser
-from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
@@ -39,7 +39,7 @@ class IngestionService:
         message_repository: MessageRepository,
         user_signal_repository: UserSignalRepository,
         storage_dir: Path,
-        image_parser: ImageFileParser | None = None,
+        archive_image_workflow: ArchiveImageWorkflow | None = None,
         topic_organizer: TopicOrganizerService | None = None,
     ) -> None:
         self.item_repository = item_repository
@@ -53,7 +53,7 @@ class IngestionService:
         self.txt_parser = TxtFileParser()
         self.docling_parser = DoclingFileParser()
         self.doc_parser = DocFileParser()
-        self.image_parser = image_parser or ImageFileParser(describer=None)
+        self.archive_image_workflow = archive_image_workflow
 
     async def ingest(
         self,
@@ -72,75 +72,27 @@ class IngestionService:
             bool(text and text.strip()),
             bool(upload and (upload.filename or "").strip()),
         )
+        if upload is not None and bool((upload.filename or "").strip()):
+            suffix = Path(upload.filename or "").suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                if self.archive_image_workflow is None:
+                    raise RuntimeError("archive_image_workflow is required for image uploads")
+                return await self._ingest_image_upload_via_archivefs(
+                    session_id=session_id,
+                    source_message_id=source_message_id,
+                    source_event_id=source_event_id,
+                    upload=upload,
+                    user_note=user_note,
+                )
         parsed = await self._parse_input(text=text, upload=upload)
         logger.info("ingestion parsed item_type=%s title=%s", parsed.item_type, parsed.title)
         parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
-        summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
-        tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
-        locator_hint = self._build_locator_hint(parsed)
-        document_key = self._build_document_key(parsed=parsed)
-        previous_current = None
-        next_version = 1
-        if document_key:
-            previous_current = self.item_repository.find_current_by_document_key(
-                session_id=session_id,
-                document_key=document_key,
-            )
-            if previous_current is not None:
-                next_version = max(1, int(previous_current.version) + 1)
-        item = self.item_repository.create(
+        return self._store_parsed_item(
             session_id=session_id,
             source_message_id=source_message_id,
             source_event_id=source_event_id,
-            item_type=parsed.item_type,
-            title=parsed.title,
-            raw_content=parsed.raw_content,
-            normalized_text=parsed.normalized_text,
-            summary=summary,
-            metadata={**parsed.metadata, "tags": tags},
-            locator_hint=locator_hint,
-            document_key=document_key,
-            version=next_version,
-            is_current=1,
+            parsed=parsed,
         )
-        if previous_current is not None and previous_current.id != item.id:
-            self.item_repository.mark_superseded(item_id=previous_current.id, superseded_by_item_id=item.id)
-        self._record_user_signals(
-            session_id=session_id,
-            item_id=item.id,
-            item_type=parsed.item_type,
-            tags=tags,
-            title=item.title,
-        )
-        logger.info("ingestion stored item_id=%s item_type=%s", item.id, parsed.item_type)
-        topic_name: str | None = None
-        if self.topic_organizer is not None:
-            assignment = self.topic_organizer.assign_item_to_topic(session_id=session_id, item=item)
-            topic_name = assignment.topic.name
-            logger.info("ingestion topic_assignment item_id=%s topic=%s created=%s", item.id, assignment.topic.slug, assignment.created)
-
-        if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
-            original_name = parsed.metadata.get("original_file_name", item.title)
-            suffix = parsed.metadata.get("file_suffix", "")
-            parse_status = parsed.metadata.get("parse_status")
-            parse_error = parsed.metadata.get("parse_error")
-            error_hint = f" (parse error: {parse_error})" if parse_status == "failed" and parse_error else ""
-            reply = (
-                f"Saved `{original_name}` as a file upload ({suffix or 'unknown'}). "
-                f"I can't extract searchable text from this file type yet{error_hint}, but I kept the original file so you can find it later. "
-                f"Summary: {summary}"
-            )
-        else:
-            if previous_current is not None:
-                reply = (
-                    f"Updated `{item.title}` to v{item.version} (previous version kept as history). "
-                    f"Summary: {summary}"
-                )
-            else:
-                reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
-        if topic_name:
-            reply += f" Topic: `{topic_name}`."
-        return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
 
     async def ingest_saved_upload(
         self,
@@ -152,8 +104,112 @@ class IngestionService:
         filename: str,
         user_note: str | None = None,
     ) -> IngestedItemResult:
+        if file_path.suffix.lower() in IMAGE_EXTENSIONS:
+            if self.archive_image_workflow is None:
+                raise RuntimeError("archive_image_workflow is required for image uploads")
+            return self._ingest_saved_image_via_archivefs(
+                session_id=session_id,
+                source_message_id=source_message_id,
+                source_event_id=source_event_id,
+                file_path=file_path,
+                filename=filename,
+                user_note=user_note,
+            )
         parsed = await self._parse_saved_upload(file_path=file_path, filename=filename)
         parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
+        return self._store_parsed_item(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            source_event_id=source_event_id,
+            parsed=parsed,
+        )
+
+    async def _ingest_image_upload_via_archivefs(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        source_event_id: str | None,
+        upload: UploadFile,
+        user_note: str | None,
+    ) -> IngestedItemResult:
+        target = self.storage_dir / f"{uuid.uuid4()}_{upload.filename}"
+        data = await upload.read()
+        target.write_bytes(data)
+        logger.info(
+            "ingestion image_archivefs_upload_saved filename=%s path=%s bytes=%d",
+            upload.filename,
+            target,
+            len(data),
+        )
+        return self._ingest_saved_image_via_archivefs(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            source_event_id=source_event_id,
+            file_path=target,
+            filename=upload.filename or target.name,
+            user_note=user_note,
+        )
+
+    def _ingest_saved_image_via_archivefs(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        source_event_id: str | None,
+        file_path: Path,
+        filename: str,
+        user_note: str | None,
+    ) -> IngestedItemResult:
+        if self.archive_image_workflow is None:
+            raise RuntimeError("archive_image_workflow is not configured")
+        saved = self.archive_image_workflow.save_image(
+            image_path=file_path,
+            source="wechat",
+            user_note=user_note or "",
+            move=True,
+        )
+        normalized_text = (
+            f"Image file: {saved.record.filename}\n"
+            f"Visual description:\n{saved.record.description}"
+        ).strip()
+        metadata = {
+            "original_file_name": filename or saved.record.filename,
+            "stored_file_path": str(saved.stored_path),
+            "archive_relative_path": saved.relative_path,
+            "archive_record_id": saved.record.id,
+            "archive_topic": saved.record.topic,
+            "archive_source": saved.record.source,
+            "vision_status": "ok",
+        }
+        if user_note:
+            metadata["user_note"] = user_note
+        parsed = ParsedContent(
+            item_type=saved.record.asset_type,
+            title=Path(saved.record.filename).stem or saved.record.filename,
+            raw_content=saved.record.description,
+            normalized_text=normalized_text,
+            metadata=metadata,
+        )
+        return self._store_parsed_item(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            source_event_id=source_event_id,
+            parsed=parsed,
+            forced_topic_slug=saved.record.topic,
+            forced_topic_reason="Linked by archive-core image workflow.",
+        )
+
+    def _store_parsed_item(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        source_event_id: str | None,
+        parsed: ParsedContent,
+        forced_topic_slug: str | None = None,
+        forced_topic_reason: str | None = None,
+    ) -> IngestedItemResult:
         summary = self._summarize(parsed.normalized_text) or self._summarize(parsed.title)
         tags = self._extract_tags(parsed.normalized_text, parsed.item_type)
         locator_hint = self._build_locator_hint(parsed)
@@ -183,7 +239,10 @@ class IngestionService:
             is_current=1,
         )
         if previous_current is not None and previous_current.id != item.id:
-            self.item_repository.mark_superseded(item_id=previous_current.id, superseded_by_item_id=item.id)
+            self.item_repository.mark_superseded(
+                item_id=previous_current.id,
+                superseded_by_item_id=item.id,
+            )
         self._record_user_signals(
             session_id=session_id,
             item_id=item.id,
@@ -191,12 +250,51 @@ class IngestionService:
             tags=tags,
             title=item.title,
         )
+        logger.info("ingestion stored item_id=%s item_type=%s", item.id, parsed.item_type)
         topic_name: str | None = None
         if self.topic_organizer is not None:
-            assignment = self.topic_organizer.assign_item_to_topic(session_id=session_id, item=item)
+            if forced_topic_slug:
+                assignment = self.topic_organizer.link_item_to_topic_slug(
+                    session_id=session_id,
+                    item=item,
+                    slug=forced_topic_slug,
+                    topic_name=forced_topic_slug.replace("-", " ").title(),
+                    summary=summary,
+                    tags=tags,
+                    reason=forced_topic_reason or "Linked by archive workflow.",
+                )
+            else:
+                assignment = self.topic_organizer.assign_item_to_topic(
+                    session_id=session_id,
+                    item=item,
+                )
             topic_name = assignment.topic.name
+            logger.info(
+                "ingestion topic_assignment item_id=%s topic=%s created=%s",
+                item.id,
+                assignment.topic.slug,
+                assignment.created,
+            )
+        reply = self._build_reply(
+            item=item,
+            parsed=parsed,
+            summary=summary,
+            topic_name=topic_name,
+            previous_current=previous_current,
+        )
+        return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
+
+    @staticmethod
+    def _build_reply(
+        *,
+        item: object,
+        parsed: ParsedContent,
+        summary: str,
+        topic_name: str | None,
+        previous_current: object | None,
+    ) -> str:
         if parsed.metadata.get("parse_status") in {"unsupported", "failed"}:
-            original_name = parsed.metadata.get("original_file_name", item.title)
+            original_name = parsed.metadata.get("original_file_name", getattr(item, "title", "file"))
             suffix = parsed.metadata.get("file_suffix", "")
             parse_status = parsed.metadata.get("parse_status")
             parse_error = parsed.metadata.get("parse_error")
@@ -209,14 +307,14 @@ class IngestionService:
         else:
             if previous_current is not None:
                 reply = (
-                    f"Updated `{item.title}` to v{item.version} (previous version kept as history). "
+                    f"Updated `{getattr(item, 'title', 'item')}` to v{getattr(item, 'version', 1)} (previous version kept as history). "
                     f"Summary: {summary}"
                 )
             else:
-                reply = f"Saved `{item.title}` as a {item.item_type.replace('_', ' ')}. Summary: {summary}"
+                reply = f"Saved `{getattr(item, 'title', 'item')}` as a {parsed.item_type.replace('_', ' ')}. Summary: {summary}"
         if topic_name:
             reply += f" Topic: `{topic_name}`."
-        return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
+        return reply
 
     async def _parse_input(self, *, text: str | None, upload: UploadFile | None) -> ParsedContent:
         has_real_upload = upload is not None and bool((upload.filename or "").strip())
@@ -241,22 +339,7 @@ class IngestionService:
         if suffix == ".txt":
             parsed = self.txt_parser.parse(source)
         elif suffix in IMAGE_EXTENSIONS:
-            try:
-                parsed = await anyio.to_thread.run_sync(self.image_parser.parse, source)
-            except Exception as exc:
-                return ParsedContent(
-                    item_type="file_upload",
-                    title=filename or file_path.name,
-                    raw_content="",
-                    normalized_text="",
-                    metadata={
-                        "parse_status": "failed",
-                        "file_suffix": suffix or "unknown",
-                        "original_file_name": filename or file_path.name,
-                        "stored_file_path": str(file_path),
-                        "parse_error": f"{type(exc).__name__}: {exc}",
-                    },
-                )
+            raise RuntimeError("Legacy image parsing path has been removed; use archive_image_workflow instead.")
         elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
             try:
                 parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)

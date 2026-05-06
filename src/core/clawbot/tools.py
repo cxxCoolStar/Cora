@@ -6,12 +6,14 @@ from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import UploadFile
 
+from core.archivefs.service import ArchiveLookupResult, ArchiveSkillScriptRunner
 from core.clawbot.planner import ToolPlan
 from core.ingestion.service import IngestionService
-from core.storage.models import ItemRecord
+from core.storage.models import ClarificationStateRecord, ItemRecord
 from core.storage.repositories import (
     ChannelSessionMapRepository,
     ClarificationRepository,
@@ -42,6 +44,7 @@ class ArchiveToolExecutor:
         item_repository: ItemRepository,
         clarification_repository: ClarificationRepository,
         topic_organizer: TopicOrganizerService | None = None,
+        archive_runner: ArchiveSkillScriptRunner | None = None,
         gateway_service: Any | None = None,
         session_map_repository: ChannelSessionMapRepository | None = None,
         channel_name: str = "wechat",
@@ -50,6 +53,7 @@ class ArchiveToolExecutor:
         self.item_repository = item_repository
         self.clarification_repository = clarification_repository
         self.topic_organizer = topic_organizer
+        self.archive_runner = archive_runner
         self.gateway_service = gateway_service
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
@@ -133,11 +137,64 @@ class ArchiveToolExecutor:
         except KeyError:
             return ToolExecutionResult(reply="我暂时还不能处理这个请求。", action="chat")
 
+    async def _tool_archive(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        action = str(invocation.plan.arguments.get("action") or "").strip()
+        if action == "save":
+            if invocation.upload is not None:
+                return await self._tool_save_file(invocation)
+            return await self._tool_save_content(invocation)
+        if action == "overview":
+            return self._tool_overview_knowledge_base(invocation)
+        if action == "list_topics":
+            return self._tool_list_topics(invocation)
+        if action == "open":
+            return self._tool_open_topic(invocation)
+        if action == "read":
+            return self._tool_read_item(invocation)
+        if action == "summarize":
+            return self._tool_summarize_item(invocation)
+        if action == "deliver":
+            return await self._tool_send_file_to_user(invocation)
+        return ToolExecutionResult(reply="我暂时还不能处理这个 archive 动作。", action="chat")
+
+    async def _tool_archive_state(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        action = str(invocation.plan.arguments.get("action") or "").strip()
+        if action == "clarify_reference":
+            return self._tool_clarify_reference(invocation)
+        if action == "clarify_capture_intent":
+            return self._tool_clarify_capture_intent(invocation)
+        if action == "resolve_pending":
+            return await self._tool_resolve_pending(invocation)
+        return ToolExecutionResult(reply="我暂时还不能处理这个 archive_state 动作。", action="chat")
+
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if invocation.upload is None:
             return ToolExecutionResult(
                 reply="没有可保存的文件。如果你的意图是保存文本内容，请使用 save_content 工具。",
                 action="chat",
+            )
+        if not (invocation.text or "").strip():
+            question = self._build_upload_clarification_question(upload=invocation.upload)
+            pending_payload = {
+                "type": "input_interpretation",
+                "pending_input_type": "upload",
+                "media_kind": self._detect_media_kind(upload=invocation.upload) or "file",
+                "original_text": "",
+                "clarification_question": question,
+                "source_event_id": str(invocation.context.get("current_source_event_id") or "") or None,
+            }
+            pending_payload.update(await self._persist_pending_upload(upload=invocation.upload))
+            self.clarification_repository.create(
+                session_id=invocation.session_id,
+                source_message_id=invocation.source_message_id,
+                question=question,
+                candidate_intents=["capture", "cancel"],
+                pending_payload=pending_payload,
+            )
+            return ToolExecutionResult(
+                reply=question,
+                action="clarify",
+                needs_clarification=True,
             )
         saved = await self.ingestion_service.ingest(
             session_id=invocation.session_id,
@@ -214,11 +271,32 @@ class ArchiveToolExecutor:
         return ToolExecutionResult(reply="\n".join(lines), action="retrieve")
 
     def _tool_open_topic(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        query = str(invocation.plan.arguments.get("query") or invocation.text or "")
+        archive_lookup = self._search_archive_assets(query=query)
+        if archive_lookup is not None and archive_lookup.count > 0:
+            reply, working_set = self._format_archive_lookup_reply(archive_lookup)
+            focus_item_id = next(
+                (str(snapshot.get("item_id") or "").strip() for snapshot in working_set if snapshot.get("item_id")),
+                None,
+            )
+            selected = self.item_repository.get_any(item_id=focus_item_id) if focus_item_id else None
+            context = self._build_context(
+                invocation=invocation,
+                item=selected,
+                last_action="open_topic",
+                working_set=working_set,
+            )
+            return ToolExecutionResult(
+                reply=reply,
+                action="retrieve",
+                item_id=focus_item_id,
+                metadata={"context": context},
+            )
         if self.topic_organizer is None:
             return ToolExecutionResult(reply="当前还没有可用的 topic/wiki 索引。", action="retrieve")
         topic_matches = self.topic_organizer.search_topics(
             session_id=invocation.session_id,
-            query=str(invocation.plan.arguments.get("query") or invocation.text or ""),
+            query=query,
             limit=int(invocation.plan.arguments.get("top_k") or 3),
         )
         if topic_matches:
@@ -342,6 +420,138 @@ class ArchiveToolExecutor:
         )
         return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
 
+    async def _tool_resolve_pending(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        pending = self.clarification_repository.get_latest_pending(session_id=invocation.session_id)
+        if pending is None:
+            return ToolExecutionResult(reply="当前没有待处理的确认事项。", action="chat")
+
+        pending_payload = pending.pending_payload_json or {}
+        pending_type = str(pending_payload.get("type") or "").strip()
+        resolution = str(invocation.plan.arguments.get("resolution") or "").strip()
+        note = str(invocation.plan.arguments.get("note") or invocation.text or "").strip()
+
+        if resolution == "cancel":
+            self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
+            return ToolExecutionResult(reply="好，我先不处理这条待确认内容。", action="chat")
+
+        if pending_type == "input_interpretation":
+            if resolution != "save":
+                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+            return await self._resolve_pending_input_interpretation(
+                invocation=invocation,
+                pending=pending,
+                pending_payload=pending_payload,
+                note=note,
+            )
+
+        if pending_type == "capture_intent":
+            if resolution == "summarize":
+                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                pending_text = str(pending_payload.get("text") or "")
+                reply = f"Here is a quick summary of the earlier content: {self.ingestion_service.preview_summary(pending_text)}"
+                context = self._build_context(
+                    invocation=invocation,
+                    item=None,
+                    last_action="summarize_item",
+                    working_set=invocation.context.get("working_set", []),
+                )
+                return ToolExecutionResult(reply=reply, action="organize", metadata={"context": context})
+            if resolution == "save":
+                pending_text = str(pending_payload.get("text") or "")
+                saved_item = await self.ingestion_service.ingest(
+                    session_id=invocation.session_id,
+                    source_message_id=pending.source_message_id,
+                    source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
+                    text=pending_text,
+                    upload=None,
+                )
+                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+                item = self.item_repository.get_any(item_id=saved_item.item_id)
+                context = self._build_context(
+                    invocation=invocation,
+                    item=item,
+                    last_action="save_content",
+                    working_set=[self._item_snapshot(item, rank=1)],
+                )
+                reply = f"{saved_item.reply} I used your clarification to save the earlier content."
+                return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
+            return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+
+        if pending_type == "reference_resolution":
+            if resolution != "select":
+                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+            item = self._resolve_pending_selected_item(invocation=invocation, pending_payload=pending_payload)
+            if item is None:
+                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+            self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+            mode = str(invocation.plan.arguments.get("mode") or "full_text")
+            reply = self._format_item_reply(item=item, mode=mode)
+            context = self._build_context(
+                invocation=invocation,
+                item=item,
+                last_action="read_item",
+                working_set=pending_payload.get("working_set") or invocation.context.get("working_set", []),
+            )
+            return ToolExecutionResult(reply=reply, action="retrieve", item_id=item.id, metadata={"context": context})
+
+        return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+
+    async def _persist_pending_upload(self, *, upload: UploadFile) -> dict[str, str]:
+        target_dir = self.ingestion_service.storage_dir / "pending"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = (upload.filename or "unnamed.bin").strip() or "unnamed.bin"
+        suffix = Path(filename).suffix
+        target = target_dir / f"{uuid4()}{suffix}"
+        data = await upload.read()
+        target.write_bytes(data)
+        return {"upload_path": str(target), "upload_filename": filename}
+
+    def _build_upload_clarification_question(self, *, upload: UploadFile) -> str:
+        media_kind = self._detect_media_kind(upload=upload)
+        if media_kind == "image":
+            return "这张图片你希望我怎么处理？我可以先保存，也可以按你的说明备注后再保存。"
+        return "这份文件你希望我怎么处理？我可以先保存，也可以按你的说明一起记录。"
+
+    async def _resolve_pending_input_interpretation(
+        self,
+        *,
+        invocation: ToolInvocation,
+        pending: ClarificationStateRecord,
+        pending_payload: dict[str, Any],
+        note: str,
+    ) -> ToolExecutionResult:
+        upload_path = str(pending_payload.get("upload_path") or "").strip()
+        upload_filename = str(pending_payload.get("upload_filename") or "").strip()
+        if upload_path and upload_filename:
+            saved_item = await self.ingestion_service.ingest_saved_upload(
+                session_id=invocation.session_id,
+                source_message_id=pending.source_message_id,
+                source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
+                file_path=Path(upload_path),
+                filename=upload_filename,
+                user_note=note,
+            )
+            reply = saved_item.reply
+        else:
+            original_text = str(pending_payload.get("original_text") or "").strip()
+            saved_item = await self.ingestion_service.ingest(
+                session_id=invocation.session_id,
+                source_message_id=pending.source_message_id,
+                source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
+                text=original_text,
+                upload=None,
+            )
+            reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
+        self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
+        item = self.item_repository.get_any(item_id=saved_item.item_id)
+        context = self._build_context(
+            invocation=invocation,
+            item=item,
+            last_action="save_file" if upload_path and upload_filename else "save_content",
+            working_set=[self._item_snapshot(item, rank=1)],
+        )
+        return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
+
     async def _tool_send_file_to_user(self, invocation: ToolInvocation) -> ToolExecutionResult:
         """Send a file from the wiki to the user via WeChat."""
         if self.gateway_service is None:
@@ -370,6 +580,16 @@ class ArchiveToolExecutor:
 
         metadata = item.metadata_json or {}
         stored_path = metadata.get("stored_file_path")
+        if not stored_path and self.archive_runner is not None:
+            archive_record_id = str(metadata.get("archive_record_id") or "").strip()
+            archive_relative_path = str(metadata.get("archive_relative_path") or "").strip()
+            lookup = None
+            if archive_record_id:
+                lookup = self.archive_runner.find_assets(record_id=archive_record_id, limit=1)
+            elif archive_relative_path:
+                lookup = self.archive_runner.find_assets(query=archive_relative_path, limit=1)
+            if lookup and lookup.results:
+                stored_path = lookup.results[0].get("resolved_path")
         if not stored_path:
             return ToolExecutionResult(
                 reply=f"?? `{item.title}` ???????????????????????????",
@@ -422,24 +642,36 @@ class ArchiveToolExecutor:
             logger.exception("Failed to send file to user")
             return ToolExecutionResult(reply=f"???????{exc}", action="chat")
 
-    def try_resolve_reference_clarification(self, *, text: str, pending_payload: dict[str, Any]) -> ItemRecord | None:
+    def _resolve_pending_selected_item(self, *, invocation: ToolInvocation, pending_payload: dict[str, Any]) -> ItemRecord | None:
+        target = invocation.plan.arguments.get("target")
+        if isinstance(target, dict):
+            target_type = str(target.get("type") or "").strip()
+            target_value = target.get("value")
+            if target_type == "item_id" and target_value:
+                return self.item_repository.get_any(item_id=str(target_value))
+            if target_type == "working_set_rank":
+                working_set = pending_payload.get("working_set") or []
+                try:
+                    rank = int(target_value or 0)
+                except (TypeError, ValueError):
+                    rank = 0
+                if 1 <= rank <= len(working_set):
+                    item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
+                    if item_id:
+                        return self.item_repository.get_any(item_id=item_id)
+        content = (invocation.text or "").strip()
         working_set = pending_payload.get("working_set") or []
-        if not isinstance(working_set, list):
-            return None
-        content = text.strip()
         rank = self._extract_rank_from_text(content)
         if rank is not None and 1 <= rank <= len(working_set):
             item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
             if item_id:
-                return self.item_repository.get(item_id=item_id, session_id=str((working_set[rank - 1] or {}).get("session_id") or pending_payload.get("session_id") or ""))
+                return self.item_repository.get_any(item_id=item_id)
         lowered = content.lower()
         for snapshot in working_set:
             title = str(snapshot.get("title") or "")
-            if title and (title in content or title.lower() in lowered):
-                item_id = str(snapshot.get("item_id") or "").strip()
-                session_id = str(snapshot.get("session_id") or pending_payload.get("session_id") or "").strip()
-                if item_id and session_id:
-                    return self.item_repository.get(item_id=item_id, session_id=session_id)
+            item_id = str(snapshot.get("item_id") or "").strip()
+            if title and item_id and (title in content or title.lower() in lowered):
+                return self.item_repository.get_any(item_id=item_id)
         return None
 
     def _resolve_target_item(
@@ -667,6 +899,50 @@ class ArchiveToolExecutor:
             reply += f"\n定位提示：{item.locator_hint}"
         return reply
 
+    def _search_archive_assets(self, *, query: str) -> ArchiveLookupResult | None:
+        if self.archive_runner is None:
+            return None
+        lowered = (query or "").lower()
+        if not lowered.strip():
+            return None
+        if not any(token in lowered for token in ("照片", "图片", "图像", "photo", "image", "jpg", "jpeg", "png")):
+            return None
+        return self.archive_runner.find_assets(query=query, limit=5)
+
+    def _format_archive_lookup_reply(self, lookup: ArchiveLookupResult) -> tuple[str, list[dict[str, Any]]]:
+        lines = [f"当前匹配到 {lookup.count} 条归档图片：", ""]
+        working_set: list[dict[str, Any]] = []
+        for index, result in enumerate(lookup.results, start=1):
+            filename = str(result.get("filename") or "")
+            topic = str(result.get("topic") or "")
+            summary = str(result.get("summary") or "")
+            description = str(result.get("description") or "")
+            item = self._resolve_archive_result_to_item(result)
+            lines.append(f"{index}. {filename} | topic={topic} | {summary or description or '无描述'}")
+            snapshot = {
+                "rank": index,
+                "title": filename or f"归档图片 {index}",
+                "summary": summary or description,
+                "archive_record_id": str(result.get("id") or ""),
+                "archive_topic": topic,
+            }
+            if item is not None:
+                snapshot["item_id"] = item.id
+                snapshot["item_type"] = item.item_type
+            working_set.append(snapshot)
+        return "\n".join(lines), working_set
+
+    def _resolve_archive_result_to_item(self, result: dict[str, Any]) -> ItemRecord | None:
+        record_id = str(result.get("id") or "").strip()
+        resolved_path = str(result.get("resolved_path") or "").strip()
+        for item in self.item_repository.list_all(current_only=True):
+            metadata = item.metadata_json or {}
+            if record_id and str(metadata.get("archive_record_id") or "").strip() == record_id:
+                return item
+            if resolved_path and str(metadata.get("stored_file_path") or "").strip() == resolved_path:
+                return item
+        return None
+
     @staticmethod
     def _item_snapshot(item: ItemRecord, *, rank: int) -> dict[str, Any]:
         return {
@@ -694,3 +970,12 @@ class ArchiveToolExecutor:
         value = text.strip()
         parsed = urlparse(value)
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    @staticmethod
+    def _detect_media_kind(*, upload: UploadFile | None) -> str | None:
+        if upload is None or not (upload.filename or "").strip():
+            return None
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            return "image"
+        return "file"

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 from fastapi import UploadFile
 
+from core.agent.loop import AgentLoop, AgentToolExecutor, LoopResult
+from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
+from core.agent.prompt_builder import AgentPromptBuilder
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, ItemSnapshot, PendingState
 from core.clawbot.schemas import (
     DecisionDebugResponse,
     IngestResponse,
@@ -19,20 +22,14 @@ from core.clawbot.schemas import (
     UserSignalDebugResponse,
     UserProfileSection,
 )
+from core.agent.skill_loader import SkillLoader
 from core.clawbot.planner import ToolPlan
 from core.clawbot.tools import ArchiveToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
-from core.prompts import (
-    build_capture_clarification_router_messages,
-    build_input_followup_router_messages,
-    build_input_interpretation_messages,
-    build_reference_resolution_messages,
-    build_tool_loop_messages,
-    format_tool_result_payload,
-)
 from core.schemas.message import Message
+from core.schemas.tool import ToolCall, ToolResult
 from core.schemas.tool import ToolSpec as ModelToolSpec
 from core.storage.models import SessionRecord
 from core.storage.repositories import (
@@ -51,6 +48,58 @@ from core.topics.service import TopicOrganizerService
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+class _ArchiveAgentExecutor(AgentToolExecutor):
+    def __init__(
+        self,
+        *,
+        tool_executor: ArchiveToolExecutor,
+        runtime_builder: Any,
+    ) -> None:
+        self.tool_executor = tool_executor
+        self.runtime_builder = runtime_builder
+
+    async def execute(
+        self,
+        *,
+        session_id: str,
+        tool_call: ToolCall,
+        runtime: ConversationRuntimeState,
+    ) -> ToolResult:
+        plan = ToolPlan(
+            tool=tool_call.tool_name,
+            arguments=tool_call.arguments,
+            reason="LLM selected this tool via native tool calling.",
+            source="llm_tool_call",
+        )
+        context = self.runtime_builder.runtime_to_context(runtime)
+        execution = await self.tool_executor.execute(
+            session_id=session_id,
+            source_message_id=str(runtime.metadata.get("source_message_id") or ""),
+            plan=plan,
+            text=runtime.metadata.get("raw_text"),
+            upload=runtime.metadata.get("upload"),
+            context=context,
+        )
+        next_context = (execution.metadata or {}).get("context") if execution.metadata else context
+        next_runtime = self.runtime_builder.build_runtime_state(
+            session_id=session_id,
+            context=next_context,
+            source_message_id=str(runtime.metadata.get("source_message_id") or ""),
+            raw_text=runtime.metadata.get("raw_text"),
+            upload=runtime.metadata.get("upload"),
+        )
+        return ToolResult(
+            success=True,
+            content=execution.reply,
+            metadata={
+                "action": execution.action,
+                "item_id": execution.item_id,
+                "needs_clarification": execution.needs_clarification,
+                "runtime_state": next_runtime,
+            },
+        )
 
 
 class ClawBotService:
@@ -87,30 +136,52 @@ class ClawBotService:
         )
         self.topic_organizer = topic_organizer
         self.user_profile_aggregator = UserProfileAggregator()
+        self.skill_loader = SkillLoader()
         register_builtin_tools()
         self._tool_specs = self._build_tool_specs()
+        self._agent_executor = _ArchiveAgentExecutor(
+            tool_executor=self.tool_executor,
+            runtime_builder=self,
+        )
+        self._agent_loop = AgentLoop(
+            model_client=self.model_client,
+            tool_executor=self._agent_executor,
+            tool_specs=self._tool_specs,
+        )
+        self._agent_orchestrator = AgentOrchestrator(
+            loop=self._agent_loop,
+            prompt_builder=AgentPromptBuilder(),
+            skill_loader=self.skill_loader,
+        )
 
     def create_session(self) -> SessionRecord:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        toolsets = ["capture", "wiki_browse", "wiki_read", "agent_state"]
+        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state"]
         if self.tool_executor.can_send_files_to_user():
-            toolsets.append("channel_delivery")
+            toolsets.append("archive_delivery")
         tool_names = resolve_toolsets(toolsets)
         specs = []
         for registered in registry.get_many(tool_names):
+            input_schema = deepcopy(registered.schema)
+            if registered.name == "archive" and not self.tool_executor.can_send_files_to_user():
+                action_schema = ((input_schema.get("properties") or {}).get("action") or {})
+                allowed_actions = action_schema.get("enum")
+                if isinstance(allowed_actions, list):
+                    action_schema["enum"] = [value for value in allowed_actions if value != "deliver"]
             specs.append(
                 ModelToolSpec(
                     name=registered.name,
                     description=registered.description,
-                    input_schema=registered.schema,
+                    input_schema=input_schema,
                 )
             )
         return specs
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()
+        self._agent_loop.tool_specs = self._tool_specs
 
     def _build_agent_messages(
         self,
@@ -121,26 +192,38 @@ class ClawBotService:
         pending_payload: dict[str, Any] | None,
         tool_messages: list[Message],
     ) -> list[Message]:
-        history = self.message_repository.list_by_session(session_id=session_id)
-        history = [msg for msg in history if msg.id][:][-6:]
-        if history and history[-1].role == "user" and history[-1].content == user_text:
-            history = history[:-1]
-        normalized_history: list[Message] = []
-        for message in history:
-            if message.role not in {"user", "assistant"}:
-                continue
-            if message.role == "user":
-                normalized_history.append(Message.user(session_id=session_id, content=message.content))
-            else:
-                normalized_history.append(Message.assistant(session_id=session_id, content=message.content))
-        return build_tool_loop_messages(
+        runtime = self.build_runtime_state(
+            session_id=session_id,
+            context=context,
+            source_message_id="",
+            raw_text=user_text,
+            upload=None,
+        )
+        history = self._load_agent_history(session_id=session_id, user_text=user_text)
+        messages = self._agent_orchestrator.prompt_builder.build_messages(
             session_id=session_id,
             user_text=user_text,
-            context=context,
-            pending_payload=pending_payload,
-            history=normalized_history,
-            tool_messages=tool_messages,
+            runtime=runtime,
+            skills=self.skill_loader.list_skills(),
+            history=history,
         )
+        messages.extend(tool_messages)
+        return messages
+
+    @staticmethod
+    def _select_final_agent_reply(*, last_execution: dict[str, Any], assistant_text: str | None) -> str:
+        final_reply = (assistant_text or "").strip()
+        if not final_reply:
+            return str(last_execution["reply"])
+        # File delivery has real side effects. If the delivery tool did not report
+        # success, do not let a follow-up model utterance overwrite the failure.
+        tool_name = last_execution.get("tool_name")
+        tool_arguments = last_execution.get("tool_arguments") or {}
+        if (
+            tool_name == "archive" and str(tool_arguments.get("action") or "").strip() == "deliver"
+        ) and last_execution.get("action") != "retrieve":
+            return str(last_execution["reply"])
+        return final_reply
 
     async def _run_agent_loop(
         self,
@@ -153,187 +236,199 @@ class ClawBotService:
         context: dict[str, Any],
         pending_payload: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        tool_messages: list[Message] = []
-        latest_context = context
-        last_execution: dict[str, Any] | None = None
-        latest_reason = "The model responded directly."
-
-        for step in range(3):
-            messages = self._build_agent_messages(
+        self._agent_loop.model_client = self.model_client
+        runtime = self.build_runtime_state(
+            session_id=session_id,
+            context=context,
+            source_message_id=source_message_id,
+            raw_text=raw_text,
+            upload=upload,
+        )
+        loop_result = await self._agent_orchestrator.handle_turn(
+            OrchestratorInput(
                 session_id=session_id,
                 user_text=user_text,
-                context=latest_context,
-                pending_payload=pending_payload,
-                tool_messages=tool_messages,
+                runtime=runtime,
+                upload_name=upload.filename if upload is not None else None,
+                history=self._load_agent_history(session_id=session_id, user_text=user_text),
             )
-            response = self.model_client.generate(messages=messages, tools=self._tool_specs)
-            logger.info(
-                "clawbot tool_loop step=%s assistant_text=%s tool_calls=%s",
-                step,
-                (response.assistant_text or "")[:300],
-                [(tool_call.tool_name, tool_call.arguments) for tool_call in response.tool_calls],
+        )
+        return self._loop_result_to_legacy_response(loop_result)
+
+    def build_runtime_state(
+        self,
+        *,
+        session_id: str,
+        context: dict[str, Any],
+        source_message_id: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+    ) -> ConversationRuntimeState:
+        pending_record = self.clarification_repository.get_latest_pending(session_id=session_id)
+        working_set = [item for snapshot in context.get("working_set", []) if isinstance(snapshot, dict) for item in [self._runtime_item_snapshot(snapshot)] if item is not None]
+        recent_items = [item for snapshot in context.get("recent_items", []) if isinstance(snapshot, dict) for item in [self._runtime_item_snapshot(snapshot)] if item is not None]
+        primary_focus = self._runtime_item_snapshot(context.get("primary_focus")) if isinstance(context.get("primary_focus"), dict) else None
+        return ConversationRuntimeState(
+            session_id=session_id,
+            current_source_event_id=str(context.get("current_source_event_id") or "") or None,
+            working_set=working_set,
+            recent_items=recent_items,
+            recent_events=[self._runtime_event_snapshot(snapshot) for snapshot in context.get("recent_events", []) if isinstance(snapshot, dict)],
+            primary_focus=primary_focus,
+            pending_state=self._runtime_pending_state(pending_record),
+            last_action=str(context.get("last_action") or "") or None,
+            metadata={
+                "source_message_id": source_message_id,
+                "raw_text": raw_text,
+                "upload": upload,
+            },
+        )
+
+    def runtime_to_context(self, runtime: ConversationRuntimeState) -> dict[str, Any]:
+        context = {
+            "working_set": [self._context_item_snapshot(item) for item in runtime.working_set],
+            "recent_items": [self._context_item_snapshot(item) for item in runtime.recent_items],
+            "recent_events": [self._context_event_snapshot(event) for event in runtime.recent_events],
+            "primary_focus": self._context_item_snapshot(runtime.primary_focus) if runtime.primary_focus is not None else None,
+            "last_action": runtime.last_action,
+        }
+        if runtime.current_source_event_id:
+            context["current_source_event_id"] = runtime.current_source_event_id
+        return context
+
+    def _load_agent_history(self, *, session_id: str, user_text: str) -> list[Message]:
+        history = self.message_repository.list_by_session(session_id=session_id)
+        history = [msg for msg in history if msg.id][-6:]
+        if history and history[-1].role == "user" and history[-1].content == user_text:
+            history = history[:-1]
+        normalized_history: list[Message] = []
+        for message in history:
+            if message.role == "user":
+                normalized_history.append(Message.user(session_id=session_id, content=message.content))
+            elif message.role == "assistant":
+                normalized_history.append(Message.assistant(session_id=session_id, content=message.content))
+        return normalized_history
+
+    def _loop_result_to_legacy_response(self, result: LoopResult) -> dict[str, Any]:
+        context = self.runtime_to_context(result.runtime)
+        if result.tool_name == "none":
+            reply = result.final_response or "我暂时还不能理解这个请求，你可以换一种说法试试。"
+            action = result.action or "chat"
+            reason = "The model responded directly." if result.exit_reason == "assistant_text" else "Tool-calling loop produced no final answer."
+            confidence = "medium" if result.exit_reason == "assistant_text" else "low"
+        else:
+            reply = self._select_final_agent_reply(
+                last_execution={
+                    "reply": result.last_tool_reply or result.final_response,
+                    "action": result.action,
+                    "tool_name": result.tool_name,
+                    "tool_arguments": result.tool_arguments,
+                },
+                assistant_text=result.assistant_text,
             )
-            if response.tool_calls:
-                tool_messages.append(
-                    Message.assistant_tool_calls(
-                        session_id=session_id,
-                        content=(response.assistant_text or "").strip(),
-                        tool_calls=[
-                            {
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call.tool_name,
-                                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                                },
-                            }
-                            for tool_call in response.tool_calls
-                        ],
-                        metadata={"turn_type": "tool_calls"},
-                    )
-                )
-                for tool_call in response.tool_calls:
-                    plan = ToolPlan(
-                        tool=tool_call.tool_name,
-                        arguments=tool_call.arguments,
-                        reason="LLM selected this tool via native tool calling.",
-                        source="llm_tool_call",
-                    )
-                    execution = await self.tool_executor.execute(
-                        session_id=session_id,
-                        source_message_id=source_message_id,
-                        plan=plan,
-                        text=raw_text,
-                        upload=upload,
-                        context=latest_context,
-                    )
-                    latest_context = (execution.metadata or {}).get("context") if execution.metadata else latest_context
-                    last_execution = {
-                        "reply": execution.reply,
-                        "action": execution.action,
-                        "item_id": execution.item_id,
-                        "needs_clarification": execution.needs_clarification,
-                        "tool_name": tool_call.tool_name,
-                        "tool_arguments": tool_call.arguments,
-                        "context": latest_context,
-                    }
-                    tool_messages.append(
-                        Message.tool(
-                            session_id=session_id,
-                            name=tool_call.tool_name,
-                            tool_call_id=tool_call.id,
-                            content=format_tool_result_payload(
-                                tool_name=tool_call.tool_name,
-                                action=execution.action,
-                                item_id=execution.item_id,
-                                needs_clarification=execution.needs_clarification,
-                                reply=execution.reply,
-                                context=latest_context,
-                            ),
-                            metadata={
-                                "action": execution.action,
-                                "item_id": execution.item_id,
-                                "tool_name": tool_call.tool_name,
-                            },
-                        )
-                    )
-                    if execution.needs_clarification:
-                        return {
-                            **last_execution,
-                            "confidence": "high",
-                            "reason": "The model requested clarification through a tool call.",
-                        }
-                latest_reason = "The model used one or more tools before answering."
-                continue
-
-            if last_execution is None:
-                return {
-                    "reply": response.assistant_text or "我暂时还不能理解这个请求，你可以换一种说法试试。",
-                    "action": "chat",
-                    "item_id": None,
-                    "needs_clarification": False,
-                    "tool_name": "none",
-                    "tool_arguments": {},
-                    "context": latest_context,
-                    "confidence": "medium",
-                    "reason": latest_reason,
-                }
-
-            return {
-                **last_execution,
-                "reply": (response.assistant_text or "").strip() or last_execution["reply"],
-                "confidence": "high",
-                "reason": latest_reason,
-            }
-
-        if last_execution is not None:
-            return {
-                **last_execution,
-                "confidence": "high",
-                "reason": "The model completed after repeated tool use.",
-            }
+            action = result.action
+            if result.needs_clarification:
+                reason = "The model requested clarification through a tool call."
+            elif result.exit_reason == "assistant_text":
+                reason = "The model used one or more tools before answering."
+            else:
+                reason = "The model completed after repeated tool use."
+            confidence = "high"
         return {
-            "reply": "我暂时还不能理解这个请求，你可以换一种说法试试。",
-            "action": "chat",
-            "item_id": None,
-            "needs_clarification": False,
-            "tool_name": "none",
-            "tool_arguments": {},
-            "context": latest_context,
-            "confidence": "low",
-            "reason": "Tool-calling loop produced no final answer.",
+            "reply": reply,
+            "action": action,
+            "item_id": result.item_id,
+            "needs_clarification": result.needs_clarification,
+            "tool_name": result.tool_name,
+            "tool_arguments": result.tool_arguments,
+            "context": context,
+            "confidence": confidence,
+            "reason": reason,
         }
 
-    def _interpret_clarification_reply(self, *, text: str) -> str | None:
-        response = self.model_client.generate(
-            messages=build_capture_clarification_router_messages(text=text),
-            tools=[],
-        )
-        raw = (response.assistant_text or "").strip()
-        logger.info("clawbot clarification_raw_output text=%s output=%s", text[:120], raw[:600])
-        if not raw:
+    @staticmethod
+    def _runtime_item_snapshot(snapshot: dict[str, Any] | None) -> ItemSnapshot | None:
+        if not isinstance(snapshot, dict):
             return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                payload = json.loads(fenced)
-            except json.JSONDecodeError:
-                return None
-        action = str(payload.get("action") or "").strip()
-        return action if action in {"capture", "organize", "cancel"} else None
-
-    def _resolve_reference_candidate_via_llm(self, *, text: str, working_set: list[dict[str, Any]]) -> object | None:
-        response = self.model_client.generate(
-            messages=build_reference_resolution_messages(text=text, working_set=working_set),
-            tools=[],
-        )
-        raw = (response.assistant_text or "").strip()
-        logger.info("clawbot reference_raw_output text=%s output=%s", text[:120], raw[:600])
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                payload = json.loads(fenced)
-            except json.JSONDecodeError:
-                return None
-        if str(payload.get("action") or "").strip() != "select":
-            return None
-        try:
-            rank = int(payload.get("rank"))
-        except (TypeError, ValueError):
-            return None
-        if not (1 <= rank <= len(working_set)):
-            return None
-        snapshot = working_set[rank - 1] or {}
         item_id = str(snapshot.get("item_id") or "").strip()
-        if not item_id:
+        title = str(snapshot.get("title") or "").strip()
+        item_type = str(snapshot.get("item_type") or "").strip()
+        if not item_id or not title or not item_type:
             return None
-        return self.item_repository.get_any(item_id=item_id)
+        metadata = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"item_id", "title", "item_type", "summary", "rank"}
+        }
+        return ItemSnapshot(
+            item_id=item_id,
+            title=title,
+            item_type=item_type,
+            summary=str(snapshot.get("summary") or ""),
+            rank=snapshot.get("rank"),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _runtime_event_snapshot(snapshot: dict[str, Any]) -> EventSnapshot:
+        metadata = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"source_event_id", "event_type", "channel", "raw_text", "original_file_name"}
+        }
+        return EventSnapshot(
+            source_event_id=str(snapshot.get("source_event_id") or ""),
+            event_type=str(snapshot.get("event_type") or ""),
+            channel=str(snapshot.get("channel") or ""),
+            raw_text=str(snapshot.get("raw_text") or ""),
+            original_file_name=snapshot.get("original_file_name"),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _runtime_pending_state(pending: object | None) -> PendingState | None:
+        if pending is None:
+            return None
+        payload = dict(getattr(pending, "pending_payload_json", {}) or {})
+        kind_map = {
+            "reference_resolution": "reference",
+            "capture_intent": "capture_intent",
+            "input_interpretation": "pending_upload_note",
+        }
+        pending_type = str(payload.get("type") or "")
+        return PendingState(
+            pending_id=str(getattr(pending, "id", "")),
+            kind=kind_map.get(pending_type, "pending_upload_note"),
+            question=str(getattr(pending, "question", "")),
+            choices=list(getattr(pending, "candidate_intents_json", []) or []),
+            payload=payload,
+        )
+
+    @staticmethod
+    def _context_item_snapshot(item: ItemSnapshot | None) -> dict[str, Any] | None:
+        if item is None:
+            return None
+        snapshot = {
+            "item_id": item.item_id,
+            "title": item.title,
+            "item_type": item.item_type,
+            "summary": item.summary,
+            "rank": item.rank,
+        }
+        snapshot.update(item.metadata)
+        return snapshot
+
+    @staticmethod
+    def _context_event_snapshot(event: EventSnapshot) -> dict[str, Any]:
+        snapshot = {
+            "source_event_id": event.source_event_id,
+            "event_type": event.event_type,
+            "channel": event.channel,
+            "raw_text": event.raw_text,
+            "original_file_name": event.original_file_name,
+        }
+        snapshot.update(event.metadata)
+        return snapshot
 
     def _detect_media_kind(self, *, upload: UploadFile | None) -> str | None:
         if upload is None or not (upload.filename or "").strip():
@@ -342,70 +437,6 @@ class ClawBotService:
         if suffix in IMAGE_EXTENSIONS:
             return "image"
         return "file"
-
-    def _interpret_initial_input(
-        self,
-        *,
-        text: str | None,
-        upload: UploadFile | None,
-        context: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        response = self.model_client.generate(
-            messages=build_input_interpretation_messages(
-                text=text,
-                has_upload=upload is not None and bool((upload.filename or "").strip()),
-                upload_filename=upload.filename if upload is not None else None,
-                media_kind=self._detect_media_kind(upload=upload),
-                context=context,
-            ),
-            tools=[],
-        )
-        raw = (response.assistant_text or "").strip()
-        logger.info("clawbot input_interpreter_raw text=%s upload=%s output=%s", (text or "")[:120], getattr(upload, "filename", None), raw[:800])
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                payload = json.loads(fenced)
-            except json.JSONDecodeError:
-                return None
-        if not isinstance(payload, dict):
-            return None
-        return payload
-
-    def _interpret_pending_input_reply(self, *, text: str, pending_payload: dict[str, Any]) -> dict[str, Any] | None:
-        response = self.model_client.generate(
-            messages=build_input_followup_router_messages(text=text, pending_payload=pending_payload),
-            tools=[],
-        )
-        raw = (response.assistant_text or "").strip()
-        logger.info("clawbot pending_input_raw text=%s output=%s", text[:120], raw[:800])
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            fenced = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                payload = json.loads(fenced)
-            except json.JSONDecodeError:
-                return None
-        if not isinstance(payload, dict):
-            return None
-        return payload
-
-    async def _persist_pending_upload(self, *, upload: UploadFile) -> dict[str, str]:
-        target_dir = self.ingestion_service.storage_dir / "pending"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = (upload.filename or "unnamed.bin").strip() or "unnamed.bin"
-        suffix = Path(filename).suffix
-        target = target_dir / f"{uuid4()}{suffix}"
-        data = await upload.read()
-        target.write_bytes(data)
-        return {"upload_path": str(target), "upload_filename": filename}
 
     def _create_source_event(
         self,
@@ -460,172 +491,6 @@ class ClawBotService:
         context["current_source_event_id"] = source_event.id
 
         pending = self.clarification_repository.get_latest_pending(session_id=session_id)
-        if pending is not None and text and not upload:
-            pending_payload = pending.pending_payload_json or {}
-            if pending_payload.get("type") == "reference_resolution":
-                resolved_item = self._resolve_reference_candidate_via_llm(
-                    text=text,
-                    working_set=pending_payload.get("working_set") or [],
-                )
-                if resolved_item is not None:
-                    reply = self.tool_executor._format_item_reply(item=resolved_item, mode="full_text")
-                    self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                    resolved_context = self._compose_context(
-                        session_id=session_id,
-                        base_context=context,
-                        last_action="read_item",
-                        working_set=pending_payload.get("working_set") or [],
-                        selected_item_id=resolved_item.id,
-                    )
-                    assistant_metadata = self._build_assistant_metadata(
-                        action="retrieve",
-                        confidence="high",
-                        reason="Clarification resolved a working-set reference.",
-                        source="llm_tool_call",
-                        tool="read_item",
-                        tool_arguments={"target": {"type": "item_id", "value": resolved_item.id}, "mode": "full_text"},
-                        context=resolved_context,
-                    )
-                    self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=assistant_metadata)
-                    return IngestResponse(reply=reply, action="retrieve", item_id=resolved_item.id, decision_source="llm_tool_call")
-
-            if pending_payload.get("type") == "input_interpretation":
-                interpretation = self._interpret_pending_input_reply(text=text, pending_payload=pending_payload)
-                action = str((interpretation or {}).get("action") or "").strip()
-                note = str((interpretation or {}).get("note") or "").strip()
-                if action == "capture":
-                    upload_path = str(pending_payload.get("upload_path") or "").strip()
-                    upload_filename = str(pending_payload.get("upload_filename") or "").strip()
-                    if upload_path and upload_filename:
-                        saved_item = await self.ingestion_service.ingest_saved_upload(
-                            session_id=session_id,
-                            source_message_id=pending.source_message_id,
-                            source_event_id=str(pending_payload.get("source_event_id") or source_event.id),
-                            file_path=Path(upload_path),
-                            filename=upload_filename,
-                            user_note=note or text,
-                        )
-                        reply = saved_item.reply
-                    else:
-                        original_text = str(pending_payload.get("original_text") or "").strip()
-                        saved_item = await self.ingestion_service.ingest(
-                            session_id=session_id,
-                            source_message_id=pending.source_message_id,
-                            source_event_id=str(pending_payload.get("source_event_id") or source_event.id),
-                            text=original_text,
-                            upload=None,
-                        )
-                        reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
-                    self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                    saved_context = self._compose_context(
-                        session_id=session_id,
-                        base_context=context,
-                        last_action="save_content",
-                        working_set=[self._item_snapshot(item=self.item_repository.get_any(item_id=saved_item.item_id), rank=1)],
-                        selected_item_id=saved_item.item_id,
-                    )
-                    self.message_repository.add_assistant_message(
-                        session_id=session_id,
-                        content=reply,
-                        metadata=self._build_assistant_metadata(
-                            action="capture",
-                            confidence="high",
-                            reason="Input clarification resolved pending content handling.",
-                            source="llm_tool_call",
-                            tool="save_content",
-                            tool_arguments={"text": str(pending_payload.get('original_text') or note or '')},
-                            context=saved_context,
-                        ),
-                    )
-                    return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
-                if action == "cancel":
-                    reply = "Okay, I will leave that pending content alone."
-                    self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
-                    self.message_repository.add_assistant_message(
-                        session_id=session_id,
-                        content=reply,
-                        metadata=self._build_assistant_metadata(
-                            action="chat",
-                            confidence="high",
-                            reason="Input clarification cancelled by user.",
-                            source="llm_tool_call",
-                            tool="clarify_capture_intent",
-                            tool_arguments={},
-                            context=context,
-                        ),
-                    )
-                    return IngestResponse(reply=reply, action="chat", decision_source="llm_tool_call")
-                reply = str(pending_payload.get("clarification_question") or pending.question)
-                return IngestResponse(reply=reply, action="clarify", needs_clarification=True, decision_source="llm_tool_call")
-
-            action = self._interpret_clarification_reply(text=text)
-            if action == "capture":
-                pending_text = pending.pending_payload_json.get("text", "")
-                saved_item = await self.ingestion_service.ingest(
-                    session_id=session_id,
-                    source_message_id=pending.source_message_id,
-                    source_event_id=str(pending.pending_payload_json.get("source_event_id") or source_event.id),
-                    text=pending_text,
-                    upload=None,
-                )
-                reply = f"{saved_item.reply} I used your clarification to save the earlier content."
-                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                saved_context = self._compose_context(
-                    session_id=session_id,
-                    base_context=context,
-                    last_action="save_content",
-                    working_set=[self._item_snapshot(item=self.item_repository.get_any(item_id=saved_item.item_id), rank=1)],
-                    selected_item_id=saved_item.item_id,
-                )
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="capture", confidence="high", reason="Clarification reply resolved pending save.", source="llm_tool_call", tool="save_content", tool_arguments={"text": pending_text}, context=saved_context))
-                return IngestResponse(reply=reply, action="capture", item_id=saved_item.item_id, decision_source="llm_tool_call")
-            if action == "organize":
-                pending_text = pending.pending_payload_json.get("text", "")
-                summary = self.ingestion_service.preview_summary(pending_text)
-                reply = f"Here is a quick summary of the earlier content: {summary}"
-                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                organize_context = self._compose_context(
-                    session_id=session_id,
-                    base_context=context,
-                    last_action="summarize_item",
-                )
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="organize", confidence="high", reason="Clarification reply resolved pending organization.", source="llm_tool_call", tool="summarize_item", tool_arguments={"target": {"type": "auto", "value": ""}}, context=organize_context))
-                return IngestResponse(reply=reply, action="organize", decision_source="llm_tool_call")
-            if action == "cancel":
-                reply = "Okay, I will leave that earlier content alone."
-                self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
-                self.message_repository.add_assistant_message(session_id=session_id, content=reply, metadata=self._build_assistant_metadata(action="chat", confidence="high", reason="Clarification cancelled by user.", source="llm_tool_call", tool="clarify_reference", tool_arguments={}, context=context))
-                return IngestResponse(reply=reply, action="chat", decision_source="llm_tool_call")
-
-        has_upload = upload is not None and bool((upload.filename or "").strip())
-        if pending is None:
-            interpretation = self._interpret_initial_input(text=text, upload=upload, context=context)
-            if interpretation and bool(interpretation.get("needs_clarification")):
-                question = str(interpretation.get("clarification_question") or "").strip()
-                if question:
-                    pending_payload: dict[str, Any] = {
-                        "type": "input_interpretation",
-                        "pending_input_type": "upload" if has_upload else "text",
-                        "media_kind": self._detect_media_kind(upload=upload) or ("text" if text else "unknown"),
-                        "original_text": text or "",
-                        "clarification_question": question,
-                        "source_event_id": source_event.id,
-                    }
-                    if has_upload and upload is not None:
-                        pending_payload.update(await self._persist_pending_upload(upload=upload))
-                    self.clarification_repository.create(
-                        session_id=session_id,
-                        source_message_id=user_message.id,
-                        question=question,
-                        candidate_intents=["capture", "cancel"],
-                        pending_payload=pending_payload,
-                    )
-                    return IngestResponse(
-                        reply=question,
-                        action="clarify",
-                        needs_clarification=True,
-                        decision_source="llm_tool_call",
-                    )
         user_text_for_model = text.strip() if text and text.strip() else f"[file upload: {(upload.filename if upload else '') or 'unnamed'}]"
         agent_result = await self._run_agent_loop(
             session_id=session_id,

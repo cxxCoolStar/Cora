@@ -1,37 +1,47 @@
 from __future__ import annotations
 
 TOOLSETS: dict[str, dict[str, object]] = {
-    "capture": {
-        "description": "Capture new source materials into the personal wiki.",
-        "tools": ["save_content", "save_file"],
+    "archive_capture": {
+        "description": "Capture new source materials into the archive.",
+        "tools": ["archive"],
     },
-    "wiki_browse": {
-        "description": "Browse the knowledge base structure and topics.",
-        "tools": ["overview_knowledge_base", "list_topics", "open_topic"],
+    "archive_search": {
+        "description": "Search archived materials through topics and archive indexes.",
+        "tools": ["archive"],
     },
-    "wiki_read": {
-        "description": "Read or summarize known items already selected from the wiki.",
-        "tools": ["read_item", "summarize_item"],
+    "archive_read": {
+        "description": "Read or summarize already selected archived items.",
+        "tools": ["archive"],
     },
-    "channel_delivery": {
+    "archive_delivery": {
         "description": "Deliver previously saved files back to the user through a supported channel.",
-        "tools": ["send_file_to_user"],
+        "tools": ["archive"],
     },
-    "agent_state": {
+    "archive_state": {
         "description": "Clarification and short-term conversation state management.",
-        "tools": ["clarify_reference", "clarify_capture_intent"],
+        "tools": ["archive_state"],
     },
-    "wiki_maintenance": {
-        "description": "Maintenance actions over the wiki/topic index.",
+    "archive_maintenance": {
+        "description": "Maintenance actions over archive indexes and topic organization.",
         "tools": [],
     },
+}
+
+TOOLSET_ALIASES: dict[str, str] = {
+    "capture": "archive_capture",
+    "wiki_browse": "archive_search",
+    "wiki_read": "archive_read",
+    "channel_delivery": "archive_delivery",
+    "agent_state": "archive_state",
+    "wiki_maintenance": "archive_maintenance",
 }
 
 
 def resolve_toolsets(toolset_names: list[str]) -> list[str]:
     tools: list[str] = []
     for name in toolset_names:
-        toolset = TOOLSETS.get(name)
+        canonical_name = TOOLSET_ALIASES.get(name, name)
+        toolset = TOOLSETS.get(canonical_name)
         if not toolset:
             continue
         for tool_name in toolset.get("tools", []):

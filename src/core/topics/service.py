@@ -88,6 +88,62 @@ class TopicOrganizerService:
         )
         return TopicAssignment(topic=topic, created=created, reason=decision.reason)
 
+    def link_item_to_topic_slug(
+        self,
+        *,
+        session_id: str,
+        item: ItemRecord,
+        slug: str,
+        topic_name: str | None = None,
+        summary: str | None = None,
+        tags: list[str] | None = None,
+        reason: str = "Linked by archive workflow.",
+    ) -> TopicAssignment:
+        topic = self.topic_repository.find_by_slug(slug=slug)
+        created = False
+        merged_tags = sorted(set(tags or []))
+        if topic is None:
+            topic = self.topic_repository.create(
+                session_id=session_id,
+                name=topic_name or slug.replace("-", " ").title(),
+                slug=slug,
+                summary=(summary or item.summary)[:400],
+                tags=merged_tags,
+                metadata={"source": "archive_workflow"},
+            )
+            created = True
+        elif merged_tags or summary:
+            merged_tags = sorted(set((topic.tags_json or []) + merged_tags))
+            next_summary = (topic.summary or summary or item.summary)[:400]
+            self.topic_repository.update_summary_and_tags(
+                topic_id=topic.id,
+                summary=next_summary,
+                tags=merged_tags,
+            )
+        self.topic_item_repository.link_item(
+            topic_id=topic.id,
+            item_id=item.id,
+            confidence="high",
+            reason=reason,
+        )
+        self.topic_activity_repository.create(
+            topic_id=topic.id,
+            item_id=item.id,
+            activity_type="linked_item_to_existing_topic_slug",
+            message=f"{item.title} -> {topic.name}",
+            metadata={"reason": reason, "source": "archive_workflow"},
+        )
+        logger.info(
+            "topic organizer link_existing_done session_id=%s item_id=%s topic_id=%s topic=%s created=%s reason=%s",
+            session_id,
+            item.id,
+            topic.id,
+            topic.slug,
+            created,
+            reason[:200],
+        )
+        return TopicAssignment(topic=topic, created=created, reason=reason)
+
     def ensure_topic_index(self) -> int:
         indexed = 0
         items = self.item_repository.list_all(current_only=True)
