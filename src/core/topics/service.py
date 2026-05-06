@@ -6,6 +6,7 @@ import logging
 from core.storage.models import ItemRecord, TopicRecord
 from core.storage.repositories import ItemRepository, TopicActivityRepository, TopicItemRepository, TopicRepository
 from core.topics.classifier import TopicClassifier
+from core.topics.selector import TopicSelector, TopicSelectorInput
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,8 @@ class TopicAssignment:
     topic: TopicRecord
     created: bool
     reason: str
+    source: str
+    confidence: str
 
 
 class TopicOrganizerService:
@@ -26,12 +29,17 @@ class TopicOrganizerService:
         topic_item_repository: TopicItemRepository,
         topic_activity_repository: TopicActivityRepository,
         item_repository: ItemRepository,
+        selector: TopicSelector | None = None,
     ) -> None:
         self.classifier = classifier
         self.topic_repository = topic_repository
         self.topic_item_repository = topic_item_repository
         self.topic_activity_repository = topic_activity_repository
         self.item_repository = item_repository
+        self.selector = selector or TopicSelector(
+            classifier=classifier,
+            topic_repository=topic_repository,
+        )
 
     def assign_item_to_topic(self, *, session_id: str, item: ItemRecord) -> TopicAssignment:
         existing_topics = self.topic_repository.list_all()
@@ -42,10 +50,16 @@ class TopicOrganizerService:
             item.title[:120],
             len(existing_topics),
         )
-        decision = self.classifier.classify(
-            title=item.title,
-            normalized_text=item.normalized_text,
-            existing_topics=existing_topics,
+        decision = self.selector.select(
+            session_id=session_id,
+            item_input=TopicSelectorInput(
+                item_type=item.item_type,
+                title=item.title,
+                summary=item.summary,
+                description=item.normalized_text,
+                user_note=str((item.metadata_json or {}).get("user_note") or ""),
+                keywords=list((item.metadata_json or {}).get("tags") or []),
+            ),
         )
         topic = self.topic_repository.find_by_slug(slug=decision.slug)
         created = False
@@ -56,7 +70,7 @@ class TopicOrganizerService:
                 slug=decision.slug,
                 summary=decision.summary or item.summary,
                 tags=decision.tags,
-                metadata={"source": "topic_classifier"},
+                metadata={"source": decision.source, "confidence": decision.confidence},
             )
             created = True
         else:
@@ -66,7 +80,7 @@ class TopicOrganizerService:
         self.topic_item_repository.link_item(
             topic_id=topic.id,
             item_id=item.id,
-            confidence="high" if created else "medium",
+            confidence=decision.confidence if not created else "high",
             reason=decision.reason,
         )
         activity = "created_topic_and_linked_item" if created else "linked_item_to_topic"
@@ -86,7 +100,13 @@ class TopicOrganizerService:
             created,
             decision.reason[:200],
         )
-        return TopicAssignment(topic=topic, created=created, reason=decision.reason)
+        return TopicAssignment(
+            topic=topic,
+            created=created,
+            reason=decision.reason,
+            source=decision.source,
+            confidence="high" if created else decision.confidence,
+        )
 
     def link_item_to_topic_slug(
         self,
@@ -142,7 +162,13 @@ class TopicOrganizerService:
             created,
             reason[:200],
         )
-        return TopicAssignment(topic=topic, created=created, reason=reason)
+        return TopicAssignment(
+            topic=topic,
+            created=created,
+            reason=reason,
+            source="archive_workflow",
+            confidence="high",
+        )
 
     def ensure_topic_index(self) -> int:
         indexed = 0

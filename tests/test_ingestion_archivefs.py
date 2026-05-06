@@ -91,6 +91,10 @@ async def test_ingest_image_upload_uses_archivefs_and_links_topic(tmp_path: Path
     assert stored_path.is_file()
     assert "archive_record_id" in metadata
     assert metadata["archive_topic"] == "personal-photos"
+    assert metadata["topic_slug"] == "personal-photos"
+    assert metadata["topic_selection_source"] == "archive_workflow"
+    assert metadata["topic_selection_confidence"] == "high"
+    assert "topic_selection_reason" in metadata
     assert item.item_type == "image"
     assert "young woman" in item.raw_content.lower()
 

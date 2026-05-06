@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.archivefs.service import ArchiveImageWorkflow, ArchiveSkillScriptRunner
 from core.ingestion.parsers.image_parser import ImageFileParser
+from core.topics.selector import TopicSelector, TopicSelectorInput
 
 
 @dataclass
@@ -64,3 +65,49 @@ def test_archive_image_workflow_parses_then_saves_image(tmp_path: Path) -> None:
     assert saved.record.asset_type == "image"
     assert saved.record.summary == "wechat_image"
     assert "portrait photo" in saved.record.description.lower()
+
+
+def test_archive_image_workflow_uses_unified_topic_selector(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    image_path = tmp_path / "wechat_image.jpg"
+    image_path.write_bytes(b"fake-image-bytes")
+
+    parser = ImageFileParser(
+        describer=StubDescriber(
+            description="A portrait photo in a flower garden."
+        )
+    )
+    runner = ArchiveSkillScriptRunner(archive_root=archive_root)
+
+    class FakeTopicRepository:
+        def list_by_session(self, *, session_id: str):
+            return []
+
+        def list_all(self):
+            return []
+
+    class FakeClassifier:
+        def classify(self, *, title, normalized_text, existing_topics):
+            class Decision:
+                topic_name = "个人照片"
+                slug = "personal-photos"
+                summary = "个人生活照片"
+                tags = ["照片"]
+                reason = "matched by fake selector fallback"
+
+            return Decision()
+
+    selector = TopicSelector(
+        classifier=FakeClassifier(),
+        topic_repository=FakeTopicRepository(),
+        archive_root=archive_root,
+    )
+    workflow = ArchiveImageWorkflow(
+        image_parser=parser,
+        archive_runner=runner,
+        topic_selector=selector,
+    )
+
+    saved = workflow.save_image(image_path=image_path, source="wechat")
+
+    assert saved.topic == "personal-photos"

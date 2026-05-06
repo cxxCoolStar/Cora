@@ -269,6 +269,17 @@ class IngestionService:
                     item=item,
                 )
             topic_name = assignment.topic.name
+            metadata = dict(item.metadata_json or {})
+            metadata.update(
+                {
+                    "topic_slug": assignment.topic.slug,
+                    "topic_name": assignment.topic.name,
+                    "topic_selection_source": assignment.source,
+                    "topic_selection_confidence": assignment.confidence,
+                    "topic_selection_reason": assignment.reason,
+                }
+            )
+            item = self.item_repository.update_metadata(item_id=item.id, metadata=metadata)
             logger.info(
                 "ingestion topic_assignment item_id=%s topic=%s created=%s",
                 item.id,

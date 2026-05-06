@@ -12,6 +12,7 @@ from core.storage.models import (
     ItemRecord,
     MessageRecord,
     SessionRecord,
+    SessionSummaryRecord,
     SourceEventRecord,
     TopicActivityRecord,
     TopicItemRecord,
@@ -43,6 +44,37 @@ class SessionRepository:
         with self.database.session() as session:
             stmt = select(SessionRecord).order_by(desc(SessionRecord.created_at)).limit(limit)
             return list(session.scalars(stmt))
+
+
+class SessionSummaryRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def get_by_session(self, *, session_id: str) -> SessionSummaryRecord | None:
+        with self.database.session() as session:
+            stmt = (
+                select(SessionSummaryRecord)
+                .where(SessionSummaryRecord.session_id == session_id)
+                .limit(1)
+            )
+            return session.scalar(stmt)
+
+    def upsert(self, *, session_id: str, summary: dict[str, Any]) -> SessionSummaryRecord:
+        with self.database.session() as session:
+            stmt = (
+                select(SessionSummaryRecord)
+                .where(SessionSummaryRecord.session_id == session_id)
+                .limit(1)
+            )
+            record = session.scalar(stmt)
+            if record is None:
+                record = SessionSummaryRecord(session_id=session_id, summary_json=summary)
+                session.add(record)
+            else:
+                record.summary_json = summary
+            session.commit()
+            session.refresh(record)
+            return record
 
 
 class MessageRepository:
@@ -182,6 +214,16 @@ class ItemRepository:
             record = session.scalar(stmt)
             if record is None:
                 raise KeyError(f"Item not found: {item_id}")
+            return record
+
+    def update_metadata(self, *, item_id: str, metadata: dict[str, Any]) -> ItemRecord:
+        with self.database.session() as session:
+            record = session.get(ItemRecord, item_id)
+            if record is None:
+                raise KeyError(f"Item not found: {item_id}")
+            record.metadata_json = metadata
+            session.commit()
+            session.refresh(record)
             return record
 
     def search_latest_by_text(self, *, session_id: str | None, query: str) -> ItemRecord | None:

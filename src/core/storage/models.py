@@ -29,6 +29,16 @@ class SessionRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class SessionSummaryRecord(Base):
+    __tablename__ = "clawbot_session_summaries"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True, unique=True)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 class MessageRecord(Base):
     __tablename__ = "clawbot_messages"
 

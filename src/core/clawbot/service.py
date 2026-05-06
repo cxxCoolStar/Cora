@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.agent.loop import AgentLoop, AgentToolExecutor, LoopResult
+from core.agent.context_manager import SessionContextManager
+from core.agent.context_budget import ContextBudgetManager
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, ItemSnapshot, PendingState
@@ -37,6 +39,7 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     SessionRepository,
+    SessionSummaryRepository,
     SourceEventRepository,
     TopicRepository,
     UserSignalRepository,
@@ -110,6 +113,7 @@ class ClawBotService:
         *,
         session_repository: SessionRepository,
         message_repository: MessageRepository,
+        session_summary_repository: SessionSummaryRepository,
         source_event_repository: SourceEventRepository,
         item_repository: ItemRepository,
         ingestion_service: IngestionService,
@@ -119,9 +123,11 @@ class ClawBotService:
         model_client: ModelClient,
         tool_executor: ArchiveToolExecutor | None = None,
         topic_organizer: TopicOrganizerService | None = None,
+        context_budget_manager: ContextBudgetManager | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
+        self.session_summary_repository = session_summary_repository
         self.source_event_repository = source_event_repository
         self.item_repository = item_repository
         self.ingestion_service = ingestion_service
@@ -152,6 +158,12 @@ class ClawBotService:
             loop=self._agent_loop,
             prompt_builder=AgentPromptBuilder(),
             skill_loader=self.skill_loader,
+        )
+        self._context_manager = SessionContextManager(
+            message_repository=message_repository,
+            summary_repository=session_summary_repository,
+            model_client=model_client,
+            budget_manager=context_budget_manager,
         )
 
     def create_session(self) -> SessionRecord:
@@ -297,17 +309,7 @@ class ClawBotService:
         return context
 
     def _load_agent_history(self, *, session_id: str, user_text: str) -> list[Message]:
-        history = self.message_repository.list_by_session(session_id=session_id)
-        history = [msg for msg in history if msg.id][-6:]
-        if history and history[-1].role == "user" and history[-1].content == user_text:
-            history = history[:-1]
-        normalized_history: list[Message] = []
-        for message in history:
-            if message.role == "user":
-                normalized_history.append(Message.user(session_id=session_id, content=message.content))
-            elif message.role == "assistant":
-                normalized_history.append(Message.assistant(session_id=session_id, content=message.content))
-        return normalized_history
+        return self._context_manager.build_history(session_id=session_id, current_user_text=user_text).as_messages()
 
     def _loop_result_to_legacy_response(self, result: LoopResult) -> dict[str, Any]:
         context = self.runtime_to_context(result.runtime)

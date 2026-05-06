@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import Request
 
 from core.archivefs.service import ArchiveImageWorkflow, ArchiveSkillScriptRunner
+from core.agent.context_budget import ContextBudgetManager
 from core.config import CoreSettings
 from core.clawbot.service import ClawBotService
 from core.clawbot.tools import ArchiveToolExecutor
@@ -22,6 +23,7 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     SessionRepository,
+    SessionSummaryRepository,
     SourceEventRepository,
     TopicActivityRepository,
     TopicItemRepository,
@@ -29,6 +31,7 @@ from core.storage.repositories import (
     UserSignalRepository,
 )
 from core.topics.classifier import TopicClassifier
+from core.topics.selector import TopicSelector
 from core.topics.service import TopicOrganizerService
 
 
@@ -37,6 +40,7 @@ class ClawBotContainer:
     settings: CoreSettings
     database: DatabaseManager
     session_repository: SessionRepository
+    session_summary_repository: SessionSummaryRepository
     message_repository: MessageRepository
     source_event_repository: SourceEventRepository
     item_repository: ItemRepository
@@ -69,6 +73,7 @@ def get_clawbot_container() -> ClawBotContainer:
         settings = CoreSettings()
         database = DatabaseManager(settings.clawbot_database_url)
         session_repository = SessionRepository(database)
+        session_summary_repository = SessionSummaryRepository(database)
         message_repository = MessageRepository(database)
         source_event_repository = SourceEventRepository(database)
         item_repository = ItemRepository(database)
@@ -116,13 +121,20 @@ def get_clawbot_container() -> ClawBotContainer:
             raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")
 
         topic_classifier = TopicClassifier(model_client=model_client)
+        topic_selector = TopicSelector(
+            classifier=topic_classifier,
+            topic_repository=topic_repository,
+            archive_root=settings.archive_root_dir,
+        )
         topic_organizer = TopicOrganizerService(
             classifier=topic_classifier,
             topic_repository=topic_repository,
             topic_item_repository=topic_item_repository,
             topic_activity_repository=topic_activity_repository,
             item_repository=item_repository,
+            selector=topic_selector,
         )
+        archive_image_workflow.topic_selector = topic_selector
         ingestion_service.topic_organizer = topic_organizer
 
         tool_executor = ArchiveToolExecutor(
@@ -132,8 +144,15 @@ def get_clawbot_container() -> ClawBotContainer:
             topic_organizer=topic_organizer,
             archive_runner=archive_runner,
         )
+        context_budget_manager = ContextBudgetManager(
+            context_length=settings.context_length,
+            compression_threshold=settings.context_compression_threshold,
+            summary_target_ratio=settings.context_summary_target_ratio,
+            protect_last_n_min=settings.context_protect_last_n_min,
+        )
         clawbot_service = ClawBotService(
             session_repository=session_repository,
+            session_summary_repository=session_summary_repository,
             message_repository=message_repository,
             source_event_repository=source_event_repository,
             item_repository=item_repository,
@@ -144,6 +163,7 @@ def get_clawbot_container() -> ClawBotContainer:
             model_client=model_client,
             tool_executor=tool_executor,
             topic_organizer=topic_organizer,
+            context_budget_manager=context_budget_manager,
         )
         templates_dir = str(Path(__file__).resolve().parents[1] / "api" / "templates")
         static_dir = str(Path(__file__).resolve().parents[1] / "api" / "static")
@@ -151,6 +171,7 @@ def get_clawbot_container() -> ClawBotContainer:
             settings=settings,
             database=database,
             session_repository=session_repository,
+            session_summary_repository=session_summary_repository,
             message_repository=message_repository,
             source_event_repository=source_event_repository,
             item_repository=item_repository,

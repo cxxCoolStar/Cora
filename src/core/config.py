@@ -15,6 +15,10 @@ class CoreSettings(BaseSettings):
     model: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
+    context_length: int = 128000
+    context_compression_threshold: float = 0.50
+    context_summary_target_ratio: float = 0.20
+    context_protect_last_n_min: int = 8
     auxiliary_vision_provider: str | None = None
     auxiliary_vision_model: str | None = None
     auxiliary_vision_api_key: str | None = None

@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.api.app import create_app  # noqa: E402
+from core.agent.context_budget import ContextBudgetManager  # noqa: E402
 from core.archivefs.service import ArchiveImageWorkflow, ArchiveSkillScriptRunner  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
@@ -31,7 +32,7 @@ from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
@@ -84,6 +85,20 @@ class StubTopicModelClient(ModelClient):
 
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         session_id = messages[0].session_id if messages else ""
+        if session_id == "session-summary-writer":
+            return ModelResponse(
+                assistant_text=json.dumps(
+                    {
+                        "active_task": "none",
+                        "user_facts": ["User is archiving conversation artifacts."],
+                        "open_loops": [],
+                        "resolved_requests": ["Historical turns were compacted into a structured summary."],
+                        "recent_decisions": ["Use archive and archive_state as the main tool surface."],
+                        "critical_context": ["Preserve item references and pending clarification state when relevant."],
+                    },
+                    ensure_ascii=False,
+                )
+            )
         latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
         latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
         user_text = latest_user.content if latest_user else ""
@@ -202,14 +217,27 @@ class FakeVisionDescriber:
         )
 
 
-def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -> ClawBotContainer:
+def build_test_container(
+    tmp_path: Path,
+    *,
+    enable_image_vision: bool = False,
+    context_length: int = 128000,
+    context_compression_threshold: float = 0.50,
+    context_summary_target_ratio: float = 0.20,
+    context_protect_last_n_min: int = 8,
+) -> ClawBotContainer:
     settings = CoreSettings(
         clawbot_database_path=tmp_path / "clawbot.db",
         files_storage_dir=tmp_path / "files",
         archive_root_dir=tmp_path / "archive",
+        context_length=context_length,
+        context_compression_threshold=context_compression_threshold,
+        context_summary_target_ratio=context_summary_target_ratio,
+        context_protect_last_n_min=context_protect_last_n_min,
     )
     database = DatabaseManager(settings.clawbot_database_url)
     session_repository = SessionRepository(database)
+    session_summary_repository = SessionSummaryRepository(database)
     message_repository = MessageRepository(database)
     source_event_repository = SourceEventRepository(database)
     item_repository = ItemRepository(database)
@@ -246,8 +274,15 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
         archive_runner=archive_runner,
     )
     model_client = StubTopicModelClient()
+    context_budget_manager = ContextBudgetManager(
+        context_length=settings.context_length,
+        compression_threshold=settings.context_compression_threshold,
+        summary_target_ratio=settings.context_summary_target_ratio,
+        protect_last_n_min=settings.context_protect_last_n_min,
+    )
     clawbot_service = ClawBotService(
         session_repository=session_repository,
+        session_summary_repository=session_summary_repository,
         message_repository=message_repository,
         source_event_repository=source_event_repository,
         item_repository=item_repository,
@@ -258,11 +293,13 @@ def build_test_container(tmp_path: Path, *, enable_image_vision: bool = False) -
         model_client=model_client,
         tool_executor=tool_executor,
         topic_organizer=topic_organizer,
+        context_budget_manager=context_budget_manager,
     )
     container = ClawBotContainer(
         settings=settings,
         database=database,
         session_repository=session_repository,
+        session_summary_repository=session_summary_repository,
         message_repository=message_repository,
         source_event_repository=source_event_repository,
         item_repository=item_repository,
@@ -294,6 +331,133 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
     assert messages[0].role == "system"
     assert "archive-core" in messages[0].content
     assert "Shared skills:" in messages[0].content
+
+
+def test_agent_history_uses_recent_12_messages_plus_summary(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        context_length=4096,
+        context_compression_threshold=0.25,
+        context_summary_target_ratio=0.08,
+        context_protect_last_n_min=4,
+    )
+    session = container.session_repository.create()
+    long_text = "历史消息" * 220
+
+    for index in range(10):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"user message {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"assistant message {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    history = container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="fresh user input",
+    )
+
+    assert history[0].role == "system"
+    assert "[SESSION SUMMARY — REFERENCE ONLY]" in history[0].content
+    assert "User Facts:" in history[0].content
+    assert "Recent Decisions:" in history[0].content
+    assert 2 <= len(history) < 13
+    assert history[-1].role == "assistant"
+    assert history[-1].content.startswith("assistant message 9")
+    summary_record = container.session_summary_repository.get_by_session(session_id=session.id)
+    assert summary_record is not None
+    payload = summary_record.summary_json
+    assert 0 < payload["covered_message_count"] < 20
+    assert payload["summary"]["active_task"] == "none"
+
+
+def test_session_summary_is_not_refreshed_for_tiny_delta(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        context_length=4096,
+        context_compression_threshold=0.25,
+        context_summary_target_ratio=0.08,
+        context_protect_last_n_min=4,
+    )
+    session = container.session_repository.create()
+    long_text = "历史消息" * 220
+
+    for index in range(10):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"user message {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"assistant message {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="fresh user input",
+    )
+    first_summary = container.session_summary_repository.get_by_session(session_id=session.id)
+    assert first_summary is not None
+    first_payload = dict(first_summary.summary_json or {})
+
+    for index in range(2):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"small delta user {index}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"small delta assistant {index}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="follow-up input",
+    )
+    second_summary = container.session_summary_repository.get_by_session(session_id=session.id)
+    assert second_summary is not None
+    second_payload = dict(second_summary.summary_json or {})
+
+    assert second_payload["summary"] == first_payload["summary"]
+    assert second_payload["covered_message_count"] > first_payload["covered_message_count"]
+
+
+def test_agent_history_uses_token_budget_not_fixed_message_count(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        context_length=4096,
+        context_compression_threshold=0.25,
+        context_summary_target_ratio=0.08,
+        context_protect_last_n_min=2,
+    )
+    session = container.session_repository.create()
+    long_text = "长内容" * 220
+
+    for index in range(12):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"user {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"assistant {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    history = container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="new request",
+    )
+
+    assert history[0].role == "system"
+    assert "[SESSION SUMMARY — REFERENCE ONLY]" in history[0].content
+    # Token-budget mode should keep fewer than the default 12 raw messages here.
+    assert len(history) < 13
 
 
 async def api_request(app, method: str, path: str, **kwargs):

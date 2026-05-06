@@ -10,6 +10,7 @@ from typing import Any
 from core.ingestion.parsers.base import FileSource
 from core.ingestion.parsers.image_parser import ImageFileParser
 import re
+from core.topics.selector import TopicSelector, TopicSelectorInput
 
 
 @dataclass(slots=True)
@@ -159,9 +160,11 @@ class ArchiveImageWorkflow:
         *,
         image_parser: ImageFileParser,
         archive_runner: ArchiveSkillScriptRunner,
+        topic_selector: TopicSelector | None = None,
     ) -> None:
         self.image_parser = image_parser
         self.archive_runner = archive_runner
+        self.topic_selector = topic_selector
 
     def save_image(
         self,
@@ -189,7 +192,12 @@ class ArchiveImageWorkflow:
                 "title": title,
                 "raw_content": description,
             })()
-        selected_topic = topic or self._choose_topic(parsed.title, parsed.raw_content)
+        selected_topic = topic or self._choose_topic(
+            item_type=parsed.item_type,
+            title=parsed.title,
+            description=parsed.raw_content,
+            user_note=user_note,
+        )
         return self.archive_runner.save_asset(
             source_file=source_file,
             topic=selected_topic,
@@ -202,7 +210,19 @@ class ArchiveImageWorkflow:
             move=move,
         )
 
-    def _choose_topic(self, title: str, description: str) -> str:
+    def _choose_topic(self, *, item_type: str, title: str, description: str, user_note: str) -> str:
+        if self.topic_selector is not None:
+            selection = self.topic_selector.select(
+                session_id="archivefs",
+                item_input=TopicSelectorInput(
+                    item_type=item_type,
+                    title=title,
+                    summary=title,
+                    description=description,
+                    user_note=user_note,
+                ),
+            )
+            return selection.slug
         topics_root = self.archive_runner.archive_root / "topics"
         candidates = [path.name for path in topics_root.iterdir() if path.is_dir()] if topics_root.exists() else []
         if not candidates:
