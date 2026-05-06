@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from core.agent.context_budget import ContextBudgetManager
 from core.agent.loop import AgentLoop
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
@@ -106,6 +107,34 @@ async def test_agent_loop_executes_tool_call_and_returns_final_text() -> None:
     assert [message.role for message in result.trace] == ["assistant", "tool", "assistant"]
 
 
+def test_context_budget_manager_calibrates_against_actual_prompt_tokens() -> None:
+    manager = ContextBudgetManager(
+        context_length=8192,
+        compression_threshold=0.25,
+        summary_target_ratio=0.10,
+        protect_last_n_min=2,
+    )
+    messages = [
+        Message.user(session_id="budget-session", content=("历史内容" * 120) + str(index))
+        for index in range(8)
+    ]
+    tools = [ToolSpec(name="archive", description="archive tool", input_schema={"type": "object", "properties": {"action": {"type": "string"}}})]
+
+    decision_before = manager.choose_recent_slice(messages=messages)
+    estimated_prompt_tokens = manager.estimate_prompt_tokens(messages=messages, tools=tools, calibrated=False)
+    manager.observe_prompt_usage(
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        actual_prompt_tokens=estimated_prompt_tokens * 3,
+    )
+    decision_after = manager.choose_recent_slice(messages=messages)
+
+    assert manager.prompt_token_scale > 1.0
+    assert manager.last_estimated_prompt_tokens == estimated_prompt_tokens
+    assert manager.last_actual_prompt_tokens == estimated_prompt_tokens * 3
+    assert decision_after.tail_budget_tokens < decision_before.tail_budget_tokens
+    assert decision_after.recent_start_index >= decision_before.recent_start_index
+
+
 @pytest.mark.anyio
 async def test_orchestrator_builds_messages_and_runs_loop() -> None:
     runtime = ConversationRuntimeState(session_id="session-2")
@@ -134,3 +163,40 @@ async def test_orchestrator_builds_messages_and_runs_loop() -> None:
     first_call_messages = model.calls[0]
     assert first_call_messages[0].role == "system"
     assert "archive-core" in first_call_messages[0].content
+
+
+@pytest.mark.anyio
+async def test_agent_loop_updates_budget_manager_from_response_usage() -> None:
+    runtime = ConversationRuntimeState(session_id="session-usage")
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="Ready.",
+                tool_calls=[],
+                usage={"prompt_tokens": 900},
+            )
+        ]
+    )
+    executor = StubExecutor(results=[])
+    budget_manager = ContextBudgetManager(
+        context_length=8192,
+        compression_threshold=0.25,
+        summary_target_ratio=0.10,
+        protect_last_n_min=2,
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="archive", description="archive tool", input_schema={"type": "object"})],
+        context_budget_manager=budget_manager,
+    )
+
+    await loop.run(
+        session_id="session-usage",
+        initial_messages=[Message.user(session_id="session-usage", content="请帮我保存这份很长很长的材料" * 40)],
+        runtime=runtime,
+    )
+
+    assert budget_manager.last_actual_prompt_tokens == 900
+    assert budget_manager.last_estimated_prompt_tokens > 0
+    assert budget_manager.prompt_token_scale > 1.0

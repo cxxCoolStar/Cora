@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from core.agent.context_budget import ContextBudgetManager
 from core.agent.runtime_state import ConversationRuntimeState
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -42,6 +43,7 @@ class AgentLoop:
     model_client: ModelClient
     tool_executor: AgentToolExecutor
     tool_specs: list[ToolSpec]
+    context_budget_manager: ContextBudgetManager | None = None
     max_steps: int = 6
 
     async def run(
@@ -61,7 +63,18 @@ class AgentLoop:
         last_tool_reply: str | None = None
 
         for step in range(self.max_steps):
+            estimated_prompt_tokens = None
+            if self.context_budget_manager is not None:
+                estimated_prompt_tokens = self.context_budget_manager.estimate_prompt_tokens(
+                    messages=messages,
+                    tools=self.tool_specs,
+                    calibrated=False,
+                )
             response = self.model_client.generate(messages=messages, tools=self.tool_specs)
+            self._record_prompt_usage(
+                response_usage=response.usage,
+                estimated_prompt_tokens=estimated_prompt_tokens,
+            )
             if not response.tool_calls:
                 final_response = (response.assistant_text or "").strip()
                 assistant_message = Message.assistant(
@@ -163,6 +176,25 @@ class AgentLoop:
                 "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
             },
         }
+
+    def _record_prompt_usage(
+        self,
+        *,
+        response_usage: dict[str, Any],
+        estimated_prompt_tokens: int | None,
+    ) -> None:
+        if self.context_budget_manager is None or estimated_prompt_tokens is None:
+            return
+        try:
+            actual_prompt_tokens = int(response_usage.get("prompt_tokens") or 0)
+        except (TypeError, ValueError, AttributeError):
+            return
+        if actual_prompt_tokens <= 0:
+            return
+        self.context_budget_manager.observe_prompt_usage(
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            actual_prompt_tokens=actual_prompt_tokens,
+        )
 
     @staticmethod
     def _tool_result_content(*, result: ToolResult) -> str:

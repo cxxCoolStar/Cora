@@ -153,6 +153,7 @@ class ClawBotService:
             model_client=self.model_client,
             tool_executor=self._agent_executor,
             tool_specs=self._tool_specs,
+            context_budget_manager=context_budget_manager,
         )
         self._agent_orchestrator = AgentOrchestrator(
             loop=self._agent_loop,
