@@ -555,7 +555,7 @@ class ArchiveToolExecutor:
     async def _tool_send_file_to_user(self, invocation: ToolInvocation) -> ToolExecutionResult:
         """Send a file from the wiki to the user via WeChat."""
         if self.gateway_service is None:
-            return ToolExecutionResult(reply="??????????", action="chat")
+            return ToolExecutionResult(reply="当前通道暂不支持把文件发送给用户。", action="chat")
 
         try:
             item = self._resolve_target_item(
@@ -568,7 +568,7 @@ class ArchiveToolExecutor:
         except KeyError as e:
             title_hint = str(invocation.plan.arguments.get("target_title_hint") or "").strip()
             if not title_hint:
-                return ToolExecutionResult(reply=f"??????????: {e}", action="chat")
+                return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e}", action="chat")
             try:
                 item = self._resolve_item_by_title_hint(
                     session_id=invocation.session_id,
@@ -576,7 +576,7 @@ class ArchiveToolExecutor:
                     context=invocation.context,
                 )
             except KeyError:
-                return ToolExecutionResult(reply=f"??????????: {e}", action="chat")
+                return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e}", action="chat")
 
         metadata = item.metadata_json or {}
         stored_path = metadata.get("stored_file_path")
@@ -592,20 +592,20 @@ class ArchiveToolExecutor:
                 stored_path = lookup.results[0].get("resolved_path")
         if not stored_path:
             return ToolExecutionResult(
-                reply=f"?? `{item.title}` ???????????????????????????",
+                reply=f"资料 `{item.title}` 没有可发送的原始文件路径，暂时无法回传给你。",
                 action="chat",
             )
 
         path = Path(stored_path)
         if not path.exists():
             return ToolExecutionResult(
-                reply=f"?? `{item.title}` ???????????????????",
+                reply=f"资料 `{item.title}` 对应的文件已经找不到了，暂时无法发送。",
                 action="chat",
             )
 
         caption = str(invocation.plan.arguments.get("caption") or "").strip()
         if self.session_map_repository is None:
-            return ToolExecutionResult(reply="???????????????", action="chat")
+            return ToolExecutionResult(reply="当前会话没有可用的用户映射，暂时无法发送文件。", action="chat")
 
         user_id = self.session_map_repository.get_external_user_id(
             channel=self.channel_name,
@@ -613,7 +613,7 @@ class ArchiveToolExecutor:
         )
         if not user_id:
             return ToolExecutionResult(
-                reply="?????????????????????????????",
+                reply="我没找到这个会话对应的微信用户，暂时无法把文件发回去。",
                 action="chat",
             )
 
@@ -621,7 +621,7 @@ class ArchiveToolExecutor:
             result = await self.gateway_service.send_file_to_user(
                 user_id=user_id,
                 file_path=str(path),
-                caption=caption or f"?????????{item.title}",
+                caption=caption or f"这是你要的图片：{item.title}",
             )
             if result.get("ret") in (0, None) and result.get("errcode") in (0, None):
                 context = self._build_context(
@@ -631,16 +631,16 @@ class ArchiveToolExecutor:
                     working_set=invocation.context.get("working_set", []),
                 )
                 return ToolExecutionResult(
-                    reply=f"?? `{item.title}` ??????",
+                    reply=f"已经把 `{item.title}` 发给你了，请查收。",
                     action="retrieve",
                     item_id=item.id,
                     metadata={"context": context},
                 )
-            error_msg = result.get("errmsg") or result.get("msg") or "????"
-            return ToolExecutionResult(reply=f"???????{error_msg}", action="chat")
+            error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
+            return ToolExecutionResult(reply=f"发送文件失败：{error_msg}", action="chat")
         except Exception as exc:
             logger.exception("Failed to send file to user")
-            return ToolExecutionResult(reply=f"???????{exc}", action="chat")
+            return ToolExecutionResult(reply=f"发送文件失败：{exc}", action="chat")
 
     def _resolve_pending_selected_item(self, *, invocation: ToolInvocation, pending_payload: dict[str, Any]) -> ItemRecord | None:
         target = invocation.plan.arguments.get("target")
