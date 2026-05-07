@@ -309,8 +309,6 @@ def build_test_container(
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,
         tool_executor=tool_executor,
-        templates_dir=str(ROOT / "src" / "core" / "api" / "templates"),
-        templates_static_dir=str(ROOT / "src" / "core" / "api" / "static"),
     )
     container.initialize()
     return container
@@ -736,77 +734,69 @@ def test_bare_file_upload_reply_can_save_with_note(tmp_path):
     assert "这是我的简历" in detail.json()["normalized_text"]
 
 
-def test_debug_page_renders_saved_data(tmp_path):
-    deps._container = build_test_container(tmp_path)
-    app = create_app()
-
-    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
-    asyncio.run(
-        api_request(
-            app,
-            "POST",
-            f"/sessions/{session_id}/ingest",
-            data={"text": "请保存 A saved debug note"},
-        )
-    )
-
-    response = asyncio.run(api_request(app, "GET", f"/debug?session_id={session_id}"))
-
-    assert response.status_code == 200
-    assert "Debug Explorer" in response.text
-    assert "A saved debug note" in response.text
-    assert "User Signals" in response.text
-
-
 def test_ingest_records_user_signals(tmp_path):
     deps._container = build_test_container(tmp_path)
-    app = create_app()
+    session = deps._container.session_repository.create()
+    source_message = deps._container.message_repository.add_user_message(
+        session_id=session.id,
+        content="请保存这段 Agent 和 RAG 面试题资料",
+    )
 
-    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
-    asyncio.run(
-        api_request(
-            app,
-            "POST",
-            f"/sessions/{session_id}/ingest",
-            data={"text": "请保存这段 Agent 和 RAG 面试题资料"},
+    saved = asyncio.run(
+        deps._container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            text="请保存这段 Agent 和 RAG 面试题资料",
+            upload=None,
         )
     )
 
-    response = asyncio.run(api_request(app, "GET", f"/debug?session_id={session_id}"))
+    signals = deps._container.user_signal_repository.list_by_session(session_id=session.id)
 
-    assert response.status_code == 200
-    assert "interest_topic" in response.text
-    assert "agent" in response.text.lower()
+    assert saved.item_id
+    assert any(signal.signal_type == "interest_topic" and signal.signal_value == "agent" for signal in signals)
+    assert any(signal.signal_type == "interest_topic" and signal.signal_value == "rag" for signal in signals)
 
 
 def test_debug_page_shows_aggregated_user_profile(tmp_path):
     deps._container = build_test_container(tmp_path)
-    app = create_app()
+    session = deps._container.session_repository.create()
 
-    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
-    asyncio.run(
-        api_request(
-            app,
-            "POST",
-            f"/sessions/{session_id}/ingest",
-            data={"text": "请保存 Agent 资料，后续我还会继续研究 Agent 和 RAG"},
-        )
+    first_message = deps._container.message_repository.add_user_message(
+        session_id=session.id,
+        content="请保存 Agent 资料，后续我还会继续研究 Agent 和 RAG",
     )
     asyncio.run(
-        api_request(
-            app,
-            "POST",
-            f"/sessions/{session_id}/ingest",
-            data={"text": "请保存另一段 Agent 学习资料"},
+        deps._container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=first_message.id,
+            source_event_id=None,
+            text="请保存 Agent 资料，后续我还会继续研究 Agent 和 RAG",
+            upload=None,
         )
     )
 
-    response = asyncio.run(api_request(app, "GET", f"/debug?session_id={session_id}"))
+    second_message = deps._container.message_repository.add_user_message(
+        session_id=session.id,
+        content="请保存另一段 Agent 学习资料",
+    )
+    asyncio.run(
+        deps._container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=second_message.id,
+            source_event_id=None,
+            text="请保存另一段 Agent 学习资料",
+            upload=None,
+        )
+    )
 
-    assert response.status_code == 200
-    assert "User Profile" in response.text
-    assert "Recent Interest Topics" in response.text
-    assert "Likely Ongoing Focus" in response.text
+    signals = deps._container.user_signal_repository.list_by_session(session_id=session.id)
+    sections = deps._container.clawbot_service.user_profile_aggregator.build(signals=signals)
+    section_names = {section.name for section in sections}
+
+    assert "Recent Interest Topics" in section_names
+    assert "Likely Ongoing Focus" in section_names
 
 
 def test_retrieve_returns_saved_material(tmp_path):

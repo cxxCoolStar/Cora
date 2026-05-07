@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from fastapi import Request
@@ -50,8 +49,6 @@ class ClawBotContainer:
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
     tool_executor: ArchiveToolExecutor
-    templates_dir: str
-    templates_static_dir: str
 
     def initialize(self) -> None:
         self.database.create_all()
@@ -165,8 +162,6 @@ def get_clawbot_container() -> ClawBotContainer:
             topic_organizer=topic_organizer,
             context_budget_manager=context_budget_manager,
         )
-        templates_dir = str(Path(__file__).resolve().parents[1] / "api" / "templates")
-        static_dir = str(Path(__file__).resolve().parents[1] / "api" / "static")
         _container = ClawBotContainer(
             settings=settings,
             database=database,
@@ -181,8 +176,6 @@ def get_clawbot_container() -> ClawBotContainer:
             ingestion_service=ingestion_service,
             clawbot_service=clawbot_service,
             tool_executor=tool_executor,
-            templates_dir=templates_dir,
-            templates_static_dir=static_dir,
         )
     return _container
 
