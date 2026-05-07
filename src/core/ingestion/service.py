@@ -12,6 +12,7 @@ from fastapi import UploadFile
 
 from core.archivefs.service import ArchiveImageWorkflow
 from core.ingestion.parsers.base import FileSource, ParsedContent
+from core.ingestion.parsers.code_parser import CodeFileParser
 from core.ingestion.parsers.doc_parser import DocFileParser
 from core.ingestion.parsers.docling_parser import DoclingFileParser
 from core.ingestion.parsers.link_parser import LinkParser
@@ -51,6 +52,7 @@ class IngestionService:
         self.text_parser = TextParser()
         self.link_parser = LinkParser()
         self.txt_parser = TxtFileParser()
+        self.code_parser = CodeFileParser()
         self.docling_parser = DoclingFileParser()
         self.doc_parser = DocFileParser()
         self.archive_image_workflow = archive_image_workflow
@@ -349,6 +351,23 @@ class IngestionService:
         source = FileSource(path=file_path, filename=filename)
         if suffix == ".txt":
             parsed = self.txt_parser.parse(source)
+        elif self.code_parser.supports_suffix(suffix):
+            try:
+                parsed = self.code_parser.parse(source)
+            except Exception as exc:
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=filename or file_path.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "failed",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": filename or file_path.name,
+                        "stored_file_path": str(file_path),
+                        "parse_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
         elif suffix in IMAGE_EXTENSIONS:
             raise RuntimeError("Legacy image parsing path has been removed; use archive_image_workflow instead.")
         elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
@@ -386,18 +405,21 @@ class IngestionService:
                     },
                 )
         else:
-            return ParsedContent(
-                item_type="file_upload",
-                title=filename or file_path.name,
-                raw_content="",
-                normalized_text="",
-                metadata={
-                    "parse_status": "unsupported",
-                    "file_suffix": suffix or "unknown",
-                    "original_file_name": filename or file_path.name,
-                    "stored_file_path": str(file_path),
-                },
-            )
+            try:
+                parsed = self.txt_parser.parse(source)
+            except Exception:
+                return ParsedContent(
+                    item_type="file_upload",
+                    title=filename or file_path.name,
+                    raw_content="",
+                    normalized_text="",
+                    metadata={
+                        "parse_status": "unsupported",
+                        "file_suffix": suffix or "unknown",
+                        "original_file_name": filename or file_path.name,
+                        "stored_file_path": str(file_path),
+                    },
+                )
         parsed.metadata["stored_file_path"] = str(file_path)
         parsed.metadata["original_file_name"] = filename or file_path.name
         return parsed

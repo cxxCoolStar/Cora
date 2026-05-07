@@ -570,6 +570,41 @@ def test_txt_file_ingest_flow(tmp_path):
     assert detail.json()["item_type"] == "document"
 
 
+def test_code_file_ingest_flow_uses_plain_text_parsing(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("main.py", BytesIO("# Agent helper\nprint('hello')\n".encode("utf-8")), "text/x-python")},
+        )
+    )
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+
+    response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "保存"},
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    assert item.item_type == "document"
+    assert item.title == "main"
+    assert "print('hello')" in item.normalized_text
+    assert item.metadata_json.get("file_suffix") == ".py"
+
+
 def test_text_ingest_ignores_empty_upload_filename(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()
@@ -1025,6 +1060,48 @@ def test_upload_md_is_parsed_as_document(tmp_path):
     assert len(items) == 1
     assert items[0]["item_type"] == "document"
     assert items[0]["title"] == "note"
+
+
+def test_unknown_text_file_uses_plain_text_fallback(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("notes.custom", BytesIO(b"first line\nsecond line"), "application/octet-stream")}
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    assert item.item_type == "document"
+    assert item.title == "notes"
+    assert "second line" in item.normalized_text
+
+
+def test_unknown_binary_file_stays_unsupported(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    files = {"file": ("archive.weird", BytesIO(b"\x00\x01\x02\x03PK\x03\x04"), "application/octet-stream")}
+    first = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", files=files))
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+
+    response = asyncio.run(api_request(app, "POST", f"/sessions/{session_id}/ingest", data={"text": "保存"}))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture"
+    item = deps._container.item_repository.get_any(item_id=payload["item_id"])
+    assert item.item_type == "file_upload"
+    assert item.metadata_json.get("parse_status") == "unsupported"
+    assert item.metadata_json.get("file_suffix") == ".weird"
 
 
 def test_upload_pdf_is_routed_through_docling_not_marked_unsupported(tmp_path):
