@@ -51,17 +51,14 @@ class LLMIntentClassifier:
         if context:
             serialized_context = {
                 "has_upload": context.get("has_upload"),
-                "focus_item_id": context.get("focus_item_id"),
-                "focus_item_title": context.get("focus_item_title"),
-                "focus_item_summary": context.get("focus_item_summary"),
                 "last_action": context.get("last_action"),
-                "working_set": [
+                "recent_events": [
                     {
-                        "rank": snapshot.get("rank"),
-                        "title": snapshot.get("title"),
-                        "summary": snapshot.get("summary"),
+                        "event_type": snapshot.get("event_type"),
+                        "raw_text": snapshot.get("raw_text"),
+                        "original_file_name": snapshot.get("original_file_name"),
                     }
-                    for snapshot in (context.get("working_set") or [])[:5]
+                    for snapshot in (context.get("recent_events") or [])[:5]
                     if isinstance(snapshot, dict)
                 ],
             }

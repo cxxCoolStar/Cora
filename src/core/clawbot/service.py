@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from fastapi import UploadFile
@@ -14,6 +15,7 @@ from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, ItemSnapshot, PendingState
 from core.clawbot.schemas import (
     DecisionDebugResponse,
+    DeleteItemResponse,
     IngestResponse,
     ItemDetailResponse,
     ItemSummaryResponse,
@@ -107,6 +109,7 @@ class _ArchiveAgentExecutor(AgentToolExecutor):
 
 class ClawBotService:
     FULL_TEXT_REPLY_THRESHOLD = 420
+    PENDING_UPLOAD_BATCH_LIMIT = 12
 
     def __init__(
         self,
@@ -278,16 +281,10 @@ class ClawBotService:
         upload: UploadFile | None,
     ) -> ConversationRuntimeState:
         pending_record = self.clarification_repository.get_latest_pending(session_id=session_id)
-        working_set = [item for snapshot in context.get("working_set", []) if isinstance(snapshot, dict) for item in [self._runtime_item_snapshot(snapshot)] if item is not None]
-        recent_items = [item for snapshot in context.get("recent_items", []) if isinstance(snapshot, dict) for item in [self._runtime_item_snapshot(snapshot)] if item is not None]
-        primary_focus = self._runtime_item_snapshot(context.get("primary_focus")) if isinstance(context.get("primary_focus"), dict) else None
         return ConversationRuntimeState(
             session_id=session_id,
             current_source_event_id=str(context.get("current_source_event_id") or "") or None,
-            working_set=working_set,
-            recent_items=recent_items,
             recent_events=[self._runtime_event_snapshot(snapshot) for snapshot in context.get("recent_events", []) if isinstance(snapshot, dict)],
-            primary_focus=primary_focus,
             pending_state=self._runtime_pending_state(pending_record),
             last_action=str(context.get("last_action") or "") or None,
             metadata={
@@ -299,10 +296,7 @@ class ClawBotService:
 
     def runtime_to_context(self, runtime: ConversationRuntimeState) -> dict[str, Any]:
         context = {
-            "working_set": [self._context_item_snapshot(item) for item in runtime.working_set],
-            "recent_items": [self._context_item_snapshot(item) for item in runtime.recent_items],
             "recent_events": [self._context_event_snapshot(event) for event in runtime.recent_events],
-            "primary_focus": self._context_item_snapshot(runtime.primary_focus) if runtime.primary_focus is not None else None,
             "last_action": runtime.last_action,
         }
         if runtime.current_source_event_id:
@@ -472,6 +466,88 @@ class ClawBotService:
             metadata=metadata or {},
         )
 
+    async def _buffer_upload_into_pending_clarification(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        source_event_id: str,
+        upload: UploadFile,
+    ) -> IngestResponse | None:
+        pending = self.clarification_repository.get_latest_pending(session_id=session_id)
+        if pending is None:
+            return None
+        payload = dict(pending.pending_payload_json or {})
+        if str(payload.get("type") or "").strip() != "input_interpretation":
+            return None
+        if str(payload.get("pending_input_type") or "").strip() != "upload":
+            return None
+        if str(payload.get("media_kind") or "").strip() != "image":
+            return None
+
+        upload_entries = payload.get("upload_entries")
+        normalized_entries: list[dict[str, str | None]] = []
+        if isinstance(upload_entries, list):
+            for entry in upload_entries:
+                if not isinstance(entry, dict):
+                    continue
+                upload_path = str(entry.get("upload_path") or "").strip()
+                upload_filename = str(entry.get("upload_filename") or "").strip()
+                if not upload_path or not upload_filename:
+                    continue
+                normalized_entries.append(
+                    {
+                        "upload_path": upload_path,
+                        "upload_filename": upload_filename,
+                        "source_event_id": str(entry.get("source_event_id") or "").strip() or None,
+                    }
+                )
+        if not normalized_entries:
+            upload_path = str(payload.get("upload_path") or "").strip()
+            upload_filename = str(payload.get("upload_filename") or "").strip()
+            if upload_path and upload_filename:
+                normalized_entries.append(
+                    {
+                        "upload_path": upload_path,
+                        "upload_filename": upload_filename,
+                        "source_event_id": str(payload.get("source_event_id") or "").strip() or None,
+                    }
+                )
+        if len(normalized_entries) >= self.PENDING_UPLOAD_BATCH_LIMIT:
+            return None
+
+        buffered_upload = UploadFile(
+            filename=upload.filename,
+            file=BytesIO(await upload.read()),
+            headers=getattr(upload, "headers", None),
+        )
+        try:
+            entry = await self.tool_executor.persist_pending_upload_entry(
+                upload=buffered_upload,
+                source_event_id=source_event_id,
+            )
+        finally:
+            await buffered_upload.close()
+
+        normalized_entries.append(entry)
+        payload["upload_entries"] = normalized_entries
+        if normalized_entries:
+            first_entry = normalized_entries[0]
+            payload["upload_path"] = first_entry["upload_path"]
+            payload["upload_filename"] = first_entry["upload_filename"]
+            payload["source_event_id"] = first_entry.get("source_event_id")
+        self.clarification_repository.update_pending(
+            clarification_id=pending.id,
+            pending_payload=payload,
+        )
+        return IngestResponse(
+            reply="",
+            action="buffered",
+            item_id=None,
+            needs_clarification=False,
+            decision_source="system",
+        )
+
     async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None, source_metadata: dict[str, Any] | None = None) -> IngestResponse:
         logger.info(
             "clawbot ingest_start session_id=%s has_text=%s has_upload=%s",
@@ -489,6 +565,26 @@ class ClawBotService:
             upload=upload,
             metadata=source_metadata,
         )
+
+        if (
+            upload is not None
+            and not (text or "").strip()
+            and self._detect_media_kind(upload=upload) == "image"
+        ):
+            buffered = await self._buffer_upload_into_pending_clarification(
+                session_id=session_id,
+                source_message_id=user_message.id,
+                source_event_id=source_event.id,
+                upload=upload,
+            )
+            if buffered is not None:
+                logger.info(
+                    "clawbot upload_buffered session_id=%s source_event_id=%s filename=%s",
+                    session_id,
+                    source_event.id,
+                    upload.filename,
+                )
+                return buffered
 
         context = self._load_context(session_id=session_id)
         context["current_source_event_id"] = source_event.id
@@ -562,6 +658,14 @@ class ClawBotService:
             normalized_text=item.normalized_text,
             locator_hint=item.locator_hint,
             created_at=item.created_at,
+        )
+
+    def delete_item(self, *, session_id: str, item_id: str) -> DeleteItemResponse:
+        self.session_repository.get(session_id)
+        item = self.item_repository.soft_delete(item_id=item_id, session_id=session_id)
+        return DeleteItemResponse(
+            reply=f"已删除资料 `{item.title}`。它不会再出现在默认列表和检索结果里。",
+            item_id=item.id,
         )
 
     def list_sessions(self) -> list[SessionRecord]:
@@ -646,112 +750,14 @@ class ClawBotService:
         session_id: str,
         base_context: dict[str, Any],
         last_action: str | None = None,
-        working_set: list[dict[str, Any]] | None = None,
-        selected_item_id: str | None = None,
     ) -> dict[str, Any]:
-        normalized_working_set = [
-            snapshot for snapshot in (working_set if working_set is not None else base_context.get("working_set") or [])
-            if isinstance(snapshot, dict)
-        ]
-        recent_items = self._merge_recent_item_snapshots(
-            session_id=session_id,
-            selected_item_id=selected_item_id,
-            working_set=normalized_working_set,
-            prior_recent_items=base_context.get("recent_items") or [],
-        )
-        primary_focus = self._resolve_primary_focus(
-            session_id=session_id,
-            selected_item_id=selected_item_id,
-            base_context=base_context,
-            working_set=normalized_working_set,
-            recent_items=recent_items,
-        )
         context = {
-            "working_set": normalized_working_set,
-            "recent_items": recent_items,
             "recent_events": self._load_recent_event_snapshots(session_id=session_id),
-            "primary_focus": primary_focus,
             "last_action": last_action or base_context.get("last_action"),
         }
         if base_context.get("current_source_event_id"):
             context["current_source_event_id"] = base_context.get("current_source_event_id")
         return context
-
-    def _merge_recent_item_snapshots(
-        self,
-        *,
-        session_id: str,
-        selected_item_id: str | None,
-        working_set: list[dict[str, Any]],
-        prior_recent_items: list[dict[str, Any]],
-        limit: int = 5,
-    ) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        def add_snapshot(snapshot: dict[str, Any] | None) -> None:
-            if not isinstance(snapshot, dict):
-                return
-            item_id = str(snapshot.get("item_id") or "").strip()
-            if not item_id or item_id in seen:
-                return
-            try:
-                item = self.item_repository.get_any(item_id=item_id)
-            except Exception:
-                return
-            seen.add(item_id)
-            merged.append(self._item_snapshot(item=item, rank=snapshot.get("rank")))
-
-        if selected_item_id:
-            try:
-                selected = self.item_repository.get_any(item_id=selected_item_id)
-                merged.append(self._item_snapshot(item=selected, rank=1))
-                seen.add(selected.id)
-            except Exception:
-                pass
-        for snapshot in working_set:
-            add_snapshot(snapshot)
-        for snapshot in prior_recent_items:
-            add_snapshot(snapshot if isinstance(snapshot, dict) else None)
-        for item in self.item_repository.list_by_session(session_id=session_id, current_only=True)[:limit]:
-            if item.id in seen:
-                continue
-            merged.append(self._item_snapshot(item=item, rank=None))
-            seen.add(item.id)
-            if len(merged) >= limit:
-                break
-        return merged[:limit]
-
-    def _resolve_primary_focus(
-        self,
-        *,
-        session_id: str,
-        selected_item_id: str | None,
-        base_context: dict[str, Any],
-        working_set: list[dict[str, Any]],
-        recent_items: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        candidate_ids: list[str] = []
-        if selected_item_id:
-            candidate_ids.append(selected_item_id)
-        primary_focus = base_context.get("primary_focus") or {}
-        primary_focus_id = str(primary_focus.get("item_id") or "").strip()
-        if primary_focus_id:
-            candidate_ids.append(primary_focus_id)
-        legacy_focus_id = str(base_context.get("focus_item_id") or "").strip()
-        if legacy_focus_id:
-            candidate_ids.append(legacy_focus_id)
-        for snapshot in working_set + recent_items:
-            item_id = str((snapshot or {}).get("item_id") or "").strip()
-            if item_id:
-                candidate_ids.append(item_id)
-        for item_id in candidate_ids:
-            try:
-                item = self.item_repository.get_any(item_id=item_id)
-                return self._item_snapshot(item=item, rank=None)
-            except Exception:
-                continue
-        return None
 
     def _load_recent_event_snapshots(self, *, session_id: str, limit: int = 5) -> list[dict[str, Any]]:
         snapshots: list[dict[str, Any]] = []

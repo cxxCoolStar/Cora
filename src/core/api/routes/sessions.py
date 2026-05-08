@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from core.clawbot.dependencies import get_container_from_request
-from core.clawbot.schemas import CreateSessionResponse, ItemDetailResponse, ItemSummaryResponse
+from core.clawbot.schemas import CreateSessionResponse, DeleteItemResponse, ItemDetailResponse, ItemSummaryResponse
 
 router = APIRouter()
 
@@ -30,5 +30,17 @@ def get_item(
 ) -> ItemDetailResponse:
     try:
         return container.clawbot_service.get_item(session_id=session_id, item_id=item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{session_id}/items/{item_id}", response_model=DeleteItemResponse)
+def delete_item(
+    session_id: str,
+    item_id: str,
+    container=Depends(get_container_from_request),
+) -> DeleteItemResponse:
+    try:
+        return container.clawbot_service.delete_item(session_id=session_id, item_id=item_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

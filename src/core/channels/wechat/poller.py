@@ -29,6 +29,9 @@ class WechatPoller:
                     if result.deduplicated:
                         logger.info("wechat event deduplicated: %s", event.event_id)
                         continue
+                    if not result.reply.strip():
+                        logger.info("wechat reply suppressed: user=%s event=%s action=%s", event.user_id, event.event_id, result.action)
+                        continue
                     send_result = await self.client.send_text(
                         peer_user_id=event.user_id,
                         text=result.reply,

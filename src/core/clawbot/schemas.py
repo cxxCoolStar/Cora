@@ -31,6 +31,12 @@ class IngestResponse(BaseModel):
     decision_source: str | None = None
 
 
+class DeleteItemResponse(BaseModel):
+    reply: str
+    action: str = "delete"
+    item_id: str
+
+
 class SessionReplyResponse(BaseModel):
     reply: str
     action: str = "chat"

@@ -30,10 +30,8 @@ class IntentRouter:
             has_upload,
             llm_text[:160],
             {
-                "focus_item_id": context.get("focus_item_id"),
-                "focus_item_title": context.get("focus_item_title"),
                 "last_action": context.get("last_action"),
-                "working_set_size": len(context.get("working_set") or []),
+                "recent_event_count": len(context.get("recent_events") or []),
             },
         )
         if self.llm_classifier is None:

@@ -162,19 +162,23 @@ class ItemRepository:
             session.refresh(record)
             return record
 
-    def list_by_session(self, *, session_id: str, current_only: bool = False) -> list[ItemRecord]:
+    def list_by_session(self, *, session_id: str, current_only: bool = False, include_deleted: bool = False) -> list[ItemRecord]:
         with self.database.session() as session:
             stmt = select(ItemRecord).where(ItemRecord.session_id == session_id)
             if current_only:
                 stmt = stmt.where(ItemRecord.is_current == 1)
+            if not include_deleted:
+                stmt = stmt.where(ItemRecord.is_deleted == 0)
             stmt = stmt.order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
 
-    def list_all(self, *, current_only: bool = False) -> list[ItemRecord]:
+    def list_all(self, *, current_only: bool = False, include_deleted: bool = False) -> list[ItemRecord]:
         with self.database.session() as session:
             stmt = select(ItemRecord)
             if current_only:
                 stmt = stmt.where(ItemRecord.is_current == 1)
+            if not include_deleted:
+                stmt = stmt.where(ItemRecord.is_deleted == 0)
             stmt = stmt.order_by(desc(ItemRecord.created_at))
             return list(session.scalars(stmt))
 
@@ -186,6 +190,7 @@ class ItemRepository:
                     ItemRecord.session_id == session_id,
                     ItemRecord.document_key == document_key,
                     ItemRecord.is_current == 1,
+                    ItemRecord.is_deleted == 0,
                 )
                 .order_by(desc(ItemRecord.created_at))
                 .limit(1)
@@ -201,18 +206,18 @@ class ItemRepository:
             record.superseded_by_item_id = superseded_by_item_id
             session.commit()
 
-    def get_any(self, *, item_id: str) -> ItemRecord:
+    def get_any(self, *, item_id: str, include_deleted: bool = False) -> ItemRecord:
         with self.database.session() as session:
             record = session.get(ItemRecord, item_id)
-            if record is None:
+            if record is None or (not include_deleted and record.is_deleted):
                 raise KeyError(f"Item not found: {item_id}")
             return record
 
-    def get(self, *, item_id: str, session_id: str) -> ItemRecord:
+    def get(self, *, item_id: str, session_id: str, include_deleted: bool = False) -> ItemRecord:
         with self.database.session() as session:
             stmt = select(ItemRecord).where(ItemRecord.id == item_id, ItemRecord.session_id == session_id)
             record = session.scalar(stmt)
-            if record is None:
+            if record is None or (not include_deleted and record.is_deleted):
                 raise KeyError(f"Item not found: {item_id}")
             return record
 
@@ -229,7 +234,7 @@ class ItemRepository:
     def search_latest_by_text(self, *, session_id: str | None, query: str) -> ItemRecord | None:
         lowered = query.lower()
         with self.database.session() as session:
-            stmt = select(ItemRecord)
+            stmt = select(ItemRecord).where(ItemRecord.is_current == 1, ItemRecord.is_deleted == 0)
             if session_id is not None:
                 stmt = stmt.where(ItemRecord.session_id == session_id)
             stmt = stmt.order_by(desc(ItemRecord.created_at))
@@ -252,7 +257,7 @@ class ItemRepository:
                 return record
             if any(token for token in lowered.split() if token in haystack):
                 return record
-        return records[0] if records else None
+        return None
 
     def list_current_by_ids(self, *, item_ids: list[str]) -> list[ItemRecord]:
         if not item_ids:
@@ -260,10 +265,22 @@ class ItemRepository:
         with self.database.session() as session:
             stmt = (
                 select(ItemRecord)
-                .where(ItemRecord.id.in_(item_ids), ItemRecord.is_current == 1)
+                .where(ItemRecord.id.in_(item_ids), ItemRecord.is_current == 1, ItemRecord.is_deleted == 0)
                 .order_by(desc(ItemRecord.created_at))
             )
             return list(session.scalars(stmt))
+
+    def soft_delete(self, *, item_id: str, session_id: str) -> ItemRecord:
+        with self.database.session() as session:
+            stmt = select(ItemRecord).where(ItemRecord.id == item_id, ItemRecord.session_id == session_id).limit(1)
+            record = session.scalar(stmt)
+            if record is None or record.is_deleted:
+                raise KeyError(f"Item not found: {item_id}")
+            record.is_deleted = 1
+            record.is_current = 0
+            session.commit()
+            session.refresh(record)
+            return record
 
 
 class SourceEventRepository:
@@ -513,6 +530,28 @@ class ClarificationRepository:
                 raise KeyError(f"Clarification not found: {clarification_id}")
             record.status = status
             session.commit()
+
+    def update_pending(
+        self,
+        *,
+        clarification_id: str,
+        pending_payload: dict[str, Any] | None = None,
+        question: str | None = None,
+        candidate_intents: list[str] | None = None,
+    ) -> ClarificationStateRecord:
+        with self.database.session() as session:
+            record = session.get(ClarificationStateRecord, clarification_id)
+            if record is None:
+                raise KeyError(f"Clarification not found: {clarification_id}")
+            if pending_payload is not None:
+                record.pending_payload_json = pending_payload
+            if question is not None:
+                record.question = question
+            if candidate_intents is not None:
+                record.candidate_intents_json = candidate_intents
+            session.commit()
+            session.refresh(record)
+            return record
 
 
 class UserSignalRepository:

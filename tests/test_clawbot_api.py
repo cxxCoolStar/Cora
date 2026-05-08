@@ -16,7 +16,6 @@ if str(SRC) not in sys.path:
 
 from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
-from core.archivefs.service import ArchiveImageWorkflow, ArchiveSkillScriptRunner  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
 from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
@@ -134,6 +133,12 @@ class StubTopicModelClient(ModelClient):
                 return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "overview"})])
             if "主题" in user_text or "topic" in lowered:
                 return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "list_topics"})])
+            if "删除" in user_text or "删掉" in user_text or "移除" in user_text:
+                if "第二个" in user_text:
+                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "working_set_rank", "value": 2}})])
+                if "第一个" in user_text:
+                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "working_set_rank", "value": 1}})])
+                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "auto", "value": ""}})])
             if "第二个" in user_text and ("全文" in user_text or "给我" in user_text):
                 return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "read", "target": {"type": "working_set_rank", "value": 2}, "mode": "full_text"})])
             if "第一个" in user_text and "面试宝典" in user_text:
@@ -259,19 +264,14 @@ def build_test_container(
         message_repository=message_repository,
         user_signal_repository=user_signal_repository,
         storage_dir=settings.files_storage_dir,
-        topic_organizer=topic_organizer,
-    )
-    archive_runner = ArchiveSkillScriptRunner(archive_root=settings.archive_root_dir)
-    ingestion_service.archive_image_workflow = ArchiveImageWorkflow(
         image_parser=image_parser,
-        archive_runner=archive_runner,
+        topic_organizer=topic_organizer,
     )
     tool_executor = ArchiveToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         clarification_repository=clarification_repository,
         topic_organizer=topic_organizer,
-        archive_runner=archive_runner,
     )
     model_client = StubTopicModelClient()
     context_budget_manager = ContextBudgetManager(
@@ -321,7 +321,7 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
     messages = container.clawbot_service._build_agent_messages(
         session_id=session.id,
         user_text="帮我保存这张照片",
-        context={"working_set": [], "recent_items": [], "recent_events": [], "last_action": None, "primary_focus": None},
+        context={"recent_events": [], "last_action": None},
         pending_payload=None,
         tool_messages=[],
     )
@@ -734,6 +734,50 @@ def test_bare_file_upload_reply_can_save_with_note(tmp_path):
     assert "这是我的简历" in detail.json()["normalized_text"]
 
 
+def test_bare_image_uploads_are_buffered_into_one_pending_batch(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    first = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("wechat_image.jpg", BytesIO(b"fake image bytes 1"), "image/jpeg")},
+        )
+    )
+    assert first.status_code == 200
+    assert first.json()["action"] == "clarify"
+
+    second = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            files={"file": ("wechat_image.jpg", BytesIO(b"fake image bytes 2"), "image/jpeg")},
+        )
+    )
+    assert second.status_code == 200
+    assert second.json()["action"] == "buffered"
+    assert second.json()["reply"] == ""
+
+    saved = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "这些照片都保存起来"},
+        )
+    )
+    assert saved.status_code == 200
+    assert saved.json()["action"] == "capture"
+
+    items = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items")).json()
+    image_items = [item for item in items if item["item_type"] == "image"]
+    assert len(image_items) == 2
+
+
 def test_ingest_records_user_signals(tmp_path):
     deps._container = build_test_container(tmp_path)
     session = deps._container.session_repository.create()
@@ -917,7 +961,7 @@ def test_natural_language_find_request_routes_to_retrieve(tmp_path):
     assert "面试题" in payload["reply"]
 
 
-def test_follow_up_question_uses_focus_item_context(tmp_path):
+def test_follow_up_question_without_explicit_target_requests_clarification(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()
 
@@ -953,12 +997,11 @@ def test_follow_up_question_uses_focus_item_context(tmp_path):
 
     assert second.status_code == 200
     payload = second.json()
-    assert payload["action"] == "retrieve"
-    assert "售前报价Agent系统" in payload["reply"]
-    assert "24倍" in payload["reply"]
+    assert payload["action"] == "clarify"
+    assert "请告诉我" in payload["reply"] or "更具体" in payload["reply"]
 
 
-def test_working_set_can_resolve_second_result_full_text(tmp_path):
+def test_rank_based_follow_up_now_requests_clarification(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()
 
@@ -1005,9 +1048,8 @@ def test_working_set_can_resolve_second_result_full_text(tmp_path):
 
     assert follow_up.status_code == 200
     payload = follow_up.json()
-    assert payload["action"] == "retrieve"
-    assert "全文" in payload["reply"]
-    assert second_title in payload["reply"]
+    assert payload["action"] == "clarify"
+    assert second_title not in payload["reply"]
 
 
 def test_upload_doc_is_parsed_as_document_when_possible(tmp_path):
@@ -1142,7 +1184,7 @@ def test_upload_png_is_parsed_as_image_with_aux_vision(tmp_path):
     assert "keywords: test, diagram, screenshot" in item.normalized_text
 
 
-def test_upload_png_without_aux_vision_still_saves_image_via_archivefs(tmp_path):
+def test_upload_png_without_aux_vision_still_saves_image_to_files_storage(tmp_path):
     deps._container = build_test_container(tmp_path)
     app = create_app()
 
@@ -1160,7 +1202,8 @@ def test_upload_png_without_aux_vision_still_saves_image_via_archivefs(tmp_path)
 
     item = deps._container.item_repository.get_any(item_id=payload["item_id"])
     assert item.item_type == "image"
-    assert item.metadata_json.get("archive_record_id")
+    assert item.metadata_json.get("stored_file_path")
+    assert not item.metadata_json.get("archive_record_id")
     assert "image analysis was unavailable" in item.raw_content.lower()
 
 
@@ -1216,6 +1259,88 @@ def test_reupload_same_document_creates_new_version_and_hides_old_from_default_l
     items = items_response.json()
     assert len(items) == 1
     assert items[0]["title"] == "resume_v2"
+
+
+def test_delete_item_api_hides_deleted_item_from_listing_and_detail(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    source_message = deps._container.message_repository.add_user_message(
+        session_id=session_id,
+        content="测试删除资料",
+    )
+    saved = asyncio.run(
+        deps._container.ingestion_service.ingest(
+            session_id=session_id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            text="测试删除资料",
+            upload=None,
+        )
+    )
+    item_id = saved.item_id
+    assert item_id
+
+    deleted = asyncio.run(api_request(app, "DELETE", f"/sessions/{session_id}/items/{item_id}"))
+    assert deleted.status_code == 200
+    assert deleted.json()["action"] == "delete"
+    assert deleted.json()["item_id"] == item_id
+
+    items = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items")).json()
+    assert items == []
+
+    detail = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items/{item_id}"))
+    assert detail.status_code == 404
+
+
+def test_rank_based_delete_now_requests_clarification(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存内网配置 A：地址10.30.1.127，网关10.30.0.1"},
+        )
+    )
+    asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "请保存内网配置 B：地址10.30.1.128，网关10.30.0.1"},
+        )
+    )
+
+    opened = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "帮我找一下内网配置"},
+        )
+    )
+    assert opened.status_code == 200
+    assert opened.json()["action"] == "retrieve"
+
+    deleted = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "删除第二个"},
+        )
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["action"] == "clarify"
+    assert "更具体" in deleted.json()["reply"] or "文件名" in deleted.json()["reply"]
+
+    items = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/items")).json()
+    assert len(items) == 2
 
 
 def test_ingest_creates_topic_assignment_visible_in_debug(tmp_path):
@@ -1350,8 +1475,7 @@ def test_planner_uses_llm_reference_resolution_for_rank_plus_title():
     assert plan.source == "llm"
     assert plan.tool == "archive"
     assert plan.arguments["action"] == "read"
-    assert plan.arguments["target"]["type"] == "working_set_rank"
-    assert plan.arguments["target"]["value"] == 1
+    assert plan.arguments["target"]["type"] == "auto"
     assert plan.arguments["mode"] == "full_text"
     assert plan.arguments["target_title_hint"] == "面试宝典"
 
@@ -1562,8 +1686,7 @@ def test_planner_accepts_archive_deliver_action():
     assert plan is not None
     assert plan.tool == "archive"
     assert plan.arguments["action"] == "deliver"
-    assert plan.arguments["target"]["type"] == "working_set_rank"
-    assert plan.arguments["target"]["value"] == 2
+    assert plan.arguments["target"]["type"] == "auto"
     assert plan.arguments["target_title_hint"] == "resume.pdf"
     assert plan.arguments["caption"] == "Here is the original file."
 
@@ -1650,14 +1773,14 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
     session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
     container.configure_gateway(_Gateway(), session_map_repository)
 
-    user_message = container.message_repository.add_user_message(session_id=session.id, content="把这张照片发给我")
+    user_message = container.message_repository.add_user_message(session_id=session.id, content=f"把 {item.title} 发给我")
     context = container.clawbot_service._load_context(session_id=session.id)
     result = asyncio.run(
         container.clawbot_service._run_agent_loop(
             session_id=session.id,
             source_message_id=user_message.id,
-            user_text="把这张照片发给我",
-            raw_text="把这张照片发给我",
+            user_text=f"把 {item.title} 发给我",
+            raw_text=f"把 {item.title} 发给我",
             upload=None,
             context=context,
             pending_payload=None,
@@ -1669,3 +1792,84 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
     assert result["action"] == "chat"
     assert "network down" in result["reply"]
     assert result["reply"] != "已经发送，请查收。"
+
+
+def test_send_file_tool_requires_real_file_item_without_archive_fallback(tmp_path):
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_file_to_user(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"ret": 0, "errcode": 0}
+
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="upload holiday photos")
+
+    first_path = tmp_path / "holiday-1.jpg"
+    second_path = tmp_path / "holiday-2.jpg"
+    first_path.write_bytes(b"fake image bytes 1")
+    second_path.write_bytes(b"fake image bytes 2")
+    note = "五一假期与女朋友一起出去玩拍摄的照片"
+
+    first_saved = asyncio.run(
+        container.ingestion_service.ingest_saved_upload(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            file_path=first_path,
+            filename="holiday-1.jpg",
+            user_note=note,
+        )
+    )
+    second_saved = asyncio.run(
+        container.ingestion_service.ingest_saved_upload(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            file_path=second_path,
+            filename="holiday-2.jpg",
+            user_note=note,
+        )
+    )
+    assert first_saved.item_id and second_saved.item_id
+
+    note_item = container.item_repository.create(
+        session_id=session.id,
+        source_message_id=source_message.id,
+        source_event_id=None,
+        item_type="text_note",
+        title=note,
+        raw_content=note,
+        normalized_text=note,
+        summary=note,
+        metadata={},
+        locator_hint="Look for the file message named `wechat_image.jpg` on the saved date.",
+    )
+
+    gateway = _Gateway()
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
+    container.configure_gateway(gateway, session_map_repository)
+
+    result = asyncio.run(
+        container.tool_executor._tool_send_file_to_user(
+            ToolInvocation(
+                session_id=session.id,
+                source_message_id=source_message.id,
+                plan=ToolPlan(
+                    tool="archive",
+                    arguments={"action": "deliver", "target": {"type": "item_id", "value": note_item.id}},
+                    reason="test",
+                ),
+                text="把这些照片发给我",
+                upload=None,
+                context={},
+            )
+        )
+    )
+
+    assert result.action == "chat"
+    assert "没有可发送的原始文件路径" in result.reply
+    assert gateway.calls == []

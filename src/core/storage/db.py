@@ -31,6 +31,7 @@ class DatabaseManager:
             self._ensure_column(raw, "clawbot_items", "document_key", "VARCHAR(255)")
             self._ensure_column(raw, "clawbot_items", "version", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(raw, "clawbot_items", "is_current", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(raw, "clawbot_items", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(raw, "clawbot_items", "superseded_by_item_id", "VARCHAR")
             self._ensure_column(raw, "clawbot_items", "source_event_id", "VARCHAR")
 

@@ -10,11 +10,11 @@ import uuid
 import anyio
 from fastapi import UploadFile
 
-from core.archivefs.service import ArchiveImageWorkflow
 from core.ingestion.parsers.base import FileSource, ParsedContent
 from core.ingestion.parsers.code_parser import CodeFileParser
 from core.ingestion.parsers.doc_parser import DocFileParser
 from core.ingestion.parsers.docling_parser import DoclingFileParser
+from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.parsers.link_parser import LinkParser
 from core.ingestion.parsers.text_parser import TextParser
 from core.ingestion.parsers.txt_parser import TxtFileParser
@@ -40,7 +40,7 @@ class IngestionService:
         message_repository: MessageRepository,
         user_signal_repository: UserSignalRepository,
         storage_dir: Path,
-        archive_image_workflow: ArchiveImageWorkflow | None = None,
+        image_parser: ImageFileParser | None = None,
         topic_organizer: TopicOrganizerService | None = None,
     ) -> None:
         self.item_repository = item_repository
@@ -55,7 +55,7 @@ class IngestionService:
         self.code_parser = CodeFileParser()
         self.docling_parser = DoclingFileParser()
         self.doc_parser = DocFileParser()
-        self.archive_image_workflow = archive_image_workflow
+        self.image_parser = image_parser or ImageFileParser(describer=None)
 
     async def ingest(
         self,
@@ -74,18 +74,6 @@ class IngestionService:
             bool(text and text.strip()),
             bool(upload and (upload.filename or "").strip()),
         )
-        if upload is not None and bool((upload.filename or "").strip()):
-            suffix = Path(upload.filename or "").suffix.lower()
-            if suffix in IMAGE_EXTENSIONS:
-                if self.archive_image_workflow is None:
-                    raise RuntimeError("archive_image_workflow is required for image uploads")
-                return await self._ingest_image_upload_via_archivefs(
-                    session_id=session_id,
-                    source_message_id=source_message_id,
-                    source_event_id=source_event_id,
-                    upload=upload,
-                    user_note=user_note,
-                )
         parsed = await self._parse_input(text=text, upload=upload)
         logger.info("ingestion parsed item_type=%s title=%s", parsed.item_type, parsed.title)
         parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
@@ -106,17 +94,6 @@ class IngestionService:
         filename: str,
         user_note: str | None = None,
     ) -> IngestedItemResult:
-        if file_path.suffix.lower() in IMAGE_EXTENSIONS:
-            if self.archive_image_workflow is None:
-                raise RuntimeError("archive_image_workflow is required for image uploads")
-            return self._ingest_saved_image_via_archivefs(
-                session_id=session_id,
-                source_message_id=source_message_id,
-                source_event_id=source_event_id,
-                file_path=file_path,
-                filename=filename,
-                user_note=user_note,
-            )
         parsed = await self._parse_saved_upload(file_path=file_path, filename=filename)
         parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
         return self._store_parsed_item(
@@ -124,82 +101,6 @@ class IngestionService:
             source_message_id=source_message_id,
             source_event_id=source_event_id,
             parsed=parsed,
-        )
-
-    async def _ingest_image_upload_via_archivefs(
-        self,
-        *,
-        session_id: str,
-        source_message_id: str,
-        source_event_id: str | None,
-        upload: UploadFile,
-        user_note: str | None,
-    ) -> IngestedItemResult:
-        target = self.storage_dir / f"{uuid.uuid4()}_{upload.filename}"
-        data = await upload.read()
-        target.write_bytes(data)
-        logger.info(
-            "ingestion image_archivefs_upload_saved filename=%s path=%s bytes=%d",
-            upload.filename,
-            target,
-            len(data),
-        )
-        return self._ingest_saved_image_via_archivefs(
-            session_id=session_id,
-            source_message_id=source_message_id,
-            source_event_id=source_event_id,
-            file_path=target,
-            filename=upload.filename or target.name,
-            user_note=user_note,
-        )
-
-    def _ingest_saved_image_via_archivefs(
-        self,
-        *,
-        session_id: str,
-        source_message_id: str,
-        source_event_id: str | None,
-        file_path: Path,
-        filename: str,
-        user_note: str | None,
-    ) -> IngestedItemResult:
-        if self.archive_image_workflow is None:
-            raise RuntimeError("archive_image_workflow is not configured")
-        saved = self.archive_image_workflow.save_image(
-            image_path=file_path,
-            source="wechat",
-            user_note=user_note or "",
-            move=True,
-        )
-        normalized_text = (
-            f"Image file: {saved.record.filename}\n"
-            f"Visual description:\n{saved.record.description}"
-        ).strip()
-        metadata = {
-            "original_file_name": filename or saved.record.filename,
-            "stored_file_path": str(saved.stored_path),
-            "archive_relative_path": saved.relative_path,
-            "archive_record_id": saved.record.id,
-            "archive_topic": saved.record.topic,
-            "archive_source": saved.record.source,
-            "vision_status": "ok",
-        }
-        if user_note:
-            metadata["user_note"] = user_note
-        parsed = ParsedContent(
-            item_type=saved.record.asset_type,
-            title=Path(saved.record.filename).stem or saved.record.filename,
-            raw_content=saved.record.description,
-            normalized_text=normalized_text,
-            metadata=metadata,
-        )
-        return self._store_parsed_item(
-            session_id=session_id,
-            source_message_id=source_message_id,
-            source_event_id=source_event_id,
-            parsed=parsed,
-            forced_topic_slug=saved.record.topic,
-            forced_topic_reason="Linked by archive-core image workflow.",
         )
 
     def _store_parsed_item(
@@ -369,7 +270,24 @@ class IngestionService:
                     },
                 )
         elif suffix in IMAGE_EXTENSIONS:
-            raise RuntimeError("Legacy image parsing path has been removed; use archive_image_workflow instead.")
+            try:
+                parsed = self.image_parser.parse(source)
+            except Exception as exc:
+                description = (
+                    "Image uploaded without a visual description because image analysis was unavailable. "
+                    f"Original parser error: {type(exc).__name__}: {exc}"
+                )
+                parsed = ParsedContent(
+                    item_type="image",
+                    title=Path(filename or file_path.name).stem or (filename or file_path.name),
+                    raw_content=description,
+                    normalized_text=f"Image file: {filename or file_path.name}\nVisual description:\n{description}",
+                    metadata={
+                        "vision_status": "unavailable",
+                        "mime_type": self._guess_mime_type(filename or file_path.name),
+                        "file_suffix": suffix or "unknown",
+                    },
+                )
         elif suffix in {".md", ".markdown", ".docx", ".pdf"}:
             try:
                 parsed = await anyio.to_thread.run_sync(self.docling_parser.parse, source)
@@ -423,6 +341,17 @@ class IngestionService:
         parsed.metadata["stored_file_path"] = str(file_path)
         parsed.metadata["original_file_name"] = filename or file_path.name
         return parsed
+
+    @staticmethod
+    def _guess_mime_type(filename: str) -> str:
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".png":
+            return "image/png"
+        if suffix in {".jpg", ".jpeg"}:
+            return "image/jpeg"
+        if suffix == ".webp":
+            return "image/webp"
+        return "application/octet-stream"
 
     @staticmethod
     def _looks_like_url(value: str) -> bool:

@@ -55,10 +55,7 @@ class AgentPromptBuilder:
     @staticmethod
     def _format_state_block(runtime: ConversationRuntimeState) -> str:
         state = {
-            "primary_focus": AgentPromptBuilder._item_to_dict(runtime.primary_focus),
             "last_action": runtime.last_action,
-            "working_set": [AgentPromptBuilder._item_to_dict(item) for item in runtime.working_set[:5]],
-            "recent_items": [AgentPromptBuilder._item_to_dict(item) for item in runtime.recent_items[:5]],
             "recent_events": [AgentPromptBuilder._event_to_dict(event) for event in runtime.recent_events[:5]],
             "pending_clarification": AgentPromptBuilder._pending_to_dict(runtime.pending_state),
         }

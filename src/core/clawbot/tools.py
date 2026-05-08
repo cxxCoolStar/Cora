@@ -34,6 +34,12 @@ class ToolExecutionResult:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(slots=True)
+class AmbiguousItemReferenceError(Exception):
+    query: str
+    candidates: list[dict[str, Any]]
+
+
 class ArchiveToolExecutor:
     FULL_TEXT_REPLY_THRESHOLD = 420
 
@@ -80,32 +86,16 @@ class ArchiveToolExecutor:
         self,
         *,
         invocation: ToolInvocation,
-        item: ItemRecord | None,
         last_action: str,
-        working_set: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        existing_recent = [
-            snapshot
-            for snapshot in (invocation.context.get("recent_items") or [])
-            if isinstance(snapshot, dict)
-        ]
-        selected_snapshot = self._item_snapshot(item, rank=1) if item is not None else {}
-        normalized_working_set = [
-            snapshot for snapshot in (working_set if working_set is not None else invocation.context.get("working_set", []))
-            if isinstance(snapshot, dict)
-        ]
-        recent_items = self._merge_recent_items(
-            selected_snapshot,
-            *normalized_working_set,
-            *existing_recent,
-        )
-        return {
-            "working_set": normalized_working_set,
-            "recent_items": recent_items,
-            "primary_focus": dict(selected_snapshot) if selected_snapshot else None,
+        context = {
             "recent_events": invocation.context.get("recent_events", []),
             "last_action": last_action,
         }
+        current_source_event_id = str(invocation.context.get("current_source_event_id") or "").strip()
+        if current_source_event_id:
+            context["current_source_event_id"] = current_source_event_id
+        return context
 
     async def execute(
         self,
@@ -155,6 +145,8 @@ class ArchiveToolExecutor:
             return self._tool_summarize_item(invocation)
         if action == "deliver":
             return await self._tool_send_file_to_user(invocation)
+        if action == "delete":
+            return self._tool_delete_item(invocation)
         return ToolExecutionResult(reply="我暂时还不能处理这个 archive 动作。", action="chat")
 
     async def _tool_archive_state(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -206,9 +198,7 @@ class ArchiveToolExecutor:
         item = self.item_repository.get_any(item_id=saved.item_id)
         context = self._build_context(
             invocation=invocation,
-            item=item,
             last_action="save_file",
-            working_set=[self._item_snapshot(item, rank=1)],
         )
         return ToolExecutionResult(
             reply=saved.reply,
@@ -228,9 +218,7 @@ class ArchiveToolExecutor:
         item = self.item_repository.get_any(item_id=saved.item_id)
         context = self._build_context(
             invocation=invocation,
-            item=item,
             last_action="save_content",
-            working_set=[self._item_snapshot(item, rank=1)],
         )
         return ToolExecutionResult(
             reply=saved.reply,
@@ -272,26 +260,6 @@ class ArchiveToolExecutor:
 
     def _tool_open_topic(self, invocation: ToolInvocation) -> ToolExecutionResult:
         query = str(invocation.plan.arguments.get("query") or invocation.text or "")
-        archive_lookup = self._search_archive_assets(query=query)
-        if archive_lookup is not None and archive_lookup.count > 0:
-            reply, working_set = self._format_archive_lookup_reply(archive_lookup)
-            focus_item_id = next(
-                (str(snapshot.get("item_id") or "").strip() for snapshot in working_set if snapshot.get("item_id")),
-                None,
-            )
-            selected = self.item_repository.get_any(item_id=focus_item_id) if focus_item_id else None
-            context = self._build_context(
-                invocation=invocation,
-                item=selected,
-                last_action="open_topic",
-                working_set=working_set,
-            )
-            return ToolExecutionResult(
-                reply=reply,
-                action="retrieve",
-                item_id=focus_item_id,
-                metadata={"context": context},
-            )
         if self.topic_organizer is None:
             return ToolExecutionResult(reply="当前还没有可用的 topic/wiki 索引。", action="retrieve")
         topic_matches = self.topic_organizer.search_topics(
@@ -317,9 +285,7 @@ class ArchiveToolExecutor:
                 reply = self._format_item_reply(item=single_item, mode="full_text")
                 context = self._build_context(
                     invocation=invocation,
-                    item=single_item,
                     last_action="open_topic",
-                    working_set=[self._item_snapshot(single_item, rank=1)],
                 )
                 return ToolExecutionResult(
                     reply=reply,
@@ -329,12 +295,9 @@ class ArchiveToolExecutor:
                 )
             reply, working_set = self._format_topic_reply(topic_matches)
             focus_item_id = working_set[0]["item_id"] if working_set else None
-            selected = self.item_repository.get_any(item_id=focus_item_id) if focus_item_id else None
             context = self._build_context(
                 invocation=invocation,
-                item=selected,
                 last_action="open_topic",
-                working_set=working_set,
             )
             return ToolExecutionResult(
                 reply=reply,
@@ -350,18 +313,21 @@ class ArchiveToolExecutor:
         return ToolExecutionResult(
             reply="我没有在当前的 topic/wiki 索引里找到相关资料。请先确认这份内容已经被归档，或者让我重新整理知识库。",
             action="retrieve",
-            metadata={"context": self._build_context(invocation=invocation, item=None, last_action="open_topic", working_set=[])},
+            metadata={"context": self._build_context(invocation=invocation, last_action="open_topic")},
         )
 
     def _tool_read_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="read")
+        try:
+            item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="read")
+        except AmbiguousItemReferenceError as exc:
+            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
+        except KeyError as exc:
+            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
         mode = str(invocation.plan.arguments.get("mode") or "summary")
         reply = self._format_item_reply(item=item, mode=mode)
         context = self._build_context(
             invocation=invocation,
-            item=item,
             last_action="read_item",
-            working_set=invocation.context.get("working_set", []),
         )
         return ToolExecutionResult(
             reply=reply,
@@ -371,13 +337,16 @@ class ArchiveToolExecutor:
         )
 
     def _tool_summarize_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="summarize")
+        try:
+            item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="summarize")
+        except AmbiguousItemReferenceError as exc:
+            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
+        except KeyError as exc:
+            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
         reply = self._format_summary_reply(item=item)
         context = self._build_context(
             invocation=invocation,
-            item=item,
             last_action="summarize_item",
-            working_set=invocation.context.get("working_set", []),
         )
         return ToolExecutionResult(
             reply=reply,
@@ -386,8 +355,37 @@ class ArchiveToolExecutor:
             metadata={"context": context},
         )
 
+    def _tool_delete_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        try:
+            item = self._resolve_target_item(
+                session_id=invocation.session_id,
+                plan=invocation.plan,
+                context=invocation.context,
+                user_text=invocation.text,
+                purpose="delete",
+            )
+        except AmbiguousItemReferenceError as exc:
+            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
+        except KeyError as exc:
+            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
+        deleted = self.item_repository.soft_delete(item_id=item.id, session_id=invocation.session_id)
+        context = self._build_context(
+            invocation=invocation,
+            last_action="delete_item",
+        )
+        return ToolExecutionResult(
+            reply=f"已删除资料 `{deleted.title}`。它不会再出现在默认列表和检索结果里。",
+            action="delete",
+            item_id=deleted.id,
+            metadata={"context": context},
+        )
+
     def _tool_clarify_reference(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        candidates = invocation.context.get("working_set", [])
+        candidates = [
+            candidate
+            for candidate in (invocation.plan.arguments.get("candidates") or [])
+            if isinstance(candidate, dict)
+        ]
         labels = [snapshot.get("title", f"候选 {index + 1}") for index, snapshot in enumerate(candidates[:3])]
         question = "你想看哪一条资料？" if labels else "你想让我展开哪一条资料？"
         if labels:
@@ -400,7 +398,31 @@ class ArchiveToolExecutor:
             pending_payload={
                 "type": "reference_resolution",
                 "reference_text": invocation.plan.arguments.get("reference_text") or invocation.text or "",
-                "working_set": candidates[:5],
+                "candidates": candidates[:5],
+            },
+        )
+        return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
+
+    def _create_reference_clarification(
+        self,
+        *,
+        invocation: ToolInvocation,
+        query: str,
+        candidates: list[dict[str, Any]],
+    ) -> ToolExecutionResult:
+        labels = [candidate.get("title", f"候选 {index + 1}") for index, candidate in enumerate(candidates[:3])]
+        question = "我找到了多条可能匹配的资料，你要哪一条？"
+        if labels:
+            question += " " + "；".join(f"{index + 1}. {label}" for index, label in enumerate(labels))
+        self.clarification_repository.create(
+            session_id=invocation.session_id,
+            source_message_id=invocation.source_message_id,
+            question=question,
+            candidate_intents=["reference_resolution"],
+            pending_payload={
+                "type": "reference_resolution",
+                "reference_text": query,
+                "candidates": candidates[:5],
             },
         )
         return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
@@ -451,9 +473,7 @@ class ArchiveToolExecutor:
                 reply = f"Here is a quick summary of the earlier content: {self.ingestion_service.preview_summary(pending_text)}"
                 context = self._build_context(
                     invocation=invocation,
-                    item=None,
                     last_action="summarize_item",
-                    working_set=invocation.context.get("working_set", []),
                 )
                 return ToolExecutionResult(reply=reply, action="organize", metadata={"context": context})
             if resolution == "save":
@@ -469,9 +489,7 @@ class ArchiveToolExecutor:
                 item = self.item_repository.get_any(item_id=saved_item.item_id)
                 context = self._build_context(
                     invocation=invocation,
-                    item=item,
                     last_action="save_content",
-                    working_set=[self._item_snapshot(item, rank=1)],
                 )
                 reply = f"{saved_item.reply} I used your clarification to save the earlier content."
                 return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
@@ -488,9 +506,7 @@ class ArchiveToolExecutor:
             reply = self._format_item_reply(item=item, mode=mode)
             context = self._build_context(
                 invocation=invocation,
-                item=item,
                 last_action="read_item",
-                working_set=pending_payload.get("working_set") or invocation.context.get("working_set", []),
             )
             return ToolExecutionResult(reply=reply, action="retrieve", item_id=item.id, metadata={"context": context})
 
@@ -506,6 +522,14 @@ class ArchiveToolExecutor:
         target.write_bytes(data)
         return {"upload_path": str(target), "upload_filename": filename}
 
+    async def persist_pending_upload_entry(self, *, upload: UploadFile, source_event_id: str | None) -> dict[str, str | None]:
+        persisted = await self._persist_pending_upload(upload=upload)
+        return {
+            "upload_path": persisted["upload_path"],
+            "upload_filename": persisted["upload_filename"],
+            "source_event_id": source_event_id,
+        }
+
     def _build_upload_clarification_question(self, *, upload: UploadFile) -> str:
         media_kind = self._detect_media_kind(upload=upload)
         if media_kind == "image":
@@ -520,18 +544,56 @@ class ArchiveToolExecutor:
         pending_payload: dict[str, Any],
         note: str,
     ) -> ToolExecutionResult:
-        upload_path = str(pending_payload.get("upload_path") or "").strip()
-        upload_filename = str(pending_payload.get("upload_filename") or "").strip()
-        if upload_path and upload_filename:
-            saved_item = await self.ingestion_service.ingest_saved_upload(
-                session_id=invocation.session_id,
-                source_message_id=pending.source_message_id,
-                source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
-                file_path=Path(upload_path),
-                filename=upload_filename,
-                user_note=note,
-            )
-            reply = saved_item.reply
+        upload_entries = pending_payload.get("upload_entries")
+        normalized_entries: list[dict[str, str | None]] = []
+        if isinstance(upload_entries, list):
+            for entry in upload_entries:
+                if not isinstance(entry, dict):
+                    continue
+                upload_path = str(entry.get("upload_path") or "").strip()
+                upload_filename = str(entry.get("upload_filename") or "").strip()
+                if not upload_path or not upload_filename:
+                    continue
+                normalized_entries.append(
+                    {
+                        "upload_path": upload_path,
+                        "upload_filename": upload_filename,
+                        "source_event_id": str(entry.get("source_event_id") or "").strip() or None,
+                    }
+                )
+        if not normalized_entries:
+            upload_path = str(pending_payload.get("upload_path") or "").strip()
+            upload_filename = str(pending_payload.get("upload_filename") or "").strip()
+            if upload_path and upload_filename:
+                normalized_entries.append(
+                    {
+                        "upload_path": upload_path,
+                        "upload_filename": upload_filename,
+                        "source_event_id": str(pending_payload.get("source_event_id") or "").strip() or None,
+                    }
+                )
+
+        if normalized_entries:
+            saved_items = []
+            entry_note = note if note.strip() else ""
+            for entry in normalized_entries:
+                saved_items.append(
+                    await self.ingestion_service.ingest_saved_upload(
+                        session_id=invocation.session_id,
+                        source_message_id=pending.source_message_id,
+                        source_event_id=entry.get("source_event_id")
+                        or str(invocation.context.get("current_source_event_id") or "").strip()
+                        or None,
+                        file_path=Path(str(entry["upload_path"])),
+                        filename=str(entry["upload_filename"]),
+                        user_note=entry_note,
+                    )
+                )
+            saved_item = saved_items[-1]
+            if len(saved_items) == 1:
+                reply = saved_item.reply
+            else:
+                reply = f"已按同一批次为你保存 {len(saved_items)} 个文件。最后一项：{saved_item.reply}"
         else:
             original_text = str(pending_payload.get("original_text") or "").strip()
             saved_item = await self.ingestion_service.ingest(
@@ -546,9 +608,7 @@ class ArchiveToolExecutor:
         item = self.item_repository.get_any(item_id=saved_item.item_id)
         context = self._build_context(
             invocation=invocation,
-            item=item,
-            last_action="save_file" if upload_path and upload_filename else "save_content",
-            working_set=[self._item_snapshot(item, rank=1)],
+            last_action="save_file" if normalized_entries else "save_content",
         )
         return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
 
@@ -565,43 +625,10 @@ class ArchiveToolExecutor:
                 user_text=invocation.text,
                 purpose="send_file",
             )
+        except AmbiguousItemReferenceError as exc:
+            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
         except KeyError as e:
-            title_hint = str(invocation.plan.arguments.get("target_title_hint") or "").strip()
-            if not title_hint:
-                return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e}", action="chat")
-            try:
-                item = self._resolve_item_by_title_hint(
-                    session_id=invocation.session_id,
-                    title_hint=title_hint,
-                    context=invocation.context,
-                )
-            except KeyError:
-                return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e}", action="chat")
-
-        metadata = item.metadata_json or {}
-        stored_path = metadata.get("stored_file_path")
-        if not stored_path and self.archive_runner is not None:
-            archive_record_id = str(metadata.get("archive_record_id") or "").strip()
-            archive_relative_path = str(metadata.get("archive_relative_path") or "").strip()
-            lookup = None
-            if archive_record_id:
-                lookup = self.archive_runner.find_assets(record_id=archive_record_id, limit=1)
-            elif archive_relative_path:
-                lookup = self.archive_runner.find_assets(query=archive_relative_path, limit=1)
-            if lookup and lookup.results:
-                stored_path = lookup.results[0].get("resolved_path")
-        if not stored_path:
-            return ToolExecutionResult(
-                reply=f"资料 `{item.title}` 没有可发送的原始文件路径，暂时无法回传给你。",
-                action="chat",
-            )
-
-        path = Path(stored_path)
-        if not path.exists():
-            return ToolExecutionResult(
-                reply=f"资料 `{item.title}` 对应的文件已经找不到了，暂时无法发送。",
-                action="chat",
-            )
+            return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e.args[0]}", action="clarify", needs_clarification=True)
 
         caption = str(invocation.plan.arguments.get("caption") or "").strip()
         if self.session_map_repository is None:
@@ -617,57 +644,96 @@ class ArchiveToolExecutor:
                 action="chat",
             )
 
-        try:
-            result = await self.gateway_service.send_file_to_user(
-                user_id=user_id,
-                file_path=str(path),
-                caption=caption or f"这是你要的图片：{item.title}",
+        delivery_targets = self._resolve_delivery_targets(
+            session_id=invocation.session_id,
+            item=item,
+            user_text=invocation.text,
+        )
+        if not delivery_targets:
+            return ToolExecutionResult(
+                reply=f"资料 `{item.title}` 没有可发送的原始文件路径，暂时无法回传给你。",
+                action="chat",
             )
-            if result.get("ret") in (0, None) and result.get("errcode") in (0, None):
-                context = self._build_context(
-                    invocation=invocation,
-                    item=item,
-                    last_action="send_file_to_user",
-                    working_set=invocation.context.get("working_set", []),
+
+        try:
+            sent_count = 0
+            for index, target in enumerate(delivery_targets):
+                path = target["path"]
+                send_caption = caption if index == 0 else ""
+                result = await self.gateway_service.send_file_to_user(
+                    user_id=user_id,
+                    file_path=str(path),
+                    caption=send_caption,
                 )
+                if result.get("ret") not in (0, None) or result.get("errcode") not in (0, None):
+                    error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
+                    if sent_count > 0:
+                        return ToolExecutionResult(reply=f"前 {sent_count} 个文件已发送，但后续发送失败：{error_msg}", action="chat")
+                    return ToolExecutionResult(reply=f"发送文件失败：{error_msg}", action="chat")
+                sent_count += 1
+            context_item = delivery_targets[0].get("item") or item
+            context = self._build_context(
+                invocation=invocation,
+                last_action="send_file_to_user",
+            )
+            if len(delivery_targets) == 1:
                 return ToolExecutionResult(
-                    reply=f"已经把 `{item.title}` 发给你了，请查收。",
+                    reply=f"已经把 `{delivery_targets[0]['display_title']}` 发给你了，请查收。",
                     action="retrieve",
-                    item_id=item.id,
+                    item_id=context_item.id,
                     metadata={"context": context},
-                )
-            error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
-            return ToolExecutionResult(reply=f"发送文件失败：{error_msg}", action="chat")
+            )
+            return ToolExecutionResult(
+                reply=f"已经把与 `{item.title}` 相关的 {len(delivery_targets)} 个文件发给你了，请查收。",
+                action="retrieve",
+                item_id=context_item.id,
+                metadata={"context": context},
+            )
         except Exception as exc:
             logger.exception("Failed to send file to user")
             return ToolExecutionResult(reply=f"发送文件失败：{exc}", action="chat")
 
+    def _resolve_delivery_targets(
+        self,
+        *,
+        session_id: str,
+        item: ItemRecord,
+        user_text: str | None,
+        limit: int = 9,
+    ) -> list[dict[str, Any]]:
+        direct_target = self._resolve_direct_delivery_target(item=item)
+        return [direct_target] if direct_target is not None else []
+
+    def _resolve_direct_delivery_target(self, *, item: ItemRecord) -> dict[str, Any] | None:
+        metadata = item.metadata_json or {}
+        stored_path = str(metadata.get("stored_file_path") or "").strip()
+        if not stored_path:
+            return None
+        path = Path(stored_path)
+        if not path.exists():
+            return None
+        return {"path": path, "item": item, "display_title": item.title}
+
     def _resolve_pending_selected_item(self, *, invocation: ToolInvocation, pending_payload: dict[str, Any]) -> ItemRecord | None:
+        candidates = [
+            candidate
+            for candidate in (pending_payload.get("candidates") or [])
+            if isinstance(candidate, dict)
+        ]
         target = invocation.plan.arguments.get("target")
         if isinstance(target, dict):
             target_type = str(target.get("type") or "").strip()
             target_value = target.get("value")
             if target_type == "item_id" and target_value:
                 return self.item_repository.get_any(item_id=str(target_value))
-            if target_type == "working_set_rank":
-                working_set = pending_payload.get("working_set") or []
-                try:
-                    rank = int(target_value or 0)
-                except (TypeError, ValueError):
-                    rank = 0
-                if 1 <= rank <= len(working_set):
-                    item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
-                    if item_id:
-                        return self.item_repository.get_any(item_id=item_id)
         content = (invocation.text or "").strip()
-        working_set = pending_payload.get("working_set") or []
         rank = self._extract_rank_from_text(content)
-        if rank is not None and 1 <= rank <= len(working_set):
-            item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
+        if rank is not None and 1 <= rank <= len(candidates):
+            item_id = str((candidates[rank - 1] or {}).get("item_id") or "").strip()
             if item_id:
                 return self.item_repository.get_any(item_id=item_id)
         lowered = content.lower()
-        for snapshot in working_set:
+        for snapshot in candidates:
             title = str(snapshot.get("title") or "")
             item_id = str(snapshot.get("item_id") or "").strip()
             if title and item_id and (title in content or title.lower() in lowered):
@@ -688,111 +754,114 @@ class ArchiveToolExecutor:
         target_value = target.get("value")
         if target_type == "item_id":
             return self.item_repository.get_any(item_id=str(target_value))
-        if target_type == "working_set_rank":
-            working_set = context.get("working_set") or []
-            rank = int(target_value or 1)
-            if 1 <= rank <= len(working_set):
-                item_id = str((working_set[rank - 1] or {}).get("item_id") or "").strip()
-                if item_id:
-                    return self.item_repository.get_any(item_id=item_id)
-            raise KeyError(f"Working-set item not found for rank {rank}")
-        if target_type == "recent_item":
-            recent_items = context.get("recent_items") or []
-            rank = int(target_value or 1)
-            if 1 <= rank <= len(recent_items):
-                item_id = str((recent_items[rank - 1] or {}).get("item_id") or "").strip()
-                if item_id:
-                    return self.item_repository.get_any(item_id=item_id)
-            raise KeyError(f"Recent item not found for rank {rank}")
-        if target_type == "focus_item":
-            target_type = "auto"
         title_hint = str(plan.arguments.get("target_title_hint") or "").strip()
         return self._resolve_candidate_item(
             session_id=session_id,
-            context=context,
             user_text=user_text,
             title_hint=title_hint,
             purpose=purpose,
         )
 
-    def _resolve_item_by_title_hint(self, *, session_id: str, title_hint: str, context: dict[str, Any]) -> ItemRecord:
-        normalized_hint = title_hint.strip().lower()
-        if not normalized_hint:
-            raise KeyError("Empty title hint.")
-
-        working_set = context.get("working_set") or []
-        for snapshot in working_set:
-            title = str(snapshot.get("title") or "").strip()
-            if title and normalized_hint in title.lower():
-                item_id = str(snapshot.get("item_id") or "").strip()
-                if item_id:
-                    return self.item_repository.get_any(item_id=item_id)
-
-        for snapshot in context.get("recent_items") or []:
-            title = str(snapshot.get("title") or "").strip()
-            item_id = str(snapshot.get("item_id") or "").strip()
-            if title and item_id and normalized_hint in title.lower():
-                return self.item_repository.get_any(item_id=item_id)
-
-        primary_focus = context.get("primary_focus") or {}
-        primary_focus_id = str(primary_focus.get("item_id") or "").strip()
-        primary_focus_title = str(primary_focus.get("title") or "").strip()
-        if primary_focus_id and primary_focus_title and normalized_hint in primary_focus_title.lower():
-            return self.item_repository.get_any(item_id=primary_focus_id)
-
-        item = self.item_repository.search_latest_by_text(session_id=session_id, query=title_hint)
-        if item is None:
-            raise KeyError(f"No item matched title hint: {title_hint}")
-        return item
-
     def _resolve_candidate_item(
         self,
         *,
         session_id: str,
-        context: dict[str, Any],
         user_text: str | None,
         title_hint: str,
         purpose: str,
     ) -> ItemRecord:
-        query = " ".join(part.strip() for part in [title_hint, user_text or ""] if part and part.strip())
-        candidates: list[tuple[ItemRecord, int]] = []
-        seen: set[str] = set()
+        query = self._build_reference_query(user_text=user_text, title_hint=title_hint)
+        if not query:
+            raise KeyError("请告诉我要操作的文件名或更具体的描述。")
         preferred_types = self._preferred_item_types(user_text=user_text, purpose=purpose)
-
-        def add_candidate(item: ItemRecord, *, score: int) -> None:
-            if item.id in seen:
-                return
-            seen.add(item.id)
-            candidates.append((item, score + self._candidate_match_score(item=item, query=query, preferred_types=preferred_types)))
-
-        for snapshot in context.get("working_set") or []:
-            item_id = str((snapshot or {}).get("item_id") or "").strip()
-            if item_id:
-                add_candidate(self.item_repository.get_any(item_id=item_id), score=70)
-
-        for snapshot in context.get("recent_items") or []:
-            item_id = str((snapshot or {}).get("item_id") or "").strip()
-            if item_id:
-                add_candidate(self.item_repository.get_any(item_id=item_id), score=50)
-
-        primary_focus = context.get("primary_focus") or {}
-        primary_focus_id = str(primary_focus.get("item_id") or "").strip()
-        if primary_focus_id:
-            add_candidate(self.item_repository.get_any(item_id=primary_focus_id), score=20)
-
-        if query.strip():
-            searched = self.item_repository.search_latest_by_text(session_id=session_id, query=query.strip())
-            if searched is not None:
-                add_candidate(searched, score=40)
-
+        candidates = self._find_candidate_items(
+            session_id=session_id,
+            query=query,
+            preferred_types=preferred_types,
+            limit=5,
+        )
         if not candidates:
-            raise KeyError("No candidate item is available for this follow-up.")
-
-        candidates.sort(key=lambda pair: pair[1], reverse=True)
+            raise KeyError("我没有找到匹配的资料，请换个文件名或描述试试。")
         top_item, top_score = candidates[0]
         if top_score < 30:
-            raise KeyError("Could not confidently resolve the requested item.")
+            raise KeyError("我没法可靠定位到这份资料，请说得更具体一些。")
+        if len(candidates) > 1:
+            second_score = candidates[1][1]
+            if second_score >= max(30, top_score - 10):
+                raise AmbiguousItemReferenceError(
+                    query=query,
+                    candidates=[
+                        {"item_id": item.id, "title": item.title, "summary": item.summary}
+                        for item, _score in candidates[:3]
+                    ],
+                )
         return top_item
+
+    @staticmethod
+    def _build_reference_query(*, user_text: str | None, title_hint: str) -> str:
+        if title_hint.strip():
+            return title_hint.strip()
+        text = (user_text or "").strip()
+        if not text:
+            return ""
+        cleaned = text
+        for phrase in [
+            "帮我找一下",
+            "帮我找",
+            "帮我查一下",
+            "帮我查",
+            "请帮我",
+            "把",
+            "发给我",
+            "发送给我",
+            "给我看",
+            "给我发",
+            "打开",
+            "查看",
+            "看看",
+            "读取",
+            "删除",
+            "删掉",
+            "移除",
+            "总结",
+            "概括",
+        ]:
+            cleaned = cleaned.replace(phrase, " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，。！？,.")
+        generic_only = {
+            "",
+            "这个",
+            "那个",
+            "它",
+            "这份",
+            "那份",
+            "这个文件",
+            "那个文件",
+            "这里面",
+            "这里面写了什么",
+            "上一个",
+            "上一条",
+            "刚才那个",
+        }
+        if cleaned in generic_only:
+            return ""
+        return cleaned
+
+    def _find_candidate_items(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        preferred_types: set[str],
+        limit: int,
+    ) -> list[tuple[ItemRecord, int]]:
+        scored: list[tuple[ItemRecord, int]] = []
+        for item in self.item_repository.list_by_session(session_id=session_id, current_only=True):
+            score = self._candidate_match_score(item=item, query=query, preferred_types=preferred_types)
+            if score > 0:
+                scored.append((item, score))
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:limit]
 
     @staticmethod
     def _preferred_item_types(*, user_text: str | None, purpose: str) -> set[str]:
@@ -868,7 +937,7 @@ class ArchiveToolExecutor:
                 lines.append(f"{rank}. {item.title} - {item.summary}")
                 working_set.append(self._item_snapshot(item, rank=rank))
                 rank += 1
-        lines.append("你可以继续说“第一个给我全文”或者直接说文件名。")
+        lines.append("如果你想继续查看其中一条，请直接说文件名。")
         return "\n".join(lines), working_set
 
     def _single_short_item_from_topic_matches(self, topic_matches: list[tuple[object, list[ItemRecord]]]) -> ItemRecord | None:
@@ -932,10 +1001,12 @@ class ArchiveToolExecutor:
             working_set.append(snapshot)
         return "\n".join(lines), working_set
 
-    def _resolve_archive_result_to_item(self, result: dict[str, Any]) -> ItemRecord | None:
+    def _resolve_archive_result_to_item(self, result: dict[str, Any], session_id: str | None = None) -> ItemRecord | None:
         record_id = str(result.get("id") or "").strip()
         resolved_path = str(result.get("resolved_path") or "").strip()
         for item in self.item_repository.list_all(current_only=True):
+            if session_id is not None and item.session_id != session_id:
+                continue
             metadata = item.metadata_json or {}
             if record_id and str(metadata.get("archive_record_id") or "").strip() == record_id:
                 return item

@@ -65,7 +65,6 @@ class AgentPlanner:
         if self.model_client is None or not content:
             return None
         allowed_tools = ", ".join(resolve_toolsets(self.DEFAULT_TOOLSETS))
-        working_set = context.get("working_set", [])[:5]
         prompt = (
             "You are choosing one tool for an archive assistant.\n"
             f"Allowed tools: {allowed_tools}.\n"
@@ -73,40 +72,30 @@ class AgentPlanner:
             "Decision policy:\n"
             "- If the user asks what exists in the archive, use archive with action=overview or action=list_topics.\n"
             "- If the user asks to find or open earlier material, prefer archive with action=open.\n"
-            "- If the user refers to earlier results using ordinal cues, title fragments, or phrases like this/that/previous, treat that as a reference to the current working_set or recent_items rather than a new search.\n"
             "- If the user asks to read, open, inspect, or see the full content, prefer archive with action=read.\n"
             "- If the user asks to summarize, outline, or extract key points, prefer archive with action=summarize.\n"
+            "- If the user asks to delete, remove, erase, or no longer keep previously saved material, prefer archive with action=delete.\n"
             "- If the user asks you to send, forward, deliver, or let them receive a previously saved file, prefer archive with action=deliver.\n"
-            "- If a ranked reference and a title hint both appear, treat that as a high-confidence reference and do not ask for clarification.\n"
+            "- Only target a saved file directly when the current utterance names it or uniquely describes it.\n"
+            "- If the user does not identify the target clearly enough for a safe action, use archive_state with action=clarify_reference.\n"
             "- If the user submits new standalone text or a standalone URL, prefer archive with action=save.\n"
             "- Otherwise, new material should usually be saved with archive action=save.\n"
-            "- Use archive_state with action=clarify_reference only when the target truly cannot be resolved from the current working_set or recent_items.\n"
             "- Do not invent item IDs.\n"
-            "- Return strict JSON with keys: tool, reason, and optionally action, query, text, target_rank, target_title_hint, reference_strategy, mode, style, reference_text, caption.\n"
-            "- Valid reference_strategy values are: working_set_selection, recent_item, direct_item_id, ambiguous_reference, auto.\n"
+            "- Return strict JSON with keys: tool, reason, and optionally action, query, text, target_title_hint, reference_strategy, mode, style, reference_text, caption.\n"
+            "- Valid reference_strategy values are: direct_item_id, ambiguous_reference, auto.\n"
         )
         state_json = json.dumps(
             {
                 "has_upload": has_upload,
                 "coarse_intent": coarse_intent,
-                "primary_focus": context.get("primary_focus"),
                 "last_action": context.get("last_action"),
-                "working_set": [
+                "recent_events": [
                     {
-                        "rank": snapshot.get("rank"),
-                        "item_id": snapshot.get("item_id"),
-                        "title": snapshot.get("title"),
-                        "summary": snapshot.get("summary"),
+                        "event_type": snapshot.get("event_type"),
+                        "raw_text": snapshot.get("raw_text"),
+                        "original_file_name": snapshot.get("original_file_name"),
                     }
-                    for snapshot in working_set
-                ],
-                "recent_items": [
-                    {
-                        "item_id": snapshot.get("item_id"),
-                        "title": snapshot.get("title"),
-                        "summary": snapshot.get("summary"),
-                    }
-                    for snapshot in (context.get("recent_items") or [])[:5]
+                    for snapshot in (context.get("recent_events") or [])[:5]
                     if isinstance(snapshot, dict)
                 ],
             },
@@ -161,16 +150,12 @@ class AgentPlanner:
                 query = str(payload.get("query") or arguments.get("query") or content).strip()
                 top_k = payload.get("top_k") or arguments.get("top_k") or 3
                 return {"action": "open", "query": query, "top_k": top_k}
-            if action in {"read", "summarize", "deliver"}:
+            if action in {"read", "summarize", "deliver", "delete"}:
                 target = arguments.get("target")
                 if not isinstance(target, dict):
                     reference_strategy = str(payload.get("reference_strategy") or "").strip()
-                    if reference_strategy == "recent_item":
-                        target = {"type": "recent_item", "value": 1}
-                    elif reference_strategy == "direct_item_id":
+                    if reference_strategy == "direct_item_id":
                         target = {"type": "item_id", "value": str(payload.get("target_item_id") or "").strip()}
-                    elif payload.get("target_rank") is not None:
-                        target = {"type": "working_set_rank", "value": payload.get("target_rank")}
                     else:
                         target = {"type": "auto", "value": ""}
                 built: dict[str, Any] = {"action": action, "target": target}
@@ -232,16 +217,13 @@ class AgentPlanner:
                 top_k = int(plan.arguments.get("top_k") or 3)
                 top_k = max(1, min(5, top_k))
                 return ToolPlan(tool="archive", arguments={"action": "open", "query": query, "top_k": top_k}, reason=plan.reason, source=plan.source)
-            if action in {"read", "summarize", "deliver"}:
+            if action in {"read", "summarize", "deliver", "delete"}:
                 target = plan.arguments.get("target")
                 if not isinstance(target, dict):
                     raise ValueError(f"Planner selected archive.{action} without a target object.")
                 target_type = str(target.get("type") or "").strip()
                 target_value = target.get("value")
-                if target_type == "focus_item":
-                    target_type = "recent_item"
-                    target_value = 1
-                if target_type not in {"item_id", "working_set_rank", "recent_item", "auto"}:
+                if target_type not in {"item_id", "auto"}:
                     raise ValueError(f"Planner selected archive.{action} with invalid target type: {target_type}")
                 args: dict[str, Any] = {"action": action, "target": {"type": target_type, "value": target_value}}
                 title_hint = str(plan.arguments.get("target_title_hint") or "").strip()
@@ -257,7 +239,7 @@ class AgentPlanner:
                     if style not in {"brief", "structured", "interview_notes"}:
                         style = "brief"
                     args["style"] = style
-                else:
+                elif action == "deliver":
                     caption = str(plan.arguments.get("caption") or "").strip()
                     if caption:
                         args["caption"] = caption

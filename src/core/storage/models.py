@@ -86,6 +86,7 @@ class ItemRecord(Base):
     document_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     version: Mapped[int] = mapped_column(default=1)
     is_current: Mapped[int] = mapped_column(default=1, index=True)
+    is_deleted: Mapped[int] = mapped_column(default=0, index=True)
     superseded_by_item_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

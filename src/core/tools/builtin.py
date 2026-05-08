@@ -17,7 +17,7 @@ def register_builtin_tools() -> None:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["save", "overview", "list_topics", "open", "read", "summarize", "deliver"],
+                        "enum": ["save", "overview", "list_topics", "open", "read", "summarize", "deliver", "delete"],
                     },
                     "text": {"type": "string"},
                     "query": {"type": "string"},
@@ -27,7 +27,7 @@ def register_builtin_tools() -> None:
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["item_id", "working_set_rank", "recent_item", "auto"],
+                                "enum": ["item_id", "auto"],
                             },
                             "value": {},
                         },
@@ -75,7 +75,7 @@ def register_builtin_tools() -> None:
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["item_id", "working_set_rank", "recent_item", "auto"],
+                                "enum": ["item_id", "auto"],
                             },
                             "value": {},
                         },
