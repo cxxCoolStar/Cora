@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -46,8 +45,7 @@ from core.storage.repositories import (
     TopicRepository,
     UserSignalRepository,
 )
-from core.tools import register_builtin_tools, registry
-from core.tools.toolsets import resolve_toolsets
+from core.tools import ToolManager
 from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
@@ -128,6 +126,8 @@ class ClawBotService:
         topic_organizer: TopicOrganizerService | None = None,
         context_budget_manager: ContextBudgetManager | None = None,
         user_memory_path: Path | None = None,
+        file_tool_root: Path | None = None,
+        tool_manager: ToolManager | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -140,16 +140,18 @@ class ClawBotService:
         self.topic_repository = topic_repository
         self.model_client = model_client
         self.user_memory_path = user_memory_path or Path("user-memory/USER.md")
+        self.file_tool_root = file_tool_root or Path(".")
+        self.tool_manager = tool_manager or ToolManager()
         self.tool_executor = tool_executor or ArchiveToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
             user_memory_path=self.user_memory_path,
+            file_tool_root=self.file_tool_root,
         )
         self.topic_organizer = topic_organizer
         self.user_profile_aggregator = UserProfileAggregator()
         self.skill_loader = SkillLoader()
-        register_builtin_tools()
         self._tool_specs = self._build_tool_specs()
         self._agent_executor = _ArchiveAgentExecutor(
             tool_executor=self.tool_executor,
@@ -177,26 +179,21 @@ class ClawBotService:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state", "user_memory"]
+        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state", "user_memory", "file"]
         if self.tool_executor.can_send_files_to_user():
             toolsets.append("archive_delivery")
-        tool_names = resolve_toolsets(toolsets)
-        specs = []
-        for registered in registry.get_many(tool_names):
-            input_schema = deepcopy(registered.schema)
-            if registered.name == "archive" and not self.tool_executor.can_send_files_to_user():
-                action_schema = ((input_schema.get("properties") or {}).get("action") or {})
-                allowed_actions = action_schema.get("enum")
-                if isinstance(allowed_actions, list):
-                    action_schema["enum"] = [value for value in allowed_actions if value != "deliver"]
-            specs.append(
-                ModelToolSpec(
-                    name=registered.name,
-                    description=registered.description,
-                    input_schema=input_schema,
-                )
-            )
-        return specs
+        return self.tool_manager.build_model_tool_specs(
+            toolsets=toolsets,
+            schema_transformer=self._transform_tool_schema,
+        )
+
+    def _transform_tool_schema(self, registered: object, input_schema: dict[str, Any]) -> dict[str, Any]:
+        if getattr(registered, "name", "") == "archive" and not self.tool_executor.can_send_files_to_user():
+            action_schema = ((input_schema.get("properties") or {}).get("action") or {})
+            allowed_actions = action_schema.get("enum")
+            if isinstance(allowed_actions, list):
+                action_schema["enum"] = [value for value in allowed_actions if value != "deliver"]
+        return input_schema
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()

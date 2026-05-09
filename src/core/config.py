@@ -12,6 +12,7 @@ class CoreSettings(BaseSettings):
     files_storage_dir: Path = Field(default=Path(".cora/files"))
     archive_root_dir: Path = Field(default=Path(".cora/archive"))
     user_memory_path: Path = Field(default=Path("user-memory/USER.md"))
+    file_tool_root: Path = Field(default=Path("."))
     model_provider: str = "dev"
     model: str | None = None
     openai_api_key: str | None = None

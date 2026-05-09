@@ -29,6 +29,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Read and maintain the user's long-term personal memory file.",
         "tools": ["user_memory"],
     },
+    "file": {
+        "description": "Inspect the local workspace through read-only file listing, search, and file reading tools.",
+        "tools": ["list_files", "search_files", "read_file"],
+    },
 }
 
 TOOLSET_ALIASES: dict[str, str] = {
@@ -39,6 +43,7 @@ TOOLSET_ALIASES: dict[str, str] = {
     "agent_state": "archive_state",
     "wiki_maintenance": "archive_maintenance",
     "memory": "user_memory",
+    "files": "file",
 }
 
 

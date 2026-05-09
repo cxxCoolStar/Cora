@@ -18,7 +18,8 @@ DEFAULT_AGENT_IDENTITY = (
 
 EXECUTION_GUIDANCE = (
     "You are a tool-using assistant. Take action through available tools when they improve correctness, retrieval, or state management. "
-    "Do not pretend a tool action happened if it did not. If the user asks about current saved state, inspect the relevant tool-backed state instead of guessing."
+    "Do not pretend a tool action happened if it did not. If the user asks about current saved state, inspect the relevant tool-backed state instead of guessing. "
+    "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details."
 )
 
 MEMORY_GUIDANCE = (

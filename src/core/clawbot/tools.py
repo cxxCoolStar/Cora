@@ -19,6 +19,7 @@ from core.storage.repositories import (
     ClarificationRepository,
     ItemRepository,
 )
+from core.tools.file_tools import FileToolStore
 from core.tools import ToolInvocation, register_builtin_tools, registry
 from core.topics.service import TopicOrganizerService
 from core.user_memory import UserMemoryStore
@@ -56,6 +57,7 @@ class ArchiveToolExecutor:
         session_map_repository: ChannelSessionMapRepository | None = None,
         channel_name: str = "wechat",
         user_memory_path: Path | None = None,
+        file_tool_root: Path | None = None,
     ) -> None:
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
@@ -66,6 +68,7 @@ class ArchiveToolExecutor:
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
         self.user_memory_store = UserMemoryStore(user_memory_path or Path("user-memory/USER.md"))
+        self.file_tool_store = FileToolStore(file_tool_root or Path("."))
         register_builtin_tools()
 
     def can_send_files_to_user(self) -> bool:
@@ -183,6 +186,47 @@ class ArchiveToolExecutor:
         except ValueError as exc:
             return ToolExecutionResult(reply=str(exc), action="memory")
         return ToolExecutionResult(reply="我暂时还不能处理这个 user_memory 动作。", action="memory")
+
+    def _tool_list_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        try:
+            reply = self.file_tool_store.list_files(
+                path=str(invocation.plan.arguments.get("path") or "."),
+                recursive=bool(invocation.plan.arguments.get("recursive") or False),
+                max_results=int(invocation.plan.arguments.get("max_results") or 50),
+                include_hidden=bool(invocation.plan.arguments.get("include_hidden") or False),
+            )
+        except ValueError as exc:
+            return ToolExecutionResult(reply=str(exc), action="inspect")
+        return ToolExecutionResult(reply=reply, action="inspect")
+
+    def _tool_search_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        try:
+            reply = self.file_tool_store.search_files(
+                query=str(invocation.plan.arguments.get("query") or ""),
+                path=str(invocation.plan.arguments.get("path") or "."),
+                file_pattern=str(invocation.plan.arguments.get("file_pattern") or "").strip() or None,
+                case_sensitive=bool(invocation.plan.arguments.get("case_sensitive") or False),
+                max_results=int(invocation.plan.arguments.get("max_results") or 20),
+                include_hidden=bool(invocation.plan.arguments.get("include_hidden") or False),
+            )
+        except ValueError as exc:
+            return ToolExecutionResult(reply=str(exc), action="inspect")
+        return ToolExecutionResult(reply=reply, action="inspect")
+
+    def _tool_read_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        try:
+            reply = self.file_tool_store.read_file(
+                path=str(invocation.plan.arguments.get("path") or ""),
+                start_line=int(invocation.plan.arguments.get("start_line") or 1),
+                end_line=(
+                    int(invocation.plan.arguments["end_line"])
+                    if invocation.plan.arguments.get("end_line") is not None
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            return ToolExecutionResult(reply=str(exc), action="inspect")
+        return ToolExecutionResult(reply=reply, action="inspect")
 
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if invocation.upload is None:
@@ -1075,3 +1119,6 @@ class ArchiveToolExecutor:
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
             return "image"
         return "file"
+
+
+RuntimeToolExecutor = ArchiveToolExecutor

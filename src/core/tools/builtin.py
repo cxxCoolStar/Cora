@@ -117,3 +117,66 @@ def register_builtin_tools() -> None:
                 is_agent_stateful=True,
             )
         )
+    if registry.get("list_files") is None:
+        registry.register(
+            ToolSpec(
+                name="list_files",
+                toolset="file",
+                description="List files and directories under the local workspace. Use this before reading code when you need to orient yourself in the repository.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "recursive": {"type": "boolean"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                        "include_hidden": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_list_files(invocation),
+                read_only=True,
+            )
+        )
+    if registry.get("search_files") is None:
+        registry.register(
+            ToolSpec(
+                name="search_files",
+                toolset="file",
+                description="Search file names and text content inside the local workspace. Prefer this before answering questions about where code lives.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "path": {"type": "string"},
+                        "file_pattern": {"type": "string"},
+                        "case_sensitive": {"type": "boolean"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
+                        "include_hidden": {"type": "boolean"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_search_files(invocation),
+                read_only=True,
+            )
+        )
+    if registry.get("read_file") is None:
+        registry.register(
+            ToolSpec(
+                name="read_file",
+                toolset="file",
+                description="Read a text file from the local workspace, optionally by line range. Use this to inspect code or configuration instead of guessing.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_read_file(invocation),
+                read_only=True,
+            )
+        )
