@@ -127,6 +127,7 @@ class ClawBotService:
         tool_executor: ArchiveToolExecutor | None = None,
         topic_organizer: TopicOrganizerService | None = None,
         context_budget_manager: ContextBudgetManager | None = None,
+        user_memory_path: Path | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -138,10 +139,12 @@ class ClawBotService:
         self.user_signal_repository = user_signal_repository
         self.topic_repository = topic_repository
         self.model_client = model_client
+        self.user_memory_path = user_memory_path or Path("user-memory/USER.md")
         self.tool_executor = tool_executor or ArchiveToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
+            user_memory_path=self.user_memory_path,
         )
         self.topic_organizer = topic_organizer
         self.user_profile_aggregator = UserProfileAggregator()
@@ -160,7 +163,7 @@ class ClawBotService:
         )
         self._agent_orchestrator = AgentOrchestrator(
             loop=self._agent_loop,
-            prompt_builder=AgentPromptBuilder(),
+            prompt_builder=AgentPromptBuilder(user_memory_path=self.user_memory_path),
             skill_loader=self.skill_loader,
         )
         self._context_manager = SessionContextManager(
@@ -174,7 +177,7 @@ class ClawBotService:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state"]
+        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state", "user_memory"]
         if self.tool_executor.can_send_files_to_user():
             toolsets.append("archive_delivery")
         tool_names = resolve_toolsets(toolsets)

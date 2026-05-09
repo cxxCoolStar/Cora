@@ -25,6 +25,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Maintenance actions over archive indexes and topic organization.",
         "tools": [],
     },
+    "user_memory": {
+        "description": "Read and maintain the user's long-term personal memory file.",
+        "tools": ["user_memory"],
+    },
 }
 
 TOOLSET_ALIASES: dict[str, str] = {
@@ -34,6 +38,7 @@ TOOLSET_ALIASES: dict[str, str] = {
     "channel_delivery": "archive_delivery",
     "agent_state": "archive_state",
     "wiki_maintenance": "archive_maintenance",
+    "memory": "user_memory",
 }
 
 

@@ -64,9 +64,51 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     )
 
     assert messages[0].role == "system"
+    assert "Execution guidance:" in messages[0].content
+    assert "Memory guidance:" in messages[0].content
+    assert "Skills guidance:" in messages[0].content
     assert "Runtime state:" in messages[0].content
     assert "archive-core" in messages[0].content
     assert messages[-1].content == "save this photo"
+
+
+def test_prompt_builder_includes_user_memory_when_present(tmp_path: Path) -> None:
+    loader = SkillLoader()
+    skills = loader.list_skills()
+    runtime = ConversationRuntimeState(session_id="session-memory")
+    memory_path = tmp_path / "user-memory" / "USER.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text("# User Memory\n\n- 用户常买的布洛芬品牌是芬必得。", encoding="utf-8")
+    builder = AgentPromptBuilder(user_memory_path=memory_path)
+
+    messages = builder.build_messages(
+        session_id="session-memory",
+        user_text="我上次买的药叫什么？",
+        runtime=runtime,
+        skills=skills,
+        history=[],
+    )
+
+    assert "User memory:" in messages[0].content
+    assert "用户常买的布洛芬品牌是芬必得" in messages[0].content
+
+
+def test_prompt_builder_skips_empty_user_memory(tmp_path: Path) -> None:
+    runtime = ConversationRuntimeState(session_id="session-empty-memory")
+    memory_path = tmp_path / "user-memory" / "USER.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(" \n\n", encoding="utf-8")
+    builder = AgentPromptBuilder(user_memory_path=memory_path)
+
+    messages = builder.build_messages(
+        session_id="session-empty-memory",
+        user_text="hello",
+        runtime=runtime,
+        skills=[],
+        history=[],
+    )
+
+    assert "User memory:" not in messages[0].content
 
 
 @pytest.mark.anyio

@@ -132,6 +132,7 @@ def get_clawbot_container() -> ClawBotContainer:
             item_repository=item_repository,
             clarification_repository=clarification_repository,
             topic_organizer=topic_organizer,
+            user_memory_path=settings.user_memory_path,
         )
         context_budget_manager = ContextBudgetManager(
             context_length=settings.context_length,
@@ -153,6 +154,7 @@ def get_clawbot_container() -> ClawBotContainer:
             tool_executor=tool_executor,
             topic_organizer=topic_organizer,
             context_budget_manager=context_budget_manager,
+            user_memory_path=settings.user_memory_path,
         )
         _container = ClawBotContainer(
             settings=settings,

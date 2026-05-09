@@ -11,6 +11,7 @@ class CoreSettings(BaseSettings):
     clawbot_database_path: Path = Field(default=Path(".cora/clawbot.db"))
     files_storage_dir: Path = Field(default=Path(".cora/files"))
     archive_root_dir: Path = Field(default=Path(".cora/archive"))
+    user_memory_path: Path = Field(default=Path("user-memory/USER.md"))
     model_provider: str = "dev"
     model: str | None = None
     openai_api_key: str | None = None

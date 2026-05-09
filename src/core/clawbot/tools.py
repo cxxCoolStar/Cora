@@ -21,6 +21,7 @@ from core.storage.repositories import (
 )
 from core.tools import ToolInvocation, register_builtin_tools, registry
 from core.topics.service import TopicOrganizerService
+from core.user_memory import UserMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class ArchiveToolExecutor:
         gateway_service: Any | None = None,
         session_map_repository: ChannelSessionMapRepository | None = None,
         channel_name: str = "wechat",
+        user_memory_path: Path | None = None,
     ) -> None:
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
@@ -63,6 +65,7 @@ class ArchiveToolExecutor:
         self.gateway_service = gateway_service
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
+        self.user_memory_store = UserMemoryStore(user_memory_path or Path("user-memory/USER.md"))
         register_builtin_tools()
 
     def can_send_files_to_user(self) -> bool:
@@ -158,6 +161,28 @@ class ArchiveToolExecutor:
         if action == "resolve_pending":
             return await self._tool_resolve_pending(invocation)
         return ToolExecutionResult(reply="我暂时还不能处理这个 archive_state 动作。", action="chat")
+
+    def _tool_user_memory(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        action = str(invocation.plan.arguments.get("action") or "").strip()
+        try:
+            if action == "read":
+                return ToolExecutionResult(reply=self.user_memory_store.render(), action="memory")
+            if action == "add":
+                content = str(invocation.plan.arguments.get("content") or "").strip()
+                return ToolExecutionResult(reply=self.user_memory_store.add(content), action="memory")
+            if action == "replace":
+                old_text = str(invocation.plan.arguments.get("old_text") or "").strip()
+                new_content = str(invocation.plan.arguments.get("new_content") or "").strip()
+                return ToolExecutionResult(
+                    reply=self.user_memory_store.replace(old_text, new_content),
+                    action="memory",
+                )
+            if action == "remove":
+                old_text = str(invocation.plan.arguments.get("old_text") or "").strip()
+                return ToolExecutionResult(reply=self.user_memory_store.remove(old_text), action="memory")
+        except ValueError as exc:
+            return ToolExecutionResult(reply=str(exc), action="memory")
+        return ToolExecutionResult(reply="我暂时还不能处理这个 user_memory 动作。", action="memory")
 
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if invocation.upload is None:
