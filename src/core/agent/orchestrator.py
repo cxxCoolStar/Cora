@@ -15,6 +15,7 @@ class OrchestratorInput:
     user_text: str
     runtime: ConversationRuntimeState
     upload_name: str | None = None
+    delivery_available: bool = False
     history: list[Message] | None = None
 
 
@@ -39,6 +40,7 @@ class AgentOrchestrator:
             skills=skills,
             history=turn.history or [],
             upload_name=turn.upload_name,
+            delivery_available=turn.delivery_available,
         )
         return await self.loop.run(
             session_id=turn.session_id,

@@ -18,6 +18,7 @@ Use this skill when a workflow needs to:
 - append a structured archive record
 - look up a previously archived asset
 - rebuild or inspect archive metadata
+- save, search, or read content records from Cora's database through skill scripts
 
 ## Archive Layout
 
@@ -82,6 +83,15 @@ Use:
 
 - `scripts/update_index.py`
   Appends one structured archive record to the archive index.
+
+- `scripts/save_content.py`
+  Saves text content into Cora's database-backed content store.
+
+- `scripts/search_content.py`
+  Searches saved content records in Cora's database.
+
+- `scripts/read_content.py`
+  Reads one saved content record by item id or query.
 
 ## Output Contract
 

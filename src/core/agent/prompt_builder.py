@@ -19,7 +19,10 @@ DEFAULT_AGENT_IDENTITY = (
 EXECUTION_GUIDANCE = (
     "You are a tool-using assistant. Take action through available tools when they improve correctness, retrieval, or state management. "
     "Do not pretend a tool action happened if it did not. If the user asks about current saved state, inspect the relevant tool-backed state instead of guessing. "
-    "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details."
+    "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details. "
+    "When a project-specific workflow may exist, inspect relevant skills with skills_list or skill_view before improvising. "
+    "If the user asks you to send back a previously saved photo, image, attachment, or file, do not claim that delivery is unsupported when a delivery tool is available; use the archive deliver action instead. "
+    "Requests to delete saved content or manage long-term user memory must go through tools rather than plain chat replies."
 )
 
 MEMORY_GUIDANCE = (
@@ -29,9 +32,17 @@ MEMORY_GUIDANCE = (
 )
 
 SKILLS_GUIDANCE = (
-    "Shared skills describe reusable workflows and conventions. Treat them as operating guidance for how to use the current capabilities well, "
-    "especially the archive workflow."
+    "Skills are reusable workflow documents. If a skill matches or is even partially relevant, load it with skill_view and follow its instructions. "
+    "Skills may also include supporting files under references, templates, assets, or scripts, which can be loaded with skill_view(name, file_path)."
 )
+
+PLATFORM_HINTS = {
+    "wechat": (
+        "You are on WeChat. Keep replies compact and chat-friendly. "
+        "When delivery is available, you can send previously saved photos, images, and files back to the user through tools. "
+        "Do not tell the user that file sending is impossible when the archive deliver capability is available."
+    ),
+}
 
 
 class AgentPromptBuilder:
@@ -54,8 +65,14 @@ class AgentPromptBuilder:
         skills: Iterable[SkillDefinition],
         history: list[Message] | None = None,
         upload_name: str | None = None,
+        delivery_available: bool = False,
     ) -> list[Message]:
-        system_parts = self._build_system_parts(runtime=runtime, skills=skills, upload_name=upload_name)
+        system_parts = self._build_system_parts(
+            runtime=runtime,
+            skills=skills,
+            upload_name=upload_name,
+            delivery_available=delivery_available,
+        )
         messages = [Message.system(session_id=session_id, content="\n".join(system_parts))]
         if history:
             messages.extend(history)
@@ -68,6 +85,7 @@ class AgentPromptBuilder:
         runtime: ConversationRuntimeState,
         skills: Iterable[SkillDefinition],
         upload_name: str | None,
+        delivery_available: bool,
     ) -> list[str]:
         system_parts = [
             self.agent_identity,
@@ -83,28 +101,74 @@ class AgentPromptBuilder:
             "",
             "Runtime state:",
         ]
+        platform_hint = self._platform_hint(runtime=runtime, delivery_available=delivery_available)
+        if platform_hint:
+            system_parts.extend(["", "Platform hints:", platform_hint])
         system_parts.extend(f"- {line}" for line in runtime.summary_lines())
         user_memory_block = self._load_user_memory_block()
         if user_memory_block:
             system_parts.extend(["", "User memory:", user_memory_block])
-        skill_lines = self._format_skills(skills)
+        skill_lines = self._format_skills_index(skills)
         if skill_lines:
-            system_parts.extend(["", "Shared skills:"])
+            system_parts.extend(["", "Skills (mandatory):"])
             system_parts.extend(skill_lines)
         if upload_name:
             system_parts.extend(["", f"Current upload: {upload_name}"])
         system_parts.extend(["", self._format_state_block(runtime)])
         return system_parts
 
+    @staticmethod
+    def _current_channel(runtime: ConversationRuntimeState) -> str | None:
+        for event in reversed(runtime.recent_events):
+            channel = (event.channel or "").strip().lower()
+            if channel:
+                return channel
+        return None
+
+    def _platform_hint(self, *, runtime: ConversationRuntimeState, delivery_available: bool) -> str:
+        channel = self._current_channel(runtime)
+        if not channel:
+            return ""
+        hint = PLATFORM_HINTS.get(channel)
+        if not hint:
+            return ""
+        if delivery_available:
+            return hint
+        if channel == "wechat":
+            return (
+                "You are on WeChat. Keep replies compact and chat-friendly. "
+                "This session may not currently have native file-delivery wiring, so avoid promising that a saved file was sent unless a tool actually confirms it."
+            )
+        return hint
+
     def _load_user_memory_block(self) -> str:
         return self.user_memory_store.read_text()
 
     @staticmethod
-    def _format_skills(skills: Iterable[SkillDefinition]) -> list[str]:
-        lines: list[str] = []
+    def _format_skills_index(skills: Iterable[SkillDefinition]) -> list[str]:
+        grouped: dict[str, list[SkillDefinition]] = {}
         for skill in skills:
-            description = skill.description or "No description provided."
-            lines.append(f"- {skill.name}: {description}")
+            grouped.setdefault(skill.category or "general", []).append(skill)
+
+        if not grouped:
+            return []
+
+        lines = [
+            "Before replying, scan the skills below. If a skill is relevant, you must load it with skill_view(name) before relying on memory or ad-hoc reasoning.",
+            "Use skills_list if you need to re-check the available skills from a tool call. Use skill_view(name, file_path) to load supporting files when a skill points you there.",
+            "<available_skills>",
+        ]
+        for category in sorted(grouped):
+            lines.append(f"{category}:")
+            seen: set[str] = set()
+            for skill in sorted(grouped[category], key=lambda entry: entry.name):
+                if skill.name in seen:
+                    continue
+                seen.add(skill.name)
+                description = skill.description or "No description provided."
+                lines.append(f"- {skill.name}: {description}")
+        lines.append("</available_skills>")
+        lines.append("Only skip skill_view when none of these skills are genuinely relevant.")
         return lines
 
     @staticmethod

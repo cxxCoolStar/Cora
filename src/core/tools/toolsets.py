@@ -33,6 +33,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Inspect the local workspace through read-only file listing, search, and file reading tools.",
         "tools": ["list_files", "search_files", "read_file"],
     },
+    "skills": {
+        "description": "Discover local skills and load their instructions or supporting files on demand.",
+        "tools": ["skills_list", "skill_view"],
+    },
 }
 
 TOOLSET_ALIASES: dict[str, str] = {
@@ -44,6 +48,7 @@ TOOLSET_ALIASES: dict[str, str] = {
     "wiki_maintenance": "archive_maintenance",
     "memory": "user_memory",
     "files": "file",
+    "skills": "skills",
 }
 
 

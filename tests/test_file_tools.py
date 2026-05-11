@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.clawbot import RuntimeToolExecutor
 from core.clawbot.planner import ToolPlan
 from core.clawbot.service import ClawBotService
-from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation
+from core.clawbot.tools import ToolInvocation
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -70,7 +71,7 @@ def test_file_tool_store_rejects_workspace_escape(tmp_path: Path) -> None:
         raise AssertionError("Expected workspace escape to be rejected")
 
 
-def test_archive_tool_executor_file_tools(tmp_path: Path) -> None:
+def test_runtime_tool_executor_file_tools(tmp_path: Path) -> None:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
     database.create_all()
     item_repository = ItemRepository(database)
@@ -87,7 +88,7 @@ def test_archive_tool_executor_file_tools(tmp_path: Path) -> None:
         user_signal_repository=user_signal_repository,
         storage_dir=tmp_path / "files",
     )
-    executor = ArchiveToolExecutor(
+    executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         clarification_repository=clarification_repository,
@@ -108,7 +109,6 @@ def test_archive_tool_executor_file_tools(tmp_path: Path) -> None:
     assert result.action == "inspect"
     assert "src/memory.py:1" in result.reply
 
-
 def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
     database.create_all()
@@ -126,7 +126,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
         user_signal_repository=user_signal_repository,
         storage_dir=tmp_path / "files",
     )
-    tool_executor = ArchiveToolExecutor(
+    tool_executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         clarification_repository=clarification_repository,

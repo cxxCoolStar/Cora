@@ -9,7 +9,7 @@ from core.agent.context_budget import ContextBudgetManager
 from core.agent.loop import AgentLoop
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
-from core.agent.runtime_state import ConversationRuntimeState
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot
 from core.agent.skill_loader import SkillLoader
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -68,8 +68,38 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     assert "Memory guidance:" in messages[0].content
     assert "Skills guidance:" in messages[0].content
     assert "Runtime state:" in messages[0].content
+    assert "Skills (mandatory):" in messages[0].content
+    assert "must load it with skill_view(name)" in messages[0].content
     assert "archive-core" in messages[0].content
     assert messages[-1].content == "save this photo"
+
+
+def test_prompt_builder_includes_wechat_platform_hint_when_delivery_available() -> None:
+    runtime = ConversationRuntimeState(
+        session_id="session-wechat",
+        recent_events=[
+            EventSnapshot(
+                source_event_id="event-1",
+                event_type="message",
+                channel="wechat",
+                raw_text="把照片发我",
+            )
+        ],
+    )
+    builder = AgentPromptBuilder()
+
+    messages = builder.build_messages(
+        session_id="session-wechat",
+        user_text="把照片发我",
+        runtime=runtime,
+        skills=[],
+        history=[],
+        delivery_available=True,
+    )
+
+    assert "Platform hints:" in messages[0].content
+    assert "You are on WeChat." in messages[0].content
+    assert "Do not tell the user that file sending is impossible" in messages[0].content
 
 
 def test_prompt_builder_includes_user_memory_when_present(tmp_path: Path) -> None:

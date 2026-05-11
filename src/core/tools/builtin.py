@@ -180,3 +180,39 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
+    if registry.get("skills_list") is None:
+        registry.register(
+            ToolSpec(
+                name="skills_list",
+                toolset="skills",
+                description="List available local skills with short descriptions. Use this to discover reusable workflows before improvising a project-specific procedure.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_skills_list(invocation),
+                read_only=True,
+            )
+        )
+    if registry.get("skill_view") is None:
+        registry.register(
+            ToolSpec(
+                name="skill_view",
+                toolset="skills",
+                description="Load a local skill's main instructions or one supporting file from references, templates, assets, or scripts. Use this when a listed skill is relevant to the user's task.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "file_path": {"type": "string"},
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_skill_view(invocation),
+                read_only=True,
+            )
+        )

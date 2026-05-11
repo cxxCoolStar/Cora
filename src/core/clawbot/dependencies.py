@@ -8,7 +8,7 @@ from fastapi import Request
 from core.agent.context_budget import ContextBudgetManager
 from core.config import CoreSettings
 from core.clawbot.service import ClawBotService
-from core.clawbot.tools import ArchiveToolExecutor
+from core.clawbot.tools import RuntimeToolExecutor
 from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
@@ -47,7 +47,7 @@ class ClawBotContainer:
     topic_repository: TopicRepository
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
-    tool_executor: ArchiveToolExecutor
+    tool_executor: RuntimeToolExecutor
 
     def initialize(self) -> None:
         self.database.create_all()
@@ -127,7 +127,7 @@ def get_clawbot_container() -> ClawBotContainer:
         )
         ingestion_service.topic_organizer = topic_organizer
 
-        tool_executor = ArchiveToolExecutor(
+        tool_executor = RuntimeToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,

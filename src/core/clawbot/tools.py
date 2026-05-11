@@ -6,12 +6,18 @@ from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
 
 from fastapi import UploadFile
 
 from core.archivefs.service import ArchiveLookupResult, ArchiveSkillScriptRunner
+from core.clawbot.archive_domain import ArchiveDomainHandler
+from core.clawbot.archive_operation_handlers import (
+    ArchiveCaptureOperationHandler,
+    ArchiveClarificationOperationHandler,
+    ArchiveRetrieveOperationHandler,
+)
 from core.clawbot.planner import ToolPlan
+from core.clawbot.tool_domains import FileToolHandler, SkillToolHandler, UserMemoryToolHandler
 from core.ingestion.service import IngestionService
 from core.storage.models import ClarificationStateRecord, ItemRecord
 from core.storage.repositories import (
@@ -19,10 +25,8 @@ from core.storage.repositories import (
     ClarificationRepository,
     ItemRepository,
 )
-from core.tools.file_tools import FileToolStore
 from core.tools import ToolInvocation, register_builtin_tools, registry
 from core.topics.service import TopicOrganizerService
-from core.user_memory import UserMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,7 @@ class AmbiguousItemReferenceError(Exception):
     candidates: list[dict[str, Any]]
 
 
-class ArchiveToolExecutor:
+class RuntimeToolExecutor:
     FULL_TEXT_REPLY_THRESHOLD = 420
 
     def __init__(
@@ -58,6 +62,7 @@ class ArchiveToolExecutor:
         channel_name: str = "wechat",
         user_memory_path: Path | None = None,
         file_tool_root: Path | None = None,
+        skill_roots: list[Path] | None = None,
     ) -> None:
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
@@ -67,8 +72,13 @@ class ArchiveToolExecutor:
         self.gateway_service = gateway_service
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
-        self.user_memory_store = UserMemoryStore(user_memory_path or Path("user-memory/USER.md"))
-        self.file_tool_store = FileToolStore(file_tool_root or Path("."))
+        self.archive_tools = ArchiveDomainHandler(host=self)
+        self.archive_capture_ops = ArchiveCaptureOperationHandler(host=self)
+        self.archive_clarification_ops = ArchiveClarificationOperationHandler(host=self)
+        self.archive_retrieve_ops = ArchiveRetrieveOperationHandler(host=self)
+        self.user_memory_tools = UserMemoryToolHandler.from_path(user_memory_path or Path("user-memory/USER.md"))
+        self.file_tools = FileToolHandler.from_root(file_tool_root or Path("."))
+        self.skill_tools = SkillToolHandler.from_roots(skill_roots)
         register_builtin_tools()
 
     def can_send_files_to_user(self) -> bool:
@@ -134,343 +144,61 @@ class ArchiveToolExecutor:
             return ToolExecutionResult(reply="我暂时还不能处理这个请求。", action="chat")
 
     async def _tool_archive(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        action = str(invocation.plan.arguments.get("action") or "").strip()
-        if action == "save":
-            if invocation.upload is not None:
-                return await self._tool_save_file(invocation)
-            return await self._tool_save_content(invocation)
-        if action == "overview":
-            return self._tool_overview_knowledge_base(invocation)
-        if action == "list_topics":
-            return self._tool_list_topics(invocation)
-        if action == "open":
-            return self._tool_open_topic(invocation)
-        if action == "read":
-            return self._tool_read_item(invocation)
-        if action == "summarize":
-            return self._tool_summarize_item(invocation)
-        if action == "deliver":
-            return await self._tool_send_file_to_user(invocation)
-        if action == "delete":
-            return self._tool_delete_item(invocation)
-        return ToolExecutionResult(reply="我暂时还不能处理这个 archive 动作。", action="chat")
+        return await self.archive_tools.execute_archive(invocation)
 
     async def _tool_archive_state(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        action = str(invocation.plan.arguments.get("action") or "").strip()
-        if action == "clarify_reference":
-            return self._tool_clarify_reference(invocation)
-        if action == "clarify_capture_intent":
-            return self._tool_clarify_capture_intent(invocation)
-        if action == "resolve_pending":
-            return await self._tool_resolve_pending(invocation)
-        return ToolExecutionResult(reply="我暂时还不能处理这个 archive_state 动作。", action="chat")
+        return await self.archive_tools.execute_archive_state(invocation)
 
     def _tool_user_memory(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        action = str(invocation.plan.arguments.get("action") or "").strip()
-        try:
-            if action == "read":
-                return ToolExecutionResult(reply=self.user_memory_store.render(), action="memory")
-            if action == "add":
-                content = str(invocation.plan.arguments.get("content") or "").strip()
-                return ToolExecutionResult(reply=self.user_memory_store.add(content), action="memory")
-            if action == "replace":
-                old_text = str(invocation.plan.arguments.get("old_text") or "").strip()
-                new_content = str(invocation.plan.arguments.get("new_content") or "").strip()
-                return ToolExecutionResult(
-                    reply=self.user_memory_store.replace(old_text, new_content),
-                    action="memory",
-                )
-            if action == "remove":
-                old_text = str(invocation.plan.arguments.get("old_text") or "").strip()
-                return ToolExecutionResult(reply=self.user_memory_store.remove(old_text), action="memory")
-        except ValueError as exc:
-            return ToolExecutionResult(reply=str(exc), action="memory")
-        return ToolExecutionResult(reply="我暂时还不能处理这个 user_memory 动作。", action="memory")
+        result = self.user_memory_tools.execute(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_list_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            reply = self.file_tool_store.list_files(
-                path=str(invocation.plan.arguments.get("path") or "."),
-                recursive=bool(invocation.plan.arguments.get("recursive") or False),
-                max_results=int(invocation.plan.arguments.get("max_results") or 50),
-                include_hidden=bool(invocation.plan.arguments.get("include_hidden") or False),
-            )
-        except ValueError as exc:
-            return ToolExecutionResult(reply=str(exc), action="inspect")
-        return ToolExecutionResult(reply=reply, action="inspect")
+        result = self.file_tools.list_files(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_search_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            reply = self.file_tool_store.search_files(
-                query=str(invocation.plan.arguments.get("query") or ""),
-                path=str(invocation.plan.arguments.get("path") or "."),
-                file_pattern=str(invocation.plan.arguments.get("file_pattern") or "").strip() or None,
-                case_sensitive=bool(invocation.plan.arguments.get("case_sensitive") or False),
-                max_results=int(invocation.plan.arguments.get("max_results") or 20),
-                include_hidden=bool(invocation.plan.arguments.get("include_hidden") or False),
-            )
-        except ValueError as exc:
-            return ToolExecutionResult(reply=str(exc), action="inspect")
-        return ToolExecutionResult(reply=reply, action="inspect")
+        result = self.file_tools.search_files(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_read_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            reply = self.file_tool_store.read_file(
-                path=str(invocation.plan.arguments.get("path") or ""),
-                start_line=int(invocation.plan.arguments.get("start_line") or 1),
-                end_line=(
-                    int(invocation.plan.arguments["end_line"])
-                    if invocation.plan.arguments.get("end_line") is not None
-                    else None
-                ),
-            )
-        except ValueError as exc:
-            return ToolExecutionResult(reply=str(exc), action="inspect")
-        return ToolExecutionResult(reply=reply, action="inspect")
+        result = self.file_tools.read_file(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
+
+    def _tool_skills_list(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.skill_tools.list_skills(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
+
+    def _tool_skill_view(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.skill_tools.view_skill(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
 
     async def _tool_save_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        if invocation.upload is None:
-            return ToolExecutionResult(
-                reply="没有可保存的文件。如果你的意图是保存文本内容，请使用 save_content 工具。",
-                action="chat",
-            )
-        if not (invocation.text or "").strip():
-            question = self._build_upload_clarification_question(upload=invocation.upload)
-            pending_payload = {
-                "type": "input_interpretation",
-                "pending_input_type": "upload",
-                "media_kind": self._detect_media_kind(upload=invocation.upload) or "file",
-                "original_text": "",
-                "clarification_question": question,
-                "source_event_id": str(invocation.context.get("current_source_event_id") or "") or None,
-            }
-            pending_payload.update(await self._persist_pending_upload(upload=invocation.upload))
-            self.clarification_repository.create(
-                session_id=invocation.session_id,
-                source_message_id=invocation.source_message_id,
-                question=question,
-                candidate_intents=["capture", "cancel"],
-                pending_payload=pending_payload,
-            )
-            return ToolExecutionResult(
-                reply=question,
-                action="clarify",
-                needs_clarification=True,
-            )
-        saved = await self.ingestion_service.ingest(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            source_event_id=str(invocation.context.get("current_source_event_id") or "") or None,
-            text=None,
-            upload=invocation.upload,
-        )
-        item = self.item_repository.get_any(item_id=saved.item_id)
-        context = self._build_context(
-            invocation=invocation,
-            last_action="save_file",
-        )
-        return ToolExecutionResult(
-            reply=saved.reply,
-            action="capture",
-            item_id=saved.item_id,
-            metadata={"context": context},
-        )
+        return await self.archive_capture_ops.save_file(invocation)
 
     async def _tool_save_content(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        saved = await self.ingestion_service.ingest(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            source_event_id=str(invocation.context.get("current_source_event_id") or "") or None,
-            text=str(invocation.plan.arguments.get("text") or invocation.text or ""),
-            upload=None,
-        )
-        item = self.item_repository.get_any(item_id=saved.item_id)
-        context = self._build_context(
-            invocation=invocation,
-            last_action="save_content",
-        )
-        return ToolExecutionResult(
-            reply=saved.reply,
-            action="capture",
-            item_id=saved.item_id,
-            metadata={"context": context},
-        )
+        return await self.archive_capture_ops.save_content(invocation)
 
     def _tool_overview_knowledge_base(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        if self.topic_organizer is None:
-            return ToolExecutionResult(reply="当前还没有可用的知识库索引。", action="retrieve")
-        self.topic_organizer.ensure_topic_index()
-        topics = self.topic_organizer.topic_repository.list_all()
-        items = self.item_repository.list_all(current_only=True)[:8]
-        if not topics and not items:
-            return ToolExecutionResult(reply="当前知识库还是空的。你可以先发文本、链接或文件给我。", action="retrieve")
-        lines = [f"当前知识库里共有 {len(topics)} 个 topic，{len(self.item_repository.list_all(current_only=True))} 条当前资料。"]
-        if topics:
-            lines.append("主要 topic：")
-            for index, topic in enumerate(topics[:5], start=1):
-                lines.append(f"{index}. {topic.name} - {topic.summary or '暂无摘要'}")
-        if items:
-            lines.append("最近资料：")
-            for index, item in enumerate(items[:5], start=1):
-                lines.append(f"{index}. {item.title} - {item.summary}")
-        return ToolExecutionResult(reply="\n".join(lines), action="retrieve")
+        return self.archive_retrieve_ops.overview_knowledge_base(invocation)
 
     def _tool_list_topics(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        if self.topic_organizer is None:
-            return ToolExecutionResult(reply="当前还没有可用的 topic 索引。", action="retrieve")
-        self.topic_organizer.ensure_topic_index()
-        topics = self.topic_organizer.topic_repository.list_all()
-        if not topics:
-            return ToolExecutionResult(reply="当前还没有任何 topic。", action="retrieve")
-        lines = [f"当前共有 {len(topics)} 个 topic："]
-        for index, topic in enumerate(topics[:12], start=1):
-            lines.append(f"{index}. {topic.name} - {topic.summary or '暂无摘要'}")
-        return ToolExecutionResult(reply="\n".join(lines), action="retrieve")
+        return self.archive_retrieve_ops.list_topics(invocation)
 
     def _tool_open_topic(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        query = str(invocation.plan.arguments.get("query") or invocation.text or "")
-        if self.topic_organizer is None:
-            return ToolExecutionResult(reply="当前还没有可用的 topic/wiki 索引。", action="retrieve")
-        topic_matches = self.topic_organizer.search_topics(
-            session_id=invocation.session_id,
-            query=query,
-            limit=int(invocation.plan.arguments.get("top_k") or 3),
-        )
-        if topic_matches:
-            logger.info(
-                "tool open_topic topic_path session_id=%s query=%s topics=%s",
-                invocation.session_id,
-                str(invocation.plan.arguments.get("query") or invocation.text or "")[:160],
-                [getattr(topic, "slug", "") for topic, _ in topic_matches],
-            )
-            single_item = self._single_short_item_from_topic_matches(topic_matches)
-            if single_item is not None:
-                logger.info(
-                    "tool open_topic topic_single_item session_id=%s item_id=%s title=%s",
-                    invocation.session_id,
-                    single_item.id,
-                    single_item.title[:120],
-                )
-                reply = self._format_item_reply(item=single_item, mode="full_text")
-                context = self._build_context(
-                    invocation=invocation,
-                    last_action="open_topic",
-                )
-                return ToolExecutionResult(
-                    reply=reply,
-                    action="retrieve",
-                    item_id=single_item.id,
-                    metadata={"context": context},
-                )
-            reply, working_set = self._format_topic_reply(topic_matches)
-            focus_item_id = working_set[0]["item_id"] if working_set else None
-            context = self._build_context(
-                invocation=invocation,
-                last_action="open_topic",
-            )
-            return ToolExecutionResult(
-                reply=reply,
-                action="retrieve",
-                item_id=focus_item_id,
-                metadata={"context": context},
-            )
-        logger.info(
-            "tool open_topic miss session_id=%s query=%s",
-            invocation.session_id,
-            str(invocation.plan.arguments.get("query") or invocation.text or "")[:160],
-        )
-        return ToolExecutionResult(
-            reply="我没有在当前的 topic/wiki 索引里找到相关资料。请先确认这份内容已经被归档，或者让我重新整理知识库。",
-            action="retrieve",
-            metadata={"context": self._build_context(invocation=invocation, last_action="open_topic")},
-        )
+        return self.archive_retrieve_ops.open_topic(invocation)
 
     def _tool_read_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="read")
-        except AmbiguousItemReferenceError as exc:
-            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
-        except KeyError as exc:
-            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
-        mode = str(invocation.plan.arguments.get("mode") or "summary")
-        reply = self._format_item_reply(item=item, mode=mode)
-        context = self._build_context(
-            invocation=invocation,
-            last_action="read_item",
-        )
-        return ToolExecutionResult(
-            reply=reply,
-            action="retrieve",
-            item_id=item.id,
-            metadata={"context": context},
-        )
+        return self.archive_retrieve_ops.read_item(invocation)
 
     def _tool_summarize_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            item = self._resolve_target_item(session_id=invocation.session_id, plan=invocation.plan, context=invocation.context, user_text=invocation.text, purpose="summarize")
-        except AmbiguousItemReferenceError as exc:
-            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
-        except KeyError as exc:
-            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
-        reply = self._format_summary_reply(item=item)
-        context = self._build_context(
-            invocation=invocation,
-            last_action="summarize_item",
-        )
-        return ToolExecutionResult(
-            reply=reply,
-            action="organize",
-            item_id=item.id,
-            metadata={"context": context},
-        )
+        return self.archive_retrieve_ops.summarize_item(invocation)
 
     def _tool_delete_item(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        try:
-            item = self._resolve_target_item(
-                session_id=invocation.session_id,
-                plan=invocation.plan,
-                context=invocation.context,
-                user_text=invocation.text,
-                purpose="delete",
-            )
-        except AmbiguousItemReferenceError as exc:
-            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
-        except KeyError as exc:
-            return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
-        deleted = self.item_repository.soft_delete(item_id=item.id, session_id=invocation.session_id)
-        context = self._build_context(
-            invocation=invocation,
-            last_action="delete_item",
-        )
-        return ToolExecutionResult(
-            reply=f"已删除资料 `{deleted.title}`。它不会再出现在默认列表和检索结果里。",
-            action="delete",
-            item_id=deleted.id,
-            metadata={"context": context},
-        )
+        return self.archive_retrieve_ops.delete_item(invocation)
 
     def _tool_clarify_reference(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        candidates = [
-            candidate
-            for candidate in (invocation.plan.arguments.get("candidates") or [])
-            if isinstance(candidate, dict)
-        ]
-        labels = [snapshot.get("title", f"候选 {index + 1}") for index, snapshot in enumerate(candidates[:3])]
-        question = "你想看哪一条资料？" if labels else "你想让我展开哪一条资料？"
-        if labels:
-            question += " " + "；".join(f"{index + 1}. {label}" for index, label in enumerate(labels))
-        self.clarification_repository.create(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            question=question,
-            candidate_intents=["reference_resolution"],
-            pending_payload={
-                "type": "reference_resolution",
-                "reference_text": invocation.plan.arguments.get("reference_text") or invocation.text or "",
-                "candidates": candidates[:5],
-            },
-        )
-        return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
+        return self.archive_clarification_ops.clarify_reference(invocation)
 
     def _create_reference_clarification(
         self,
@@ -479,131 +207,29 @@ class ArchiveToolExecutor:
         query: str,
         candidates: list[dict[str, Any]],
     ) -> ToolExecutionResult:
-        labels = [candidate.get("title", f"候选 {index + 1}") for index, candidate in enumerate(candidates[:3])]
-        question = "我找到了多条可能匹配的资料，你要哪一条？"
-        if labels:
-            question += " " + "；".join(f"{index + 1}. {label}" for index, label in enumerate(labels))
-        self.clarification_repository.create(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            question=question,
-            candidate_intents=["reference_resolution"],
-            pending_payload={
-                "type": "reference_resolution",
-                "reference_text": query,
-                "candidates": candidates[:5],
-            },
+        return self.archive_clarification_ops.create_reference_clarification(
+            invocation=invocation,
+            query=query,
+            candidates=candidates,
         )
-        return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
 
     def _tool_clarify_capture_intent(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        question = str(invocation.plan.arguments.get("question") or "").strip() or "这段内容你是想让我先保存，还是先帮你总结一下？"
-        self.clarification_repository.create(
-            session_id=invocation.session_id,
-            source_message_id=invocation.source_message_id,
-            question=question,
-            candidate_intents=["capture", "organize"],
-            pending_payload={
-                "text": invocation.text or "",
-                "type": "capture_intent",
-                "source_event_id": str(invocation.context.get("current_source_event_id") or "") or None,
-            },
-        )
-        return ToolExecutionResult(reply=question, action="clarify", needs_clarification=True)
+        return self.archive_clarification_ops.clarify_capture_intent(invocation)
 
     async def _tool_resolve_pending(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        pending = self.clarification_repository.get_latest_pending(session_id=invocation.session_id)
-        if pending is None:
-            return ToolExecutionResult(reply="当前没有待处理的确认事项。", action="chat")
-
-        pending_payload = pending.pending_payload_json or {}
-        pending_type = str(pending_payload.get("type") or "").strip()
-        resolution = str(invocation.plan.arguments.get("resolution") or "").strip()
-        note = str(invocation.plan.arguments.get("note") or invocation.text or "").strip()
-
-        if resolution == "cancel":
-            self.clarification_repository.resolve(clarification_id=pending.id, status="cancelled")
-            return ToolExecutionResult(reply="好，我先不处理这条待确认内容。", action="chat")
-
-        if pending_type == "input_interpretation":
-            if resolution != "save":
-                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
-            return await self._resolve_pending_input_interpretation(
-                invocation=invocation,
-                pending=pending,
-                pending_payload=pending_payload,
-                note=note,
-            )
-
-        if pending_type == "capture_intent":
-            if resolution == "summarize":
-                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                pending_text = str(pending_payload.get("text") or "")
-                reply = f"Here is a quick summary of the earlier content: {self.ingestion_service.preview_summary(pending_text)}"
-                context = self._build_context(
-                    invocation=invocation,
-                    last_action="summarize_item",
-                )
-                return ToolExecutionResult(reply=reply, action="organize", metadata={"context": context})
-            if resolution == "save":
-                pending_text = str(pending_payload.get("text") or "")
-                saved_item = await self.ingestion_service.ingest(
-                    session_id=invocation.session_id,
-                    source_message_id=pending.source_message_id,
-                    source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
-                    text=pending_text,
-                    upload=None,
-                )
-                self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                item = self.item_repository.get_any(item_id=saved_item.item_id)
-                context = self._build_context(
-                    invocation=invocation,
-                    last_action="save_content",
-                )
-                reply = f"{saved_item.reply} I used your clarification to save the earlier content."
-                return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
-            return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
-
-        if pending_type == "reference_resolution":
-            if resolution != "select":
-                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
-            item = self._resolve_pending_selected_item(invocation=invocation, pending_payload=pending_payload)
-            if item is None:
-                return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
-            self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-            mode = str(invocation.plan.arguments.get("mode") or "full_text")
-            reply = self._format_item_reply(item=item, mode=mode)
-            context = self._build_context(
-                invocation=invocation,
-                last_action="read_item",
-            )
-            return ToolExecutionResult(reply=reply, action="retrieve", item_id=item.id, metadata={"context": context})
-
-        return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
+        return await self.archive_clarification_ops.resolve_pending(
+            invocation,
+            capture_handler=self.archive_capture_ops,
+        )
 
     async def _persist_pending_upload(self, *, upload: UploadFile) -> dict[str, str]:
-        target_dir = self.ingestion_service.storage_dir / "pending"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = (upload.filename or "unnamed.bin").strip() or "unnamed.bin"
-        suffix = Path(filename).suffix
-        target = target_dir / f"{uuid4()}{suffix}"
-        data = await upload.read()
-        target.write_bytes(data)
-        return {"upload_path": str(target), "upload_filename": filename}
+        return await self.archive_capture_ops.persist_pending_upload(upload=upload)
 
     async def persist_pending_upload_entry(self, *, upload: UploadFile, source_event_id: str | None) -> dict[str, str | None]:
-        persisted = await self._persist_pending_upload(upload=upload)
-        return {
-            "upload_path": persisted["upload_path"],
-            "upload_filename": persisted["upload_filename"],
-            "source_event_id": source_event_id,
-        }
+        return await self.archive_capture_ops.persist_pending_upload_entry(upload=upload, source_event_id=source_event_id)
 
     def _build_upload_clarification_question(self, *, upload: UploadFile) -> str:
-        media_kind = self._detect_media_kind(upload=upload)
-        if media_kind == "image":
-            return "这张图片你希望我怎么处理？我可以先保存，也可以按你的说明备注后再保存。"
-        return "这份文件你希望我怎么处理？我可以先保存，也可以按你的说明一起记录。"
+        return self.archive_capture_ops.build_upload_clarification_question(upload=upload)
 
     async def _resolve_pending_input_interpretation(
         self,
@@ -613,154 +239,16 @@ class ArchiveToolExecutor:
         pending_payload: dict[str, Any],
         note: str,
     ) -> ToolExecutionResult:
-        upload_entries = pending_payload.get("upload_entries")
-        normalized_entries: list[dict[str, str | None]] = []
-        if isinstance(upload_entries, list):
-            for entry in upload_entries:
-                if not isinstance(entry, dict):
-                    continue
-                upload_path = str(entry.get("upload_path") or "").strip()
-                upload_filename = str(entry.get("upload_filename") or "").strip()
-                if not upload_path or not upload_filename:
-                    continue
-                normalized_entries.append(
-                    {
-                        "upload_path": upload_path,
-                        "upload_filename": upload_filename,
-                        "source_event_id": str(entry.get("source_event_id") or "").strip() or None,
-                    }
-                )
-        if not normalized_entries:
-            upload_path = str(pending_payload.get("upload_path") or "").strip()
-            upload_filename = str(pending_payload.get("upload_filename") or "").strip()
-            if upload_path and upload_filename:
-                normalized_entries.append(
-                    {
-                        "upload_path": upload_path,
-                        "upload_filename": upload_filename,
-                        "source_event_id": str(pending_payload.get("source_event_id") or "").strip() or None,
-                    }
-                )
-
-        if normalized_entries:
-            saved_items = []
-            entry_note = note if note.strip() else ""
-            for entry in normalized_entries:
-                saved_items.append(
-                    await self.ingestion_service.ingest_saved_upload(
-                        session_id=invocation.session_id,
-                        source_message_id=pending.source_message_id,
-                        source_event_id=entry.get("source_event_id")
-                        or str(invocation.context.get("current_source_event_id") or "").strip()
-                        or None,
-                        file_path=Path(str(entry["upload_path"])),
-                        filename=str(entry["upload_filename"]),
-                        user_note=entry_note,
-                    )
-                )
-            saved_item = saved_items[-1]
-            if len(saved_items) == 1:
-                reply = saved_item.reply
-            else:
-                reply = f"已按同一批次为你保存 {len(saved_items)} 个文件。最后一项：{saved_item.reply}"
-        else:
-            original_text = str(pending_payload.get("original_text") or "").strip()
-            saved_item = await self.ingestion_service.ingest(
-                session_id=invocation.session_id,
-                source_message_id=pending.source_message_id,
-                source_event_id=str(pending_payload.get("source_event_id") or invocation.context.get("current_source_event_id") or "") or None,
-                text=original_text,
-                upload=None,
-            )
-            reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
-        self.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-        item = self.item_repository.get_any(item_id=saved_item.item_id)
-        context = self._build_context(
+        return await self.archive_clarification_ops.resolve_pending_input_interpretation(
             invocation=invocation,
-            last_action="save_file" if normalized_entries else "save_content",
+            pending=pending,
+            pending_payload=pending_payload,
+            note=note,
+            capture_handler=self.archive_capture_ops,
         )
-        return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
 
     async def _tool_send_file_to_user(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        """Send a file from the wiki to the user via WeChat."""
-        if self.gateway_service is None:
-            return ToolExecutionResult(reply="当前通道暂不支持把文件发送给用户。", action="chat")
-
-        try:
-            item = self._resolve_target_item(
-                session_id=invocation.session_id,
-                plan=invocation.plan,
-                context=invocation.context,
-                user_text=invocation.text,
-                purpose="send_file",
-            )
-        except AmbiguousItemReferenceError as exc:
-            return self._create_reference_clarification(invocation=invocation, query=exc.query, candidates=exc.candidates)
-        except KeyError as e:
-            return ToolExecutionResult(reply=f"我没定位到要发送的资料：{e.args[0]}", action="clarify", needs_clarification=True)
-
-        caption = str(invocation.plan.arguments.get("caption") or "").strip()
-        if self.session_map_repository is None:
-            return ToolExecutionResult(reply="当前会话没有可用的用户映射，暂时无法发送文件。", action="chat")
-
-        user_id = self.session_map_repository.get_external_user_id(
-            channel=self.channel_name,
-            session_id=invocation.session_id,
-        )
-        if not user_id:
-            return ToolExecutionResult(
-                reply="我没找到这个会话对应的微信用户，暂时无法把文件发回去。",
-                action="chat",
-            )
-
-        delivery_targets = self._resolve_delivery_targets(
-            session_id=invocation.session_id,
-            item=item,
-            user_text=invocation.text,
-        )
-        if not delivery_targets:
-            return ToolExecutionResult(
-                reply=f"资料 `{item.title}` 没有可发送的原始文件路径，暂时无法回传给你。",
-                action="chat",
-            )
-
-        try:
-            sent_count = 0
-            for index, target in enumerate(delivery_targets):
-                path = target["path"]
-                send_caption = caption if index == 0 else ""
-                result = await self.gateway_service.send_file_to_user(
-                    user_id=user_id,
-                    file_path=str(path),
-                    caption=send_caption,
-                )
-                if result.get("ret") not in (0, None) or result.get("errcode") not in (0, None):
-                    error_msg = result.get("errmsg") or result.get("msg") or "未知错误"
-                    if sent_count > 0:
-                        return ToolExecutionResult(reply=f"前 {sent_count} 个文件已发送，但后续发送失败：{error_msg}", action="chat")
-                    return ToolExecutionResult(reply=f"发送文件失败：{error_msg}", action="chat")
-                sent_count += 1
-            context_item = delivery_targets[0].get("item") or item
-            context = self._build_context(
-                invocation=invocation,
-                last_action="send_file_to_user",
-            )
-            if len(delivery_targets) == 1:
-                return ToolExecutionResult(
-                    reply=f"已经把 `{delivery_targets[0]['display_title']}` 发给你了，请查收。",
-                    action="retrieve",
-                    item_id=context_item.id,
-                    metadata={"context": context},
-            )
-            return ToolExecutionResult(
-                reply=f"已经把与 `{item.title}` 相关的 {len(delivery_targets)} 个文件发给你了，请查收。",
-                action="retrieve",
-                item_id=context_item.id,
-                metadata={"context": context},
-            )
-        except Exception as exc:
-            logger.exception("Failed to send file to user")
-            return ToolExecutionResult(reply=f"发送文件失败：{exc}", action="chat")
+        return await self.archive_retrieve_ops.send_file_to_user(invocation)
 
     def _resolve_delivery_targets(
         self,
@@ -770,44 +258,21 @@ class ArchiveToolExecutor:
         user_text: str | None,
         limit: int = 9,
     ) -> list[dict[str, Any]]:
-        direct_target = self._resolve_direct_delivery_target(item=item)
-        return [direct_target] if direct_target is not None else []
+        return self.archive_retrieve_ops.resolve_delivery_targets(
+            session_id=session_id,
+            item=item,
+            user_text=user_text,
+            limit=limit,
+        )
 
     def _resolve_direct_delivery_target(self, *, item: ItemRecord) -> dict[str, Any] | None:
-        metadata = item.metadata_json or {}
-        stored_path = str(metadata.get("stored_file_path") or "").strip()
-        if not stored_path:
-            return None
-        path = Path(stored_path)
-        if not path.exists():
-            return None
-        return {"path": path, "item": item, "display_title": item.title}
+        return self.archive_retrieve_ops.resolve_direct_delivery_target(item=item)
 
     def _resolve_pending_selected_item(self, *, invocation: ToolInvocation, pending_payload: dict[str, Any]) -> ItemRecord | None:
-        candidates = [
-            candidate
-            for candidate in (pending_payload.get("candidates") or [])
-            if isinstance(candidate, dict)
-        ]
-        target = invocation.plan.arguments.get("target")
-        if isinstance(target, dict):
-            target_type = str(target.get("type") or "").strip()
-            target_value = target.get("value")
-            if target_type == "item_id" and target_value:
-                return self.item_repository.get_any(item_id=str(target_value))
-        content = (invocation.text or "").strip()
-        rank = self._extract_rank_from_text(content)
-        if rank is not None and 1 <= rank <= len(candidates):
-            item_id = str((candidates[rank - 1] or {}).get("item_id") or "").strip()
-            if item_id:
-                return self.item_repository.get_any(item_id=item_id)
-        lowered = content.lower()
-        for snapshot in candidates:
-            title = str(snapshot.get("title") or "")
-            item_id = str(snapshot.get("item_id") or "").strip()
-            if title and item_id and (title in content or title.lower() in lowered):
-                return self.item_repository.get_any(item_id=item_id)
-        return None
+        return self.archive_clarification_ops.resolve_pending_selected_item(
+            invocation=invocation,
+            pending_payload=pending_payload,
+        )
 
     def _resolve_target_item(
         self,
@@ -1119,6 +584,3 @@ class ArchiveToolExecutor:
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
             return "image"
         return "file"
-
-
-RuntimeToolExecutor = ArchiveToolExecutor

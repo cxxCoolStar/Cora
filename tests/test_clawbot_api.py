@@ -27,7 +27,8 @@ from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
 from core.clawbot.planner import AgentPlanner, ToolPlan  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
-from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation  # noqa: E402
+from core.clawbot import RuntimeToolExecutor  # noqa: E402
+from core.clawbot.tools import ToolInvocation  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
@@ -212,6 +213,34 @@ class StubSendFileFailureModelClient(ModelClient):
         )
 
 
+class StubToollessDeliveryRetryModelClient(ModelClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        self.calls += 1
+        latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
+        if latest_tool is not None:
+            return ModelResponse(assistant_text="已经发送，请查收。")
+        correction_present = any(
+            message.role == "system" and "Tool-use correction:" in message.content
+            for message in messages
+        )
+        if correction_present:
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        tool_name="archive",
+                        arguments={
+                            "action": "deliver",
+                            "target": {"type": "auto", "value": ""},
+                        },
+                    )
+                ]
+            )
+        return ModelResponse(assistant_text="抱歉，我无法直接转发这张照片给你。")
+
+
 class FakeVisionDescriber:
     def describe_image(self, *, image_path: Path, mime_type: str) -> str:
         return (
@@ -267,7 +296,7 @@ def build_test_container(
         image_parser=image_parser,
         topic_organizer=topic_organizer,
     )
-    tool_executor = ArchiveToolExecutor(
+    tool_executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         clarification_repository=clarification_repository,
@@ -328,7 +357,7 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
 
     assert messages[0].role == "system"
     assert "archive-core" in messages[0].content
-    assert "Shared skills:" in messages[0].content
+    assert "Skills (mandatory):" in messages[0].content
 
 
 def test_agent_history_uses_recent_12_messages_plus_summary(tmp_path):
@@ -1792,6 +1821,59 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
     assert result["action"] == "chat"
     assert "network down" in result["reply"]
     assert result["reply"] != "已经发送，请查收。"
+
+
+def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_file_to_user(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"ret": 0, "errcode": 0}
+
+    container = build_test_container(tmp_path)
+    retry_model = StubToollessDeliveryRetryModelClient()
+    container.clawbot_service.model_client = retry_model
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="upload photo")
+    saved = asyncio.run(
+        container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            text=None,
+            upload=UploadFile(filename="wechat_image.jpg", file=BytesIO(b"fake image bytes")),
+        )
+    )
+    item = container.item_repository.get_any(item_id=saved.item_id)
+
+    gateway = _Gateway()
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
+    container.configure_gateway(gateway, session_map_repository)
+
+    request_text = f"可以把 {item.title} 这张照片发我吗"
+    user_message = container.message_repository.add_user_message(session_id=session.id, content=request_text)
+    context = container.clawbot_service._load_context(session_id=session.id)
+    result = asyncio.run(
+        container.clawbot_service._run_agent_loop(
+            session_id=session.id,
+            source_message_id=user_message.id,
+            user_text=request_text,
+            raw_text=request_text,
+            upload=None,
+            context=context,
+            pending_payload=None,
+        )
+    )
+
+    assert item is not None
+    assert retry_model.calls >= 2
+    assert result["tool_name"] == "archive"
+    assert result["action"] == "retrieve"
+    assert gateway.calls
+    assert gateway.calls[0]["user_id"] == "wx-user-1"
 
 
 def test_send_file_tool_requires_real_file_item_without_archive_fallback(tmp_path):

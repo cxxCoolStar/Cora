@@ -20,7 +20,18 @@ class SkillDefinition:
     description: str
     path: Path
     content: str
+    raw_content: str
+    category: str | None = None
+    linked_files: dict[str, list[str]] = field(default_factory=dict)
     frontmatter: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SkillFileView:
+    skill: SkillDefinition
+    file_path: str | None
+    content: str
+    absolute_path: Path
 
 
 def _parse_scalar(value: str) -> Any:
@@ -105,18 +116,24 @@ class SkillLoader:
             if not root.exists():
                 continue
             for skill_md in sorted(root.rglob("SKILL.md")):
+                if any(part in {".git", ".github", ".hub"} for part in skill_md.parts):
+                    continue
                 content = skill_md.read_text(encoding="utf-8")
                 frontmatter, body = _parse_frontmatter(content)
                 if not _matches_platform(frontmatter, platform=platform):
                     continue
                 name = str(frontmatter.get("name") or skill_md.parent.name).strip()
                 description = str(frontmatter.get("description") or "").strip()
+                category = self._category_for_skill(root=root, skill_dir=skill_md.parent)
                 loaded.append(
                     SkillDefinition(
                         name=name,
                         description=description,
                         path=skill_md.parent.resolve(),
                         content=body.strip(),
+                        raw_content=content,
+                        category=category,
+                        linked_files=self._collect_linked_files(skill_md.parent),
                         frontmatter=frontmatter,
                     )
                 )
@@ -127,6 +144,78 @@ class SkillLoader:
         if not needle:
             return None
         for skill in self.list_skills(platform=platform):
-            if skill.name == needle:
+            if skill.name == needle or self._matches_relative_skill_path(skill=skill, needle=needle):
                 return skill
         return None
+
+    def view_skill(
+        self,
+        name: str,
+        *,
+        file_path: str | None = None,
+        platform: str | None = None,
+    ) -> SkillFileView | None:
+        skill = self.find_skill(name, platform=platform)
+        if skill is None:
+            return None
+        if not file_path:
+            return SkillFileView(
+                skill=skill,
+                file_path=None,
+                content=skill.content,
+                absolute_path=(skill.path / "SKILL.md").resolve(),
+            )
+        normalized = Path(file_path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            raise ValueError("Skill file_path must stay within the skill directory.")
+        target = (skill.path / normalized).resolve()
+        try:
+            target.relative_to(skill.path.resolve())
+        except ValueError as exc:
+            raise ValueError("Skill file_path must stay within the skill directory.") from exc
+        if not target.exists() or not target.is_file():
+            raise ValueError(f"Skill file not found: {file_path}")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Skill file is not readable text: {file_path}") from exc
+        return SkillFileView(
+            skill=skill,
+            file_path=str(normalized).replace("\\", "/"),
+            content=content,
+            absolute_path=target,
+        )
+
+    @staticmethod
+    def _matches_relative_skill_path(*, skill: SkillDefinition, needle: str) -> bool:
+        parts = [part for part in skill.path.parts if part]
+        if not parts:
+            return False
+        tail = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+        return tail == needle.strip().replace("\\", "/")
+
+    @staticmethod
+    def _category_for_skill(*, root: Path, skill_dir: Path) -> str | None:
+        try:
+            relative_parent = skill_dir.relative_to(root).parent
+        except ValueError:
+            return None
+        if not relative_parent.parts:
+            return None
+        return "/".join(relative_parent.parts)
+
+    @staticmethod
+    def _collect_linked_files(skill_dir: Path) -> dict[str, list[str]]:
+        linked: dict[str, list[str]] = {}
+        for section in ("references", "templates", "assets", "scripts"):
+            section_dir = skill_dir / section
+            if not section_dir.exists():
+                continue
+            files = [
+                str(path.relative_to(skill_dir)).replace("\\", "/")
+                for path in sorted(section_dir.rglob("*"))
+                if path.is_file()
+            ]
+            if files:
+                linked[section] = files
+        return linked

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.clawbot.tools import ArchiveToolExecutor, ToolInvocation
+from core.clawbot import RuntimeToolExecutor
+from core.clawbot.tools import ToolInvocation
 from core.clawbot.planner import ToolPlan
 from core.ingestion.service import IngestionService
 from core.storage.db import DatabaseManager
@@ -32,7 +33,7 @@ def test_user_memory_store_render_creates_template(tmp_path: Path) -> None:
     assert store.path.exists()
 
 
-def test_archive_tool_executor_user_memory_tool(tmp_path: Path) -> None:
+def test_runtime_tool_executor_user_memory_tool(tmp_path: Path) -> None:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
     database.create_all()
     item_repository = ItemRepository(database)
@@ -45,7 +46,7 @@ def test_archive_tool_executor_user_memory_tool(tmp_path: Path) -> None:
         user_signal_repository=user_signal_repository,
         storage_dir=tmp_path / "files",
     )
-    executor = ArchiveToolExecutor(
+    executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         clarification_repository=clarification_repository,

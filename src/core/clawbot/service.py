@@ -27,7 +27,7 @@ from core.clawbot.schemas import (
 )
 from core.agent.skill_loader import SkillLoader
 from core.clawbot.planner import ToolPlan
-from core.clawbot.tools import ArchiveToolExecutor
+from core.clawbot.tools import RuntimeToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
@@ -57,7 +57,7 @@ class _ArchiveAgentExecutor(AgentToolExecutor):
     def __init__(
         self,
         *,
-        tool_executor: ArchiveToolExecutor,
+        tool_executor: RuntimeToolExecutor,
         runtime_builder: Any,
     ) -> None:
         self.tool_executor = tool_executor
@@ -122,7 +122,7 @@ class ClawBotService:
         user_signal_repository: UserSignalRepository,
         topic_repository: TopicRepository,
         model_client: ModelClient,
-        tool_executor: ArchiveToolExecutor | None = None,
+        tool_executor: RuntimeToolExecutor | None = None,
         topic_organizer: TopicOrganizerService | None = None,
         context_budget_manager: ContextBudgetManager | None = None,
         user_memory_path: Path | None = None,
@@ -142,16 +142,17 @@ class ClawBotService:
         self.user_memory_path = user_memory_path or Path("user-memory/USER.md")
         self.file_tool_root = file_tool_root or Path(".")
         self.tool_manager = tool_manager or ToolManager()
-        self.tool_executor = tool_executor or ArchiveToolExecutor(
+        self.skill_loader = SkillLoader()
+        self.tool_executor = tool_executor or RuntimeToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
             clarification_repository=clarification_repository,
             user_memory_path=self.user_memory_path,
             file_tool_root=self.file_tool_root,
+            skill_roots=self.skill_loader.skill_roots,
         )
         self.topic_organizer = topic_organizer
         self.user_profile_aggregator = UserProfileAggregator()
-        self.skill_loader = SkillLoader()
         self._tool_specs = self._build_tool_specs()
         self._agent_executor = _ArchiveAgentExecutor(
             tool_executor=self.tool_executor,
@@ -179,7 +180,7 @@ class ClawBotService:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state", "user_memory", "file"]
+        toolsets = ["archive_capture", "archive_search", "archive_read", "archive_state", "user_memory", "file", "skills"]
         if self.tool_executor.can_send_files_to_user():
             toolsets.append("archive_delivery")
         return self.tool_manager.build_model_tool_specs(
@@ -222,6 +223,7 @@ class ClawBotService:
             runtime=runtime,
             skills=self.skill_loader.list_skills(),
             history=history,
+            delivery_available=self.tool_executor.can_send_files_to_user(),
         )
         messages.extend(tool_messages)
         return messages
@@ -266,10 +268,103 @@ class ClawBotService:
                 user_text=user_text,
                 runtime=runtime,
                 upload_name=upload.filename if upload is not None else None,
+                delivery_available=self.tool_executor.can_send_files_to_user(),
                 history=self._load_agent_history(session_id=session_id, user_text=user_text),
             )
         )
+        retry_category = self._tool_retry_category(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+        if retry_category is not None:
+            retry_instruction = self._tool_retry_instruction(retry_category)
+            retry_messages = self._agent_orchestrator.prompt_builder.build_messages(
+                session_id=session_id,
+                user_text=user_text,
+                runtime=runtime,
+                skills=self.skill_loader.list_skills(),
+                history=self._load_agent_history(session_id=session_id, user_text=user_text),
+                upload_name=upload.filename if upload is not None else None,
+                delivery_available=self.tool_executor.can_send_files_to_user(),
+            )
+            retry_messages.insert(
+                1,
+                Message.system(session_id=session_id, content=retry_instruction),
+            )
+            loop_result = await self._agent_loop.run(
+                session_id=session_id,
+                initial_messages=retry_messages,
+                runtime=runtime,
+            )
         return self._loop_result_to_legacy_response(loop_result)
+
+    def _tool_retry_category(
+        self,
+        *,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        loop_result: LoopResult,
+    ) -> str | None:
+        if loop_result.tool_name != "none" or loop_result.exit_reason != "assistant_text":
+            return None
+        text = (raw_text or user_text or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if self._looks_like_delivery_request(text=text, lowered=lowered):
+            return "deliver"
+        if self._looks_like_delete_request(text=text, lowered=lowered):
+            return "delete"
+        if self._looks_like_user_memory_request(text=text, lowered=lowered):
+            return "user_memory"
+        if upload is not None and self._detect_media_kind(upload=upload) == "image":
+            return "save_file"
+        return None
+
+    def _tool_retry_instruction(self, category: str) -> str:
+        if category == "deliver":
+            return (
+                "Tool-use correction: the user is asking for a previously saved photo or file to be sent back over the current channel. "
+                "Do not claim file delivery is unsupported. If the target can be identified, you must call the archive tool with action=deliver. "
+                "If the target is ambiguous, use archive_state clarification instead of answering from chat."
+            )
+        if category == "delete":
+            return (
+                "Tool-use correction: the user is asking to delete saved content. "
+                "Do not answer with plain chat. Use the archive tool with action=delete, or use archive_state clarification if the target is ambiguous."
+            )
+        if category == "user_memory":
+            return (
+                "Tool-use correction: the user is asking to remember, inspect, update, or forget durable personal information. "
+                "Use the user_memory tool instead of replying from chat."
+            )
+        return (
+            "Tool-use correction: this request should be handled with tools instead of plain chat. "
+            "Use the appropriate archive or state-management tool before answering."
+        )
+
+    @staticmethod
+    def _looks_like_delivery_request(*, text: str, lowered: str) -> bool:
+        delivery_verbs = ("发我", "发给我", "发送", "传给我", "回传", "转发", "send me", "send back", "deliver")
+        file_nouns = ("照片", "图片", "原图", "文件", "附件", "pdf", "jpg", "jpeg", "png", "文档", "file", "photo", "image")
+        return any(token in text for token in delivery_verbs) and any(token in lowered for token in file_nouns)
+
+    @staticmethod
+    def _looks_like_delete_request(*, text: str, lowered: str) -> bool:
+        delete_verbs = ("删除", "删掉", "移除", "清掉", "remove", "delete")
+        target_nouns = ("资料", "文件", "图片", "照片", "附件", "第", "序号", "item", "file", "photo", "image")
+        return any(token in text for token in delete_verbs) and any(token in text or token in lowered for token in target_nouns)
+
+    @staticmethod
+    def _looks_like_user_memory_request(*, text: str, lowered: str) -> bool:
+        memory_markers = (
+            "记住", "记一下", "记下来", "忘记", "删掉这条记忆", "删除记忆", "查看记忆", "个人记忆",
+            "remember this", "forget this", "show my memory", "user memory",
+        )
+        return any(token in text or token in lowered for token in memory_markers)
 
     def build_runtime_state(
         self,
