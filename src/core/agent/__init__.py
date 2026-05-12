@@ -7,8 +7,8 @@ from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import (
     ConversationRuntimeState,
     EventSnapshot,
-    PendingState,
-    ToolStateDelta,
+    PendingSessionState,
+    RuntimeStateDelta,
 )
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillDefinition, SkillLoader
@@ -23,8 +23,8 @@ __all__ = [
     "AgentRuntimeManager",
     "ConversationRuntimeState",
     "EventSnapshot",
-    "PendingState",
-    "ToolStateDelta",
+    "PendingSessionState",
+    "RuntimeStateDelta",
     "SessionRuntimeSnapshotLoader",
     "SkillDefinition",
     "SkillLoader",

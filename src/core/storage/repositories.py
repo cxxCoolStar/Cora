@@ -8,7 +8,7 @@ from core.storage.db import DatabaseManager
 from core.storage.models import (
     ChannelEventRecord,
     ChannelSessionMapRecord,
-    ClarificationStateRecord,
+    PendingStateRecord,
     ItemRecord,
     MessageRecord,
     SessionRecord,
@@ -484,7 +484,7 @@ class TopicActivityRepository:
             return record
 
 
-class ClarificationRepository:
+class PendingStateRepository:
     def __init__(self, database: DatabaseManager) -> None:
         self.database = database
 
@@ -496,9 +496,9 @@ class ClarificationRepository:
         question: str,
         candidate_intents: list[str],
         pending_payload: dict[str, Any],
-    ) -> ClarificationStateRecord:
+    ) -> PendingStateRecord:
         with self.database.session() as session:
-            record = ClarificationStateRecord(
+            record = PendingStateRecord(
                 session_id=session_id,
                 source_message_id=source_message_id,
                 question=question,
@@ -510,39 +510,39 @@ class ClarificationRepository:
             session.refresh(record)
             return record
 
-    def get_latest_pending(self, *, session_id: str) -> ClarificationStateRecord | None:
+    def get_latest_pending(self, *, session_id: str) -> PendingStateRecord | None:
         with self.database.session() as session:
             stmt = (
-                select(ClarificationStateRecord)
+                select(PendingStateRecord)
                 .where(
-                    ClarificationStateRecord.session_id == session_id,
-                    ClarificationStateRecord.status == "pending",
+                    PendingStateRecord.session_id == session_id,
+                    PendingStateRecord.status == "pending",
                 )
-                .order_by(desc(ClarificationStateRecord.created_at))
+                .order_by(desc(PendingStateRecord.created_at))
                 .limit(1)
             )
             return session.scalar(stmt)
 
-    def resolve(self, *, clarification_id: str, status: str) -> None:
+    def resolve(self, *, pending_state_id: str, status: str) -> None:
         with self.database.session() as session:
-            record = session.get(ClarificationStateRecord, clarification_id)
+            record = session.get(PendingStateRecord, pending_state_id)
             if record is None:
-                raise KeyError(f"Clarification not found: {clarification_id}")
+                raise KeyError(f"Pending state not found: {pending_state_id}")
             record.status = status
             session.commit()
 
     def update_pending(
         self,
         *,
-        clarification_id: str,
+        pending_state_id: str,
         pending_payload: dict[str, Any] | None = None,
         question: str | None = None,
         candidate_intents: list[str] | None = None,
-    ) -> ClarificationStateRecord:
+    ) -> PendingStateRecord:
         with self.database.session() as session:
-            record = session.get(ClarificationStateRecord, clarification_id)
+            record = session.get(PendingStateRecord, pending_state_id)
             if record is None:
-                raise KeyError(f"Clarification not found: {clarification_id}")
+                raise KeyError(f"Pending state not found: {pending_state_id}")
             if pending_payload is not None:
                 record.pending_payload_json = pending_payload
             if question is not None:

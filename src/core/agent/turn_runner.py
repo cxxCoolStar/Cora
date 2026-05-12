@@ -198,13 +198,13 @@ class AgentTurnRunner:
         if category == "deliver":
             return (
                 "Tool-use correction: the user is asking for a previously saved photo or file to be sent back over the current channel. "
-                "Do not claim file delivery is unsupported. Load the relevant archive skill if needed and call skill_run for its deliver workflow. "
-                "If the target is ambiguous, let the skill return a clarification instead of answering from chat."
+                "Do not claim file delivery is unsupported. Inspect the relevant skill with skill_view if needed, then use the appropriate tool workflow. "
+                "If the target is ambiguous, let the tool-backed workflow return a clarification instead of answering from chat."
             )
         if category == "delete":
             return (
                 "Tool-use correction: the user is asking to delete saved content. "
-                "Do not answer with plain chat. Load the relevant archive skill and use skill_run for its delete workflow."
+                "Do not answer with plain chat. Inspect the relevant skill if needed and use the proper tool-backed delete workflow."
             )
         if category == "user_memory":
             return (
@@ -213,8 +213,8 @@ class AgentTurnRunner:
             )
         if category == "save_file":
             return (
-                "Tool-use correction: the user uploaded a file or image that should be handled through the archive workflow. "
-                "Load the relevant archive skill if needed and use skill_run for its save workflow."
+                "Tool-use correction: the user uploaded a file or image that should be handled through a tool-backed workflow. "
+                "Inspect the relevant skill if needed and use the proper save workflow."
             )
         return (
             "Tool-use correction: this request should be handled with tools instead of plain chat. "
@@ -283,12 +283,8 @@ class AgentTurnRunner:
         tool_arguments = last_execution.arguments
         if tool_name == "skill_run":
             skill_input = tool_arguments.get("input") or {}
-            if str(skill_input.get("intent") or "").strip() == "deliver" and last_execution.action != "archive.deliver":
+            if str(skill_input.get("intent") or "").strip() == "deliver" and last_execution.action != "retrieve":
                 return last_execution.content
-        if (
-            tool_name == "archive" and str(tool_arguments.get("action") or "").strip() == "deliver"
-        ) and last_execution.action != "retrieve":
-            return last_execution.content
         return final_reply
 
     @staticmethod

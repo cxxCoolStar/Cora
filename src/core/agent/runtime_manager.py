@@ -4,12 +4,12 @@ from typing import Any
 
 from fastapi import UploadFile
 
-from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingState, RuntimeContextSnapshot, ToolStateDelta
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingSessionState, RuntimeContextSnapshot, RuntimeStateDelta, UNSET
 
 
 class AgentRuntimeManager:
-    def __init__(self, *, clarification_repository: Any) -> None:
-        self.clarification_repository = clarification_repository
+    def __init__(self, *, pending_state_repository: Any) -> None:
+        self.pending_state_repository = pending_state_repository
 
     def build_runtime_state(
         self,
@@ -20,14 +20,13 @@ class AgentRuntimeManager:
         raw_text: str | None,
         upload: UploadFile | None,
     ) -> ConversationRuntimeState:
-        pending_record = self.clarification_repository.get_latest_pending(session_id=session_id)
+        pending_record = self.pending_state_repository.get_latest_pending(session_id=session_id)
         return ConversationRuntimeState(
             session_id=session_id,
             current_source_event_id=context_snapshot.current_source_event_id,
             recent_events=list(context_snapshot.recent_events),
-            pending_state=self._runtime_pending_state(pending_record),
+            pending_state=self._runtime_pending_state(pending_record) or context_snapshot.pending_state,
             last_action=context_snapshot.last_action,
-            pending_skill=context_snapshot.pending_skill,
             skill_state=dict(context_snapshot.skill_state),
             metadata={
                 "source_message_id": source_message_id,
@@ -41,8 +40,8 @@ class AgentRuntimeManager:
         context = {
             "recent_events": [AgentRuntimeManager._context_event_snapshot(event) for event in runtime.recent_events],
             "last_action": runtime.last_action,
-            "pending_skill": runtime.pending_skill,
             "skill_state": dict(runtime.skill_state),
+            "pending_state": AgentRuntimeManager._pending_to_context(runtime.pending_state),
         }
         if runtime.current_source_event_id:
             context["current_source_event_id"] = runtime.current_source_event_id
@@ -53,25 +52,29 @@ class AgentRuntimeManager:
         return RuntimeContextSnapshot(
             current_source_event_id=runtime.current_source_event_id,
             recent_events=list(runtime.recent_events),
+            pending_state=runtime.pending_state,
             last_action=runtime.last_action,
-            pending_skill=runtime.pending_skill,
             skill_state=dict(runtime.skill_state),
         )
 
     @staticmethod
-    def apply_state_update(
+    def apply_state_delta(
         *,
         snapshot: RuntimeContextSnapshot,
-        state_update: ToolStateDelta,
+        state_delta: RuntimeStateDelta,
     ) -> RuntimeContextSnapshot:
         return RuntimeContextSnapshot(
-            current_source_event_id=state_update.current_source_event_id or snapshot.current_source_event_id,
+            current_source_event_id=state_delta.current_source_event_id or snapshot.current_source_event_id,
             recent_events=list(snapshot.recent_events),
-            last_action=state_update.last_action or snapshot.last_action,
-            pending_skill=state_update.pending_skill or snapshot.pending_skill,
+            pending_state=(
+                snapshot.pending_state
+                if state_delta.pending_state is UNSET
+                else state_delta.pending_state
+            ),
+            last_action=state_delta.last_action or snapshot.last_action,
             skill_state=AgentRuntimeManager._merge_skill_state(
                 base=snapshot.skill_state,
-                incoming=state_update.skill_state,
+                incoming=state_delta.skill_state,
             ),
         )
 
@@ -86,19 +89,20 @@ class AgentRuntimeManager:
         return merged
 
     @staticmethod
-    def _runtime_pending_state(pending: object | None) -> PendingState | None:
+    def _runtime_pending_state(pending: object | None) -> PendingSessionState | None:
         if pending is None:
             return None
         payload = dict(getattr(pending, "pending_payload_json", {}) or {})
         kind_map = {
-            "reference_resolution": "reference",
-            "capture_intent": "capture_intent",
-            "input_interpretation": "pending_upload_note",
+            "item_selection": "selection",
+            "save_decision": "choice",
+            "upload_save": "upload",
         }
         pending_type = str(payload.get("type") or "")
-        return PendingState(
+        return PendingSessionState(
             pending_id=str(getattr(pending, "id", "")),
-            kind=kind_map.get(pending_type, "pending_upload_note"),
+            skill_name=str(payload.get("skill_name") or "").strip() or None,
+            kind=kind_map.get(pending_type, "choice"),
             question=str(getattr(pending, "question", "")),
             choices=list(getattr(pending, "candidate_intents_json", []) or []),
             payload=payload,
@@ -115,3 +119,16 @@ class AgentRuntimeManager:
         }
         snapshot.update(event.metadata)
         return snapshot
+
+    @staticmethod
+    def _pending_to_context(pending: PendingSessionState | None) -> dict[str, Any]:
+        if pending is None:
+            return {}
+        return {
+            "pending_id": pending.pending_id,
+            "skill_name": pending.skill_name,
+            "kind": pending.kind,
+            "question": pending.question,
+            "choices": list(pending.choices),
+            **dict(pending.payload),
+        }

@@ -15,7 +15,7 @@ def test_tool_manager_can_transform_schema_during_model_spec_build() -> None:
     manager = ToolManager()
 
     specs = manager.build_model_tool_specs(
-        toolsets=["archive_capture"],
+        toolsets=["skills_execute"],
         schema_transformer=lambda registered, schema: {
             **schema,
             "x-tool-name": registered.name,
@@ -23,5 +23,5 @@ def test_tool_manager_can_transform_schema_during_model_spec_build() -> None:
     )
 
     assert len(specs) == 1
-    assert specs[0].name == "archive"
-    assert specs[0].input_schema["x-tool-name"] == "archive"
+    assert specs[0].name == "skill_run"
+    assert specs[0].input_schema["x-tool-name"] == "skill_run"

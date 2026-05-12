@@ -129,7 +129,7 @@ class TopicActivityRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
-class ClarificationStateRecord(Base):
+class PendingStateRecord(Base):
     __tablename__ = "clawbot_clarification_states"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)

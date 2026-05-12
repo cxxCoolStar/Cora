@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+
 from fastapi import UploadFile
 
 from core.agent.loop import AgentLoop
@@ -36,9 +37,9 @@ from core.schemas.message import Message
 from core.schemas.tool import ToolSpec as ModelToolSpec
 from core.storage.models import SessionRecord
 from core.storage.repositories import (
-    ClarificationRepository,
     ItemRepository,
     MessageRepository,
+    PendingStateRepository,
     SessionRepository,
     SessionSummaryRepository,
     SourceEventRepository,
@@ -50,6 +51,7 @@ from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
 
+
 class ClawBotService:
     def __init__(
         self,
@@ -60,7 +62,7 @@ class ClawBotService:
         source_event_repository: SourceEventRepository,
         item_repository: ItemRepository,
         ingestion_service: IngestionService,
-        clarification_repository: ClarificationRepository,
+        pending_state_repository: PendingStateRepository,
         user_signal_repository: UserSignalRepository,
         topic_repository: TopicRepository,
         model_client: ModelClient,
@@ -77,7 +79,7 @@ class ClawBotService:
         self.source_event_repository = source_event_repository
         self.item_repository = item_repository
         self.ingestion_service = ingestion_service
-        self.clarification_repository = clarification_repository
+        self.pending_state_repository = pending_state_repository
         self.user_signal_repository = user_signal_repository
         self.topic_repository = topic_repository
         self.model_client = model_client
@@ -87,12 +89,12 @@ class ClawBotService:
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         self.runtime_manager = AgentRuntimeManager(
-            clarification_repository=clarification_repository,
+            pending_state_repository=pending_state_repository,
         )
         self.tool_executor = tool_executor or RuntimeToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
-            clarification_repository=clarification_repository,
+            pending_state_repository=pending_state_repository,
             user_memory_path=self.user_memory_path,
             file_tool_root=self.file_tool_root,
             skill_roots=self.skill_loader.skill_roots,
@@ -126,7 +128,7 @@ class ClawBotService:
         )
         self._session_shell = ClawBotSessionShell(
             message_repository=message_repository,
-            clarification_repository=clarification_repository,
+            pending_state_repository=pending_state_repository,
             tool_executor=self.tool_executor,
             source_event_manager=self._source_event_manager,
         )
@@ -153,13 +155,7 @@ class ClawBotService:
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
         toolsets = ["user_memory", "file", "skills", "skills_execute"]
-        return self.tool_manager.build_model_tool_specs(
-            toolsets=toolsets,
-            schema_transformer=self._transform_tool_schema,
-        )
-
-    def _transform_tool_schema(self, registered: object, input_schema: dict[str, Any]) -> dict[str, Any]:
-        return input_schema
+        return self.tool_manager.build_model_tool_specs(toolsets=toolsets)
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()
@@ -203,7 +199,14 @@ class ClawBotService:
     def _load_agent_history(self, *, session_id: str, user_text: str) -> list[Message]:
         return self._context_manager.build_history(session_id=session_id, current_user_text=user_text).as_messages()
 
-    async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None, source_metadata: dict[str, Any] | None = None) -> TurnResponse:
+    async def ingest(
+        self,
+        *,
+        session_id: str,
+        text: str | None,
+        upload: UploadFile | None,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> TurnResponse:
         logger.info(
             "clawbot ingest_start session_id=%s has_text=%s has_upload=%s",
             session_id,

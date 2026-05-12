@@ -7,7 +7,7 @@ from core.clawbot.tools import ToolInvocation
 from core.clawbot.planner import ToolPlan
 from core.ingestion.service import IngestionService
 from core.storage.db import DatabaseManager
-from core.storage.repositories import ClarificationRepository, ItemRepository, MessageRepository, UserSignalRepository
+from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, UserSignalRepository
 from core.user_memory import UserMemoryStore
 
 
@@ -39,7 +39,7 @@ def test_runtime_tool_executor_user_memory_tool(tmp_path: Path) -> None:
     item_repository = ItemRepository(database)
     message_repository = MessageRepository(database)
     user_signal_repository = UserSignalRepository(database)
-    clarification_repository = ClarificationRepository(database)
+    pending_state_repository = PendingStateRepository(database)
     ingestion_service = IngestionService(
         item_repository=item_repository,
         message_repository=message_repository,
@@ -49,7 +49,7 @@ def test_runtime_tool_executor_user_memory_tool(tmp_path: Path) -> None:
     executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         user_memory_path=tmp_path / "user-memory" / "USER.md",
     )
 

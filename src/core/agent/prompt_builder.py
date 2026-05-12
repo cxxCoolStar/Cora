@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingState
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingSessionState
 from core.agent.skill_loader import SkillDefinition
 from core.schemas.message import Message
 from core.user_memory import UserMemoryStore
@@ -175,10 +175,9 @@ class AgentPromptBuilder:
     def _format_state_block(runtime: ConversationRuntimeState) -> str:
         state = {
             "last_action": runtime.last_action,
-            "pending_skill": runtime.pending_skill,
             "skill_state": runtime.skill_state,
             "recent_events": [AgentPromptBuilder._event_to_dict(event) for event in runtime.recent_events[:5]],
-            "pending_clarification": AgentPromptBuilder._pending_to_dict(runtime.pending_state),
+            "pending_state": AgentPromptBuilder._pending_to_dict(runtime.pending_state),
         }
         return json.dumps(state, ensure_ascii=False, indent=2)
 
@@ -194,11 +193,12 @@ class AgentPromptBuilder:
         }
 
     @staticmethod
-    def _pending_to_dict(pending: PendingState | None) -> dict:
+    def _pending_to_dict(pending: PendingSessionState | None) -> dict:
         if pending is None:
             return {}
         return {
             "pending_id": pending.pending_id,
+            "skill_name": pending.skill_name,
             "type": pending.payload.get("type") or pending.kind,
             "kind": pending.kind,
             "question": pending.question,

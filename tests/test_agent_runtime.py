@@ -14,7 +14,7 @@ from core.agent.loop import AgentLoop
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.runtime_manager import AgentRuntimeManager
-from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, RuntimeContextSnapshot, ToolStateDelta
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, RuntimeContextSnapshot, RuntimeStateDelta
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillLoader
 from core.clawbot import RuntimeToolExecutor
@@ -26,7 +26,7 @@ from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
 from core.storage.db import DatabaseManager
-from core.storage.repositories import ClarificationRepository, ItemRepository, MessageRepository, UserSignalRepository
+from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, UserSignalRepository
 
 
 class StubModelClient(ModelClient):
@@ -51,7 +51,7 @@ class StubExecutor:
         return self.results.pop(0)
 
 
-class StubClarificationRepository:
+class StubPendingStateRepository:
     def get_latest_pending(self, *, session_id: str):
         return None
 
@@ -105,7 +105,7 @@ def test_skill_loader_reads_archive_core_skill() -> None:
 def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     loader = SkillLoader()
     skills = loader.list_skills()
-    runtime = ConversationRuntimeState(session_id="session-1", last_action="archive.save")
+    runtime = ConversationRuntimeState(session_id="session-1", last_action="capture")
     builder = AgentPromptBuilder()
 
     messages = builder.build_messages(
@@ -131,7 +131,7 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
 def test_prompt_builder_uses_explicit_hermes_lite_section_order(tmp_path: Path) -> None:
     runtime = ConversationRuntimeState(
         session_id="session-ordered",
-        last_action="archive.read",
+        last_action="retrieve",
         recent_events=[
             EventSnapshot(
                 source_event_id="event-1",
@@ -171,7 +171,7 @@ def test_prompt_builder_uses_explicit_hermes_lite_section_order(tmp_path: Path) 
     positions = [content.index(section) for section in section_order]
     assert positions == sorted(positions)
     assert "Conversation state:\n" in content
-    assert '"pending_clarification": {}' in content
+    assert '"pending_state": {}' in content
 
 
 def test_prompt_builder_includes_wechat_platform_hint_when_delivery_available() -> None:
@@ -377,7 +377,7 @@ def test_session_runtime_snapshot_loader_builds_context_from_history_and_events(
         message_repository=StubMessageRepository(
             context={
                 "current_source_event_id": "evt-1",
-                "last_action": "archive.search",
+                "last_action": "retrieve",
             }
         ),
         source_event_repository=source_events,
@@ -386,7 +386,7 @@ def test_session_runtime_snapshot_loader_builds_context_from_history_and_events(
     snapshot = loader.load_context_snapshot(session_id="session-1")
 
     assert snapshot.current_source_event_id == "evt-1"
-    assert snapshot.last_action == "archive.search"
+    assert snapshot.last_action == "retrieve"
     assert len(snapshot.recent_events) == 1
     assert snapshot.recent_events[0].metadata["mime_type"] == "image/jpeg"
 
@@ -421,7 +421,7 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
     item_repository = ItemRepository(database)
     message_repository = MessageRepository(database)
     user_signal_repository = UserSignalRepository(database)
-    clarification_repository = ClarificationRepository(database)
+    pending_state_repository = PendingStateRepository(database)
     ingestion_service = IngestionService(
         item_repository=item_repository,
         message_repository=message_repository,
@@ -431,7 +431,7 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
     executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
     )
     calls: list[dict[str, Any]] = []
 
@@ -441,8 +441,8 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
             reply="saved",
             action="capture",
             item_id="item-1",
-            state_update=ToolStateDelta(
-                last_action="archive.save",
+            state_delta=RuntimeStateDelta(
+                last_action="capture",
                 current_source_event_id="event-2",
             ),
         )
@@ -451,7 +451,7 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
     runtime = ConversationRuntimeState(
         session_id="session-bridge",
         current_source_event_id="event-1",
-        last_action="archive.open",
+        last_action="retrieve",
         metadata={
             "source_message_id": "msg-1",
             "raw_text": "save this",
@@ -469,7 +469,7 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
     assert calls[0]["context"]["current_source_event_id"] == "event-1"
     assert result.metadata is not None
     next_runtime = result.metadata["runtime_state"]
-    assert next_runtime.last_action == "archive.save"
+    assert next_runtime.last_action == "capture"
     assert next_runtime.current_source_event_id == "event-2"
 
 

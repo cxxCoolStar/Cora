@@ -25,7 +25,7 @@ class ToolResult(BaseModel):
     status: str = "completed"
     disposition: str = "continue"
     action: str | None = None
-    state_update: dict[str, Any] = Field(default_factory=dict)
+    state_delta: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

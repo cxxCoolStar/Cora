@@ -12,9 +12,9 @@ from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
-    ClarificationRepository,
     ItemRepository,
     MessageRepository,
+    PendingStateRepository,
     SessionRepository,
     SessionSummaryRepository,
     SourceEventRepository,
@@ -77,7 +77,7 @@ def test_runtime_tool_executor_file_tools(tmp_path: Path) -> None:
     item_repository = ItemRepository(database)
     message_repository = MessageRepository(database)
     user_signal_repository = UserSignalRepository(database)
-    clarification_repository = ClarificationRepository(database)
+    pending_state_repository = PendingStateRepository(database)
     workspace = tmp_path / "workspace"
     source_dir = workspace / "src"
     source_dir.mkdir(parents=True)
@@ -91,7 +91,7 @@ def test_runtime_tool_executor_file_tools(tmp_path: Path) -> None:
     executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         file_tool_root=workspace,
     )
 
@@ -117,7 +117,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     message_repository = MessageRepository(database)
     source_event_repository = SourceEventRepository(database)
     item_repository = ItemRepository(database)
-    clarification_repository = ClarificationRepository(database)
+    pending_state_repository = PendingStateRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
     ingestion_service = IngestionService(
@@ -129,7 +129,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     tool_executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         file_tool_root=tmp_path / "workspace",
     )
     service = ClawBotService(
@@ -139,7 +139,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
         source_event_repository=source_event_repository,
         item_repository=item_repository,
         ingestion_service=ingestion_service,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
         model_client=DummyModelClient(),

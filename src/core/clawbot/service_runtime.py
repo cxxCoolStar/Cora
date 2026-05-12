@@ -21,9 +21,9 @@ from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import RuntimeToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
 from core.storage.repositories import (
-    ClarificationRepository,
     ItemRepository,
     MessageRepository,
+    PendingStateRepository,
     SessionRepository,
     TopicRepository,
     UserSignalRepository,
@@ -57,7 +57,7 @@ class AssistantTurnOutcome:
 @dataclass(slots=True)
 class ClawBotSessionShell:
     message_repository: MessageRepository
-    clarification_repository: ClarificationRepository
+    pending_state_repository: PendingStateRepository
     tool_executor: RuntimeToolExecutor
     source_event_manager: SourceEventManager
     pending_upload_batch_limit: int = 12
@@ -106,11 +106,11 @@ class ClawBotSessionShell:
         source_event_id: str,
         upload: UploadFile,
     ) -> TurnResponse | None:
-        pending = self.clarification_repository.get_latest_pending(session_id=session_id)
+        pending = self.pending_state_repository.get_latest_pending(session_id=session_id)
         if pending is None:
             return None
         payload = dict(pending.pending_payload_json or {})
-        if str(payload.get("type") or "").strip() != "input_interpretation":
+        if str(payload.get("type") or "").strip() != "upload_save":
             return None
         if str(payload.get("pending_input_type") or "").strip() != "upload":
             return None
@@ -141,8 +141,8 @@ class ClawBotSessionShell:
             payload["upload_path"] = first_entry["upload_path"]
             payload["upload_filename"] = first_entry["upload_filename"]
             payload["source_event_id"] = first_entry.get("source_event_id")
-        self.clarification_repository.update_pending(
-            clarification_id=pending.id,
+        self.pending_state_repository.update_pending(
+            pending_state_id=pending.id,
             pending_payload=payload,
         )
         return TurnResponse(

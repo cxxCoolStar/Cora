@@ -17,9 +17,9 @@ from core.llm.openai_vision_client import OpenAIVisionClient
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
     ChannelSessionMapRepository,
-    ClarificationRepository,
     ItemRepository,
     MessageRepository,
+    PendingStateRepository,
     SessionRepository,
     SessionSummaryRepository,
     SourceEventRepository,
@@ -42,7 +42,7 @@ class ClawBotContainer:
     message_repository: MessageRepository
     source_event_repository: SourceEventRepository
     item_repository: ItemRepository
-    clarification_repository: ClarificationRepository
+    pending_state_repository: PendingStateRepository
     user_signal_repository: UserSignalRepository
     topic_repository: TopicRepository
     ingestion_service: IngestionService
@@ -73,7 +73,7 @@ def get_clawbot_container() -> ClawBotContainer:
         message_repository = MessageRepository(database)
         source_event_repository = SourceEventRepository(database)
         item_repository = ItemRepository(database)
-        clarification_repository = ClarificationRepository(database)
+        pending_state_repository = PendingStateRepository(database)
         user_signal_repository = UserSignalRepository(database)
         topic_repository = TopicRepository(database)
         topic_item_repository = TopicItemRepository(database)
@@ -130,8 +130,7 @@ def get_clawbot_container() -> ClawBotContainer:
         tool_executor = RuntimeToolExecutor(
             ingestion_service=ingestion_service,
             item_repository=item_repository,
-            clarification_repository=clarification_repository,
-            topic_organizer=topic_organizer,
+            pending_state_repository=pending_state_repository,
             user_memory_path=settings.user_memory_path,
             file_tool_root=settings.file_tool_root,
         )
@@ -148,7 +147,7 @@ def get_clawbot_container() -> ClawBotContainer:
             source_event_repository=source_event_repository,
             item_repository=item_repository,
             ingestion_service=ingestion_service,
-            clarification_repository=clarification_repository,
+            pending_state_repository=pending_state_repository,
             user_signal_repository=user_signal_repository,
             topic_repository=topic_repository,
             model_client=model_client,
@@ -166,7 +165,7 @@ def get_clawbot_container() -> ClawBotContainer:
             message_repository=message_repository,
             source_event_repository=source_event_repository,
             item_repository=item_repository,
-            clarification_repository=clarification_repository,
+            pending_state_repository=pending_state_repository,
             user_signal_repository=user_signal_repository,
             topic_repository=topic_repository,
             ingestion_service=ingestion_service,

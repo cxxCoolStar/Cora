@@ -86,7 +86,7 @@ Load this skill with `skill_view("archive-core")` first, then run the dispatcher
 
 The dispatcher expects one JSON object with:
 
-- `intent`: `save`, `search`, `read`, `delete`, or `deliver`
+- `intent`: `save`, `search`, `read`, `delete`, `deliver`, `overview`, `list_topics`, `clarify`, or `resolve_pending`
 - `session_id`
 - `source_message_id`
 - optional `source_event_id`
@@ -99,8 +99,10 @@ The dispatcher returns structured JSON with:
 - `status`
 - `disposition`
 - `action`
+- `effects`
 - `artifacts`
-- `state_update`
+- `state_delta`
+- optional `pending_state_delta` when the workflow needs clarification or resolves an existing pending state
 
 - `scripts/save_asset.py`
   Saves a file into a topic folder and appends an index record.

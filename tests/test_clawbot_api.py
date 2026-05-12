@@ -26,20 +26,29 @@ from core.config import CoreSettings  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentClassifier  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
-from core.clawbot.planner import AgentPlanner, ToolPlan  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
 from core.clawbot import RuntimeToolExecutor  # noqa: E402
-from core.clawbot.tools import ToolInvocation  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ClarificationRepository, ItemRepository, MessageRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ItemRepository, MessageRepository, PendingStateRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
 from core.schemas.message import Message  # noqa: E402
 from core.schemas.model import ModelResponse  # noqa: E402
 from core.schemas.tool import ToolCall, ToolSpec  # noqa: E402
+
+
+def archive_skill_call(intent: str, **arguments) -> ToolCall:
+    return ToolCall(
+        tool_name="skill_run",
+        arguments={
+            "name": "archive-core",
+            "script_path": "scripts/archive_dispatch.py",
+            "input": {"intent": intent, **arguments},
+        },
+    )
 
 
 class FakeLLMIntentClassifier:
@@ -66,7 +75,7 @@ class StubTopicModelClient(ModelClient):
             payload = json.loads(state_text)
         except json.JSONDecodeError:
             return {}
-        pending = payload.get("pending_clarification")
+        pending = payload.get("pending_state")
         return pending if isinstance(pending, dict) else {}
 
     @staticmethod
@@ -94,8 +103,8 @@ class StubTopicModelClient(ModelClient):
                         "user_facts": ["User is archiving conversation artifacts."],
                         "open_loops": [],
                         "resolved_requests": ["Historical turns were compacted into a structured summary."],
-                        "recent_decisions": ["Use archive and archive_state as the main tool surface."],
-                        "critical_context": ["Preserve item references and pending clarification state when relevant."],
+                        "recent_decisions": ["Use the archive-core skill workflow as the main tool surface."],
+                        "critical_context": ["Preserve item references and pending state when relevant."],
                     },
                     ensure_ascii=False,
                 )
@@ -111,53 +120,51 @@ class StubTopicModelClient(ModelClient):
             lowered = user_text.lower()
             pending = self._pending_state(messages)
             pending_type = str(pending.get("type") or "").strip()
-            if pending_type == "input_interpretation":
+            if pending_type == "upload_save":
                 if any(token in user_text for token in ["取消", "不用", "算了"]):
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "cancel"})])
+                    return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="cancel")])
                 note = "" if any(token in user_text for token in ["保存", "记一下", "记住"]) and len(user_text.strip()) <= 8 else user_text
-                arguments = {"action": "resolve_pending", "resolution": "save"}
+                arguments = {"resolution": "save"}
                 if note.strip():
                     arguments["note"] = note
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments=arguments)])
-            if pending_type == "capture_intent":
+                return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", **arguments)])
+            if pending_type == "save_decision":
                 if "总结" in user_text or "整理" in user_text:
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "summarize"})])
+                    return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="summarize")])
                 if any(token in user_text for token in ["取消", "不用", "算了"]):
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "cancel"})])
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "save"})])
-            if pending_type == "reference_resolution":
+                    return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="cancel")])
+                return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="save")])
+            if pending_type == "item_selection":
                 if "第二个" in user_text:
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "select", "target": {"type": "working_set_rank", "value": 2}, "mode": "full_text"})])
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "resolve_pending", "resolution": "select", "target": {"type": "working_set_rank", "value": 1}, "mode": "full_text"})])
+                    return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="select", target={"type": "working_set_rank", "value": 2}, mode="full_text")])
+                return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="select", target={"type": "working_set_rank", "value": 1}, mode="full_text")])
             if user_text == "[file upload: note.txt]" or user_text.startswith("[file upload:"):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "save"})])
+                return ModelResponse(tool_calls=[archive_skill_call("clarify")])
             if "知识库" in user_text and ("有什么" in user_text or "概览" in user_text):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "overview"})])
+                return ModelResponse(tool_calls=[archive_skill_call("overview")])
             if "主题" in user_text or "topic" in lowered:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "list_topics"})])
+                return ModelResponse(tool_calls=[archive_skill_call("list_topics")])
             if "删除" in user_text or "删掉" in user_text or "移除" in user_text:
-                if "第二个" in user_text:
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "working_set_rank", "value": 2}})])
-                if "第一个" in user_text:
-                    return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "working_set_rank", "value": 1}})])
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "delete", "target": {"type": "auto", "value": ""}})])
+                if "第" in user_text:
+                    return ModelResponse(tool_calls=[archive_skill_call("clarify", question="请告诉我你想删哪一条，或者给我更具体一点的描述。")])
+                return ModelResponse(tool_calls=[archive_skill_call("delete", query=user_text)])
             if "第二个" in user_text and ("全文" in user_text or "给我" in user_text):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "read", "target": {"type": "working_set_rank", "value": 2}, "mode": "full_text"})])
+                return ModelResponse(tool_calls=[archive_skill_call("clarify", question="请告诉我你想看哪一条，或者给我更具体一点的描述。")])
             if "第一个" in user_text and "面试宝典" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "read", "target": {"type": "working_set_rank", "value": 1}, "mode": "full_text"})])
+                return ModelResponse(tool_calls=[archive_skill_call("clarify", question="请告诉我你想看哪一条，或者给我更具体一点的描述。")])
             if "这里面写了什么" in user_text or "展开讲讲" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "read", "target": {"type": "auto", "value": ""}, "mode": "full_text"})])
+                return ModelResponse(tool_calls=[archive_skill_call("clarify", question="请告诉我你想看哪一条，或者给我更具体一点的描述。")])
             if user_text.startswith("http://") or user_text.startswith("https://"):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "save", "text": user_text})])
+                return ModelResponse(tool_calls=[archive_skill_call("save", text=user_text)])
             if "帮我找" in user_text or "帮我查" in user_text or "查一下" in user_text or "告诉我" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "open", "query": user_text, "top_k": 3})])
+                return ModelResponse(tool_calls=[archive_skill_call("search", query=user_text)])
             if "总结" in user_text:
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "summarize", "target": {"type": "auto", "value": ""}, "style": "brief"})])
+                return ModelResponse(tool_calls=[archive_skill_call("resolve_pending", resolution="summarize")])
             if user_text in {"你好", "您好", "hi", "hello"}:
                 return ModelResponse(assistant_text="你好，我是Cora,可以帮你保存文本、链接和文件，也可以帮你查找之前发过的资料。")
             if len(user_text) >= 120 or ("\n" in user_text and len(user_text) >= 40):
-                return ModelResponse(tool_calls=[ToolCall(tool_name="archive_state", arguments={"action": "clarify_capture_intent", "question": "这段内容你是想让我先保存，还是先帮你总结一下？"})])
-            return ModelResponse(tool_calls=[ToolCall(tool_name="archive", arguments={"action": "save", "text": user_text})])
+                return ModelResponse(tool_calls=[archive_skill_call("clarify", question="这段内容你是想让我先保存，还是先帮你总结一下？")])
+            return ModelResponse(tool_calls=[archive_skill_call("save", text=user_text)])
 
         if "topic-query-router" in session_id or "existing_topics" in user_text and "query" in user_text:
             if "网络配置" in user_text or "内网" in user_text:
@@ -176,40 +183,15 @@ class StubTopicModelClient(ModelClient):
         return ModelResponse(assistant_text='{"topic_name":"杂项资料","slug":"杂项资料","summary":"一般资料。","tags":[],"reason":"Generic archive item."}')
 
 
-class StubPlannerModelClient(ModelClient):
-    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
-        user_text = messages[-1].content if messages else ""
-        if "第一个" in user_text and "面试宝典" in user_text:
-            return ModelResponse(
-                assistant_text='{"tool":"archive","action":"read","reason":"用户明确引用上一轮结果的第一个条目，并要求查看内容。","reference_strategy":"working_set_selection","target_rank":1,"target_title_hint":"面试宝典","mode":"full_text"}'
-            )
-        if "这里面写了什么" in user_text:
-            return ModelResponse(
-                assistant_text='{"tool":"archive","action":"read","reason":"用户在追问当前 focus item 的正文内容。","reference_strategy":"focus_item","mode":"full_text"}'
-            )
-        return ModelResponse(
-            assistant_text='{"tool":"archive","action":"open","reason":"默认按主题打开相关资料。","query":"' + user_text.replace('"', '\\"') + '","top_k":3}'
-        )
-
-
-class StubSendFilePlannerModelClient(ModelClient):
-    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
-        return ModelResponse(
-            assistant_text='{"tool":"archive","action":"deliver","reason":"The user wants the original file delivered back over the channel.","reference_strategy":"working_set_selection","target_rank":2,"target_title_hint":"resume.pdf","caption":"Here is the original file."}'
-        )
-
-
 class StubSendFileFailureModelClient(ModelClient):
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
+        latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
         if latest_tool is not None:
             return ModelResponse(assistant_text="已经发送，请查收。")
         return ModelResponse(
             tool_calls=[
-                ToolCall(
-                    tool_name="archive",
-                    arguments={"action": "deliver", "target": {"type": "auto", "value": ""}},
-                )
+                archive_skill_call("deliver", query=latest_user.content if latest_user else "")
             ]
         )
 
@@ -221,6 +203,7 @@ class StubToollessDeliveryRetryModelClient(ModelClient):
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         self.calls += 1
         latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
+        latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
         if latest_tool is not None:
             return ModelResponse(assistant_text="已经发送，请查收。")
         correction_present = any(
@@ -230,13 +213,7 @@ class StubToollessDeliveryRetryModelClient(ModelClient):
         if correction_present:
             return ModelResponse(
                 tool_calls=[
-                    ToolCall(
-                        tool_name="archive",
-                        arguments={
-                            "action": "deliver",
-                            "target": {"type": "auto", "value": ""},
-                        },
-                    )
+                    archive_skill_call("deliver", query=latest_user.content if latest_user else "")
                 ]
             )
         return ModelResponse(assistant_text="抱歉，我无法直接转发这张照片给你。")
@@ -276,7 +253,7 @@ def build_test_container(
     message_repository = MessageRepository(database)
     source_event_repository = SourceEventRepository(database)
     item_repository = ItemRepository(database)
-    clarification_repository = ClarificationRepository(database)
+    pending_state_repository = PendingStateRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
     topic_item_repository = TopicItemRepository(database)
@@ -300,8 +277,7 @@ def build_test_container(
     tool_executor = RuntimeToolExecutor(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
-        topic_organizer=topic_organizer,
+        pending_state_repository=pending_state_repository,
     )
     model_client = StubTopicModelClient()
     context_budget_manager = ContextBudgetManager(
@@ -317,7 +293,7 @@ def build_test_container(
         source_event_repository=source_event_repository,
         item_repository=item_repository,
         ingestion_service=ingestion_service,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
         model_client=model_client,
@@ -333,7 +309,7 @@ def build_test_container(
         message_repository=message_repository,
         source_event_repository=source_event_repository,
         item_repository=item_repository,
-        clarification_repository=clarification_repository,
+        pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
         ingestion_service=ingestion_service,
@@ -418,7 +394,7 @@ def test_runtime_context_snapshot_keeps_operational_state_separate_from_history(
         metadata={
             "context": {
                 "current_source_event_id": source_event.id,
-                "last_action": "archive.search",
+                "last_action": "retrieve",
                 "recent_events": [],
             }
         },
@@ -427,7 +403,7 @@ def test_runtime_context_snapshot_keeps_operational_state_separate_from_history(
     snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
 
     assert snapshot.current_source_event_id == source_event.id
-    assert snapshot.last_action == "archive.search"
+    assert snapshot.last_action == "retrieve"
     assert snapshot.recent_events
 
 
@@ -1512,55 +1488,6 @@ def test_list_topics_routes_to_topic_listing(tmp_path):
     assert "当前共有" in payload["reply"]
 
 
-def test_planner_uses_llm_reference_resolution_for_rank_plus_title():
-    planner = AgentPlanner(model_client=StubPlannerModelClient())
-
-    plan = planner.plan(
-        text="我想看看第一个，面试宝典",
-        has_upload=False,
-        coarse_intent="retrieve",
-        context={
-            "last_action": "open_topic",
-            "focus_item_id": "item-1",
-            "focus_item_title": "售前报价Agent-面试宝典",
-            "working_set": [
-                {"rank": 1, "item_id": "item-1", "title": "售前报价Agent-面试宝典", "summary": "面试资料"},
-                {"rank": 2, "item_id": "item-2", "title": "连接内网", "summary": "网络配置"},
-            ],
-        },
-    )
-
-    assert plan is not None
-    assert plan.source == "llm"
-    assert plan.tool == "archive"
-    assert plan.arguments["action"] == "read"
-    assert plan.arguments["target"]["type"] == "auto"
-    assert plan.arguments["mode"] == "full_text"
-    assert plan.arguments["target_title_hint"] == "面试宝典"
-
-
-def test_planner_uses_llm_focus_item_for_follow_up_read():
-    planner = AgentPlanner(model_client=StubPlannerModelClient())
-
-    plan = planner.plan(
-        text="这里面写了什么",
-        has_upload=False,
-        coarse_intent="organize",
-        context={
-            "last_action": "open_topic",
-            "focus_item_id": "item-1",
-            "focus_item_title": "售前报价Agent-面试宝典",
-            "working_set": [{"rank": 1, "item_id": "item-1", "title": "售前报价Agent-面试宝典", "summary": "面试资料"}],
-        },
-    )
-
-    assert plan is not None
-    assert plan.source == "llm"
-    assert plan.tool == "archive"
-    assert plan.arguments["action"] == "read"
-    assert plan.arguments["target"]["type"] == "auto"
-    assert plan.arguments["mode"] == "full_text"
-
 def test_llm_router_can_promote_ambiguous_text_to_capture():
     router = IntentRouter(
         llm_classifier=FakeLLMIntentClassifier(
@@ -1677,7 +1604,7 @@ def test_wechat_gateway_ingests_file_event(tmp_path):
     assert result.action == "capture"
 
 
-def test_build_wechat_runtime_wires_file_delivery_tool(tmp_path):
+def test_build_wechat_runtime_wires_file_delivery_runtime(tmp_path):
     class _SpyWechatIlinkClient:
         def __init__(self, config) -> None:
             self.config = config
@@ -1724,30 +1651,6 @@ def test_archive_is_exposed_via_skill_run_tooling(tmp_path):
     assert "skill_run" in visible_specs
 
 
-def test_planner_accepts_archive_deliver_action():
-    planner = AgentPlanner(model_client=StubSendFilePlannerModelClient())
-
-    plan = planner.plan(
-        text="???? resume.pdf ???",
-        has_upload=False,
-        coarse_intent="retrieve",
-        context={
-            "last_action": "open_topic",
-            "working_set": [
-                {"rank": 1, "item_id": "item-1", "title": "notes.md", "summary": "notes"},
-                {"rank": 2, "item_id": "item-2", "title": "resume.pdf", "summary": "resume"},
-            ],
-        },
-    )
-
-    assert plan is not None
-    assert plan.tool == "archive"
-    assert plan.arguments["action"] == "deliver"
-    assert plan.arguments["target"]["type"] == "auto"
-    assert plan.arguments["target_title_hint"] == "resume.pdf"
-    assert plan.arguments["caption"] == "Here is the original file."
-
-
 def test_send_file_tool_can_resolve_title_hint_and_deliver(tmp_path):
     class _Gateway:
         def __init__(self) -> None:
@@ -1776,31 +1679,24 @@ def test_send_file_tool_can_resolve_title_hint_and_deliver(tmp_path):
     session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
     container.configure_gateway(gateway, session_map_repository)
 
-    plan = ToolPlan(
-        tool="archive",
-        arguments={
-            "action": "deliver",
-            "target": {"type": "focus_item", "value": ""},
-            "target_title_hint": "resume",
-            "caption": "send the source file",
-        },
-        reason="test",
-    )
+    runtime = container.clawbot_service._agent_turn_runner.prepare_turn(
+        session_id=session.id,
+        user_text="把 resume 发给我",
+        source_message_id=source_message.id,
+        raw_text="把 resume 发给我",
+        upload=None,
+        context_snapshot=container.clawbot_service.load_context_snapshot(session_id=session.id),
+    ).runtime
     result = asyncio.run(
-        container.tool_executor._tool_send_file_to_user(
-            ToolInvocation(
-                session_id=session.id,
-                source_message_id=source_message.id,
-                plan=plan,
-                text="? resume ???",
-                upload=None,
-                context={"working_set": [], "focus_item_id": "", "focus_item_title": ""},
-            )
+        container.tool_executor.execute_tool_call(
+            session_id=session.id,
+            tool_call=archive_skill_call("deliver", query="resume"),
+            runtime=runtime,
         )
     )
 
     assert result.action == "retrieve"
-    assert result.item_id == item.id
+    assert result.metadata["item_id"] == item.id
     assert gateway.calls
     assert gateway.calls[0]["user_id"] == "wx-user-1"
     assert gateway.calls[0]["file_path"] == item.metadata_json["stored_file_path"]
@@ -1845,7 +1741,7 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
 
     assert item is not None
     assert result.primary_tool is not None
-    assert result.primary_tool.tool_name == "archive"
+    assert result.primary_tool.tool_name == "skill_run"
     assert result.primary_tool.action == "chat"
     assert "network down" in result.reply
     assert result.reply != "已经发送，请查收。"
@@ -1898,7 +1794,7 @@ def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
     assert item is not None
     assert retry_model.calls >= 2
     assert result.primary_tool is not None
-    assert result.primary_tool.tool_name == "archive"
+    assert result.primary_tool.tool_name == "skill_run"
     assert result.primary_tool.action == "retrieve"
     assert gateway.calls
     assert gateway.calls[0]["user_id"] == "wx-user-1"
@@ -1963,23 +1859,22 @@ def test_send_file_tool_requires_real_file_item_without_archive_fallback(tmp_pat
     session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
     container.configure_gateway(gateway, session_map_repository)
 
+    runtime = container.clawbot_service._agent_turn_runner.prepare_turn(
+        session_id=session.id,
+        user_text="把这些照片发给我",
+        source_message_id=source_message.id,
+        raw_text="把这些照片发给我",
+        upload=None,
+        context_snapshot=container.clawbot_service.load_context_snapshot(session_id=session.id),
+    ).runtime
     result = asyncio.run(
-        container.tool_executor._tool_send_file_to_user(
-            ToolInvocation(
-                session_id=session.id,
-                source_message_id=source_message.id,
-                plan=ToolPlan(
-                    tool="archive",
-                    arguments={"action": "deliver", "target": {"type": "item_id", "value": note_item.id}},
-                    reason="test",
-                ),
-                text="把这些照片发给我",
-                upload=None,
-                context={},
-            )
+        container.tool_executor.execute_tool_call(
+            session_id=session.id,
+            tool_call=archive_skill_call("deliver", item_id=note_item.id),
+            runtime=runtime,
         )
     )
 
     assert result.action == "chat"
-    assert "没有可发送的原始文件路径" in result.reply
+    assert "没有可发送的原始文件路径" in result.content
     assert gateway.calls == []

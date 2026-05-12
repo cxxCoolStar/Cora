@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.agent.skill_protocol import SkillExecutionResult
 from core.agent.skill_loader import SkillLoader
 
 
@@ -27,7 +28,7 @@ class SkillScriptExecutor:
         self.skill_loader = skill_loader or SkillLoader()
         self.python_executable = python_executable or sys.executable
 
-    def run(self, request: SkillScriptRequest) -> dict[str, Any]:
+    def run(self, request: SkillScriptRequest) -> SkillExecutionResult:
         viewed = self.skill_loader.view_skill(name=request.skill_name, file_path=request.script_path)
         if viewed is None:
             raise ValueError(f"Unknown skill: {request.skill_name}")
@@ -54,5 +55,4 @@ class SkillScriptExecutor:
             raise ValueError(f"Skill script returned invalid JSON: {viewed.file_path}") from exc
         if not isinstance(parsed, dict):
             raise ValueError("Skill script must return one JSON object.")
-        return parsed
-
+        return SkillExecutionResult.from_payload(parsed)

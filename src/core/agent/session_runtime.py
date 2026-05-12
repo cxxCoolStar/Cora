@@ -24,12 +24,12 @@ class SessionRuntimeSnapshotLoader:
     ) -> RuntimeContextSnapshot:
         current_source_event_id = str(base_context.get("current_source_event_id") or "").strip() or None
         last_action_value = str(last_action or base_context.get("last_action") or "").strip() or None
-        pending_skill = str(base_context.get("pending_skill") or "").strip() or None
+        pending_state = self._pending_state_from_context(dict(base_context.get("pending_state") or {}))
         return RuntimeContextSnapshot(
             current_source_event_id=current_source_event_id,
             recent_events=self.load_recent_event_snapshots(session_id=session_id),
+            pending_state=pending_state,
             last_action=last_action_value,
-            pending_skill=pending_skill,
             skill_state=dict(base_context.get("skill_state") or {}),
         )
 
@@ -50,3 +50,19 @@ class SessionRuntimeSnapshotLoader:
                 )
             )
         return snapshots
+
+    @staticmethod
+    def _pending_state_from_context(payload: dict[str, Any]):
+        if not payload:
+            return None
+        from core.agent.runtime_state import PendingSessionState
+
+        kind = str(payload.get("kind") or payload.get("type") or "choice").strip() or "choice"
+        return PendingSessionState(
+            pending_id=str(payload.get("pending_id") or "").strip(),
+            skill_name=str(payload.get("skill_name") or "").strip() or None,
+            kind=kind,  # type: ignore[arg-type]
+            question=str(payload.get("question") or "").strip(),
+            choices=[str(choice) for choice in payload.get("choices") or []],
+            payload=dict(payload),
+        )
