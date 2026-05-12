@@ -216,3 +216,23 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
+    if registry.get("skill_run") is None:
+        registry.register(
+            ToolSpec(
+                name="skill_run",
+                toolset="skills_execute",
+                description="Run an executable helper script that belongs to a loaded local skill. Use this only after reading the relevant skill instructions and pass structured JSON input expected by that script.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "script_path": {"type": "string"},
+                        "input": {"type": "object"},
+                    },
+                    "required": ["name", "script_path", "input"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_skill_run(invocation),
+                is_agent_stateful=True,
+            )
+        )

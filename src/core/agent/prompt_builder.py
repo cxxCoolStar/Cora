@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, ItemSnapshot, PendingState
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingState
 from core.agent.skill_loader import SkillDefinition
 from core.schemas.message import Message
 from core.user_memory import UserMemoryStore
@@ -21,7 +21,7 @@ EXECUTION_GUIDANCE = (
     "Do not pretend a tool action happened if it did not. If the user asks about current saved state, inspect the relevant tool-backed state instead of guessing. "
     "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details. "
     "When a project-specific workflow may exist, inspect relevant skills with skills_list or skill_view before improvising. "
-    "If the user asks you to send back a previously saved photo, image, attachment, or file, do not claim that delivery is unsupported when a delivery tool is available; use the archive deliver action instead. "
+    "If a loaded skill points you to an executable helper script, use skill_run with the exact script path and structured input instead of free-chatting the workflow. "
     "Requests to delete saved content or manage long-term user memory must go through tools rather than plain chat replies."
 )
 
@@ -33,7 +33,8 @@ MEMORY_GUIDANCE = (
 
 SKILLS_GUIDANCE = (
     "Skills are reusable workflow documents. If a skill matches or is even partially relevant, load it with skill_view and follow its instructions. "
-    "Skills may also include supporting files under references, templates, assets, or scripts, which can be loaded with skill_view(name, file_path)."
+    "Skills may also include supporting files under references, templates, assets, or scripts, which can be loaded with skill_view(name, file_path). "
+    "When a skill provides an executable helper under scripts, run it through skill_run rather than inventing your own protocol."
 )
 
 PLATFORM_HINTS = {
@@ -87,34 +88,32 @@ class AgentPromptBuilder:
         upload_name: str | None,
         delivery_available: bool,
     ) -> list[str]:
-        system_parts = [
-            self.agent_identity,
-            "",
-            "Execution guidance:",
-            EXECUTION_GUIDANCE,
-            "",
-            "Memory guidance:",
-            MEMORY_GUIDANCE,
-            "",
-            "Skills guidance:",
-            SKILLS_GUIDANCE,
-            "",
-            "Runtime state:",
-        ]
+        system_parts = [self.agent_identity]
+        system_parts.extend(["", "Execution guidance:", EXECUTION_GUIDANCE])
+        system_parts.extend(["", "Memory guidance:", MEMORY_GUIDANCE])
+        system_parts.extend(["", "Skills guidance:", SKILLS_GUIDANCE])
         platform_hint = self._platform_hint(runtime=runtime, delivery_available=delivery_available)
         if platform_hint:
             system_parts.extend(["", "Platform hints:", platform_hint])
+
+        system_parts.extend(["", "Runtime summary:"])
         system_parts.extend(f"- {line}" for line in runtime.summary_lines())
+
         user_memory_block = self._load_user_memory_block()
         if user_memory_block:
-            system_parts.extend(["", "User memory:", user_memory_block])
+            system_parts.extend(["", "User memory snapshot:", user_memory_block])
+
         skill_lines = self._format_skills_index(skills)
         if skill_lines:
-            system_parts.extend(["", "Skills (mandatory):"])
+            system_parts.extend(["", "Shared skills summary:"])
             system_parts.extend(skill_lines)
+
         if upload_name:
-            system_parts.extend(["", f"Current upload: {upload_name}"])
-        system_parts.extend(["", self._format_state_block(runtime)])
+            system_parts.extend(["", "Upload hint:", upload_name])
+
+        state_block = self._format_state_block(runtime)
+        system_parts.extend(["", "Structured conversation state:", state_block])
+        system_parts.extend(["", "Conversation state:", state_block])
         return system_parts
 
     @staticmethod
@@ -156,6 +155,7 @@ class AgentPromptBuilder:
         lines = [
             "Before replying, scan the skills below. If a skill is relevant, you must load it with skill_view(name) before relying on memory or ad-hoc reasoning.",
             "Use skills_list if you need to re-check the available skills from a tool call. Use skill_view(name, file_path) to load supporting files when a skill points you there.",
+            "When a skill includes an executable helper script, run it with skill_run(name, script_path, input).",
             "<available_skills>",
         ]
         for category in sorted(grouped):
@@ -175,23 +175,12 @@ class AgentPromptBuilder:
     def _format_state_block(runtime: ConversationRuntimeState) -> str:
         state = {
             "last_action": runtime.last_action,
+            "pending_skill": runtime.pending_skill,
+            "skill_state": runtime.skill_state,
             "recent_events": [AgentPromptBuilder._event_to_dict(event) for event in runtime.recent_events[:5]],
             "pending_clarification": AgentPromptBuilder._pending_to_dict(runtime.pending_state),
         }
-        return "Conversation state:\n" + json.dumps(state, ensure_ascii=False, indent=2)
-
-    @staticmethod
-    def _item_to_dict(item: ItemSnapshot | None) -> dict | None:
-        if item is None:
-            return None
-        return {
-            "item_id": item.item_id,
-            "title": item.title,
-            "item_type": item.item_type,
-            "summary": item.summary,
-            "rank": item.rank,
-            "metadata": item.metadata,
-        }
+        return json.dumps(state, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _event_to_dict(event: EventSnapshot) -> dict:

@@ -18,7 +18,7 @@ class ArchiveCaptureHost(Protocol):
     clarification_repository: Any
     item_repository: Any
 
-    def _build_context(self, *, invocation: "ToolInvocation", last_action: str) -> dict[str, Any]:
+    def _build_state_update(self, *, invocation: "ToolInvocation", last_action: str) -> Any:
         ...
 
     @staticmethod
@@ -68,7 +68,7 @@ class ArchiveCaptureOperationHandler:
             text=None,
             upload=invocation.upload,
         )
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="save_file",
         )
@@ -76,7 +76,7 @@ class ArchiveCaptureOperationHandler:
             reply=saved.reply,
             action="capture",
             item_id=saved.item_id,
-            metadata={"context": context},
+            state_update=state_update,
         )
 
     async def save_content(self, invocation: "ToolInvocation") -> "ToolExecutionResult":
@@ -89,7 +89,7 @@ class ArchiveCaptureOperationHandler:
             text=str(invocation.plan.arguments.get("text") or invocation.text or ""),
             upload=None,
         )
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="save_content",
         )
@@ -97,7 +97,7 @@ class ArchiveCaptureOperationHandler:
             reply=saved.reply,
             action="capture",
             item_id=saved.item_id,
-            metadata={"context": context},
+            state_update=state_update,
         )
 
     async def persist_pending_upload(self, *, upload: UploadFile) -> dict[str, str]:
@@ -130,7 +130,7 @@ class ArchiveClarificationHost(Protocol):
     ingestion_service: Any
     item_repository: Any
 
-    def _build_context(self, *, invocation: "ToolInvocation", last_action: str) -> dict[str, Any]:
+    def _build_state_update(self, *, invocation: "ToolInvocation", last_action: str) -> Any:
         ...
 
     def _format_item_reply(self, *, item: "ItemRecord", mode: str) -> str:
@@ -244,11 +244,11 @@ class ArchiveClarificationOperationHandler:
                 self.host.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
                 pending_text = str(pending_payload.get("text") or "")
                 reply = f"Here is a quick summary of the earlier content: {self.host.ingestion_service.preview_summary(pending_text)}"
-                context = self.host._build_context(
+                state_update = self.host._build_state_update(
                     invocation=invocation,
                     last_action="summarize_item",
                 )
-                return ToolExecutionResult(reply=reply, action="organize", metadata={"context": context})
+                return ToolExecutionResult(reply=reply, action="organize", state_update=state_update)
             if resolution == "save":
                 pending_text = str(pending_payload.get("text") or "")
                 saved_item = await self.host.ingestion_service.ingest(
@@ -259,12 +259,12 @@ class ArchiveClarificationOperationHandler:
                     upload=None,
                 )
                 self.host.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-                context = self.host._build_context(
+                state_update = self.host._build_state_update(
                     invocation=invocation,
                     last_action="save_content",
                 )
                 reply = f"{saved_item.reply} I used your clarification to save the earlier content."
-                return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
+                return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, state_update=state_update)
             return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
 
         if pending_type == "reference_resolution":
@@ -276,11 +276,11 @@ class ArchiveClarificationOperationHandler:
             self.host.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
             mode = str(invocation.plan.arguments.get("mode") or "full_text")
             reply = self.host._format_item_reply(item=item, mode=mode)
-            context = self.host._build_context(
+            state_update = self.host._build_state_update(
                 invocation=invocation,
                 last_action="read_item",
             )
-            return ToolExecutionResult(reply=reply, action="retrieve", item_id=item.id, metadata={"context": context})
+            return ToolExecutionResult(reply=reply, action="retrieve", item_id=item.id, state_update=state_update)
 
         return ToolExecutionResult(reply=pending.question, action="clarify", needs_clarification=True)
 
@@ -356,11 +356,11 @@ class ArchiveClarificationOperationHandler:
             )
             reply = f"{saved_item.reply} I used your clarification to handle the earlier content."
         self.host.clarification_repository.resolve(clarification_id=pending.id, status="resolved")
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="save_file" if normalized_entries else "save_content",
         )
-        return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, metadata={"context": context})
+        return ToolExecutionResult(reply=reply, action="capture", item_id=saved_item.item_id, state_update=state_update)
 
     def resolve_pending_selected_item(self, *, invocation: "ToolInvocation", pending_payload: dict[str, Any]) -> "ItemRecord | None":
         candidates = [
@@ -397,7 +397,7 @@ class ArchiveRetrieveHost(Protocol):
     session_map_repository: Any
     channel_name: str
 
-    def _build_context(self, *, invocation: "ToolInvocation", last_action: str) -> dict[str, Any]:
+    def _build_state_update(self, *, invocation: "ToolInvocation", last_action: str) -> Any:
         ...
 
     def _single_short_item_from_topic_matches(self, topic_matches: list[tuple[object, list["ItemRecord"]]]) -> "ItemRecord | None":
@@ -511,7 +511,7 @@ class ArchiveRetrieveOperationHandler:
                     single_item.title[:120],
                 )
                 reply = self.host._format_item_reply(item=single_item, mode="full_text")
-                context = self.host._build_context(
+                state_update = self.host._build_state_update(
                     invocation=invocation,
                     last_action="open_topic",
                 )
@@ -519,11 +519,11 @@ class ArchiveRetrieveOperationHandler:
                     reply=reply,
                     action="retrieve",
                     item_id=single_item.id,
-                    metadata={"context": context},
+                    state_update=state_update,
                 )
             reply, working_set = self.host._format_topic_reply(topic_matches)
             focus_item_id = working_set[0]["item_id"] if working_set else None
-            context = self.host._build_context(
+            state_update = self.host._build_state_update(
                 invocation=invocation,
                 last_action="open_topic",
             )
@@ -531,7 +531,7 @@ class ArchiveRetrieveOperationHandler:
                 reply=reply,
                 action="retrieve",
                 item_id=focus_item_id,
-                metadata={"context": context},
+                state_update=state_update,
             )
         logger.info(
             "tool open_topic miss session_id=%s query=%s",
@@ -541,7 +541,7 @@ class ArchiveRetrieveOperationHandler:
         return ToolExecutionResult(
             reply="我没有在当前的 topic/wiki 索引里找到相关资料。请先确认这份内容已经被归档，或者让我重新整理知识库。",
             action="retrieve",
-            metadata={"context": self.host._build_context(invocation=invocation, last_action="open_topic")},
+            state_update=self.host._build_state_update(invocation=invocation, last_action="open_topic"),
         )
 
     def read_item(self, invocation: "ToolInvocation") -> "ToolExecutionResult":
@@ -561,7 +561,7 @@ class ArchiveRetrieveOperationHandler:
             return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
         mode = str(invocation.plan.arguments.get("mode") or "summary")
         reply = self.host._format_item_reply(item=item, mode=mode)
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="read_item",
         )
@@ -569,7 +569,7 @@ class ArchiveRetrieveOperationHandler:
             reply=reply,
             action="retrieve",
             item_id=item.id,
-            metadata={"context": context},
+            state_update=state_update,
         )
 
     def summarize_item(self, invocation: "ToolInvocation") -> "ToolExecutionResult":
@@ -588,7 +588,7 @@ class ArchiveRetrieveOperationHandler:
         except KeyError as exc:
             return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
         reply = self.host._format_summary_reply(item=item)
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="summarize_item",
         )
@@ -596,7 +596,7 @@ class ArchiveRetrieveOperationHandler:
             reply=reply,
             action="organize",
             item_id=item.id,
-            metadata={"context": context},
+            state_update=state_update,
         )
 
     def delete_item(self, invocation: "ToolInvocation") -> "ToolExecutionResult":
@@ -615,7 +615,7 @@ class ArchiveRetrieveOperationHandler:
         except KeyError as exc:
             return ToolExecutionResult(reply=str(exc.args[0]), action="clarify", needs_clarification=True)
         deleted = self.host.item_repository.soft_delete(item_id=item.id, session_id=invocation.session_id)
-        context = self.host._build_context(
+        state_update = self.host._build_state_update(
             invocation=invocation,
             last_action="delete_item",
         )
@@ -623,7 +623,7 @@ class ArchiveRetrieveOperationHandler:
             reply=f"已删除资料 `{deleted.title}`。它不会再出现在默认列表和检索结果里。",
             action="delete",
             item_id=deleted.id,
-            metadata={"context": context},
+            state_update=state_update,
         )
 
     async def send_file_to_user(self, invocation: "ToolInvocation") -> "ToolExecutionResult":
@@ -689,7 +689,7 @@ class ArchiveRetrieveOperationHandler:
                     return ToolExecutionResult(reply=f"发送文件失败：{error_msg}", action="chat")
                 sent_count += 1
             context_item = delivery_targets[0].get("item") or item
-            context = self.host._build_context(
+            state_update = self.host._build_state_update(
                 invocation=invocation,
                 last_action="send_file_to_user",
             )
@@ -698,13 +698,13 @@ class ArchiveRetrieveOperationHandler:
                     reply=f"已经把 `{delivery_targets[0]['display_title']}` 发给你了，请查收。",
                     action="retrieve",
                     item_id=context_item.id,
-                    metadata={"context": context},
+                    state_update=state_update,
                 )
             return ToolExecutionResult(
                 reply=f"已经把与 `{item.title}` 相关的 {len(delivery_targets)} 个文件发给你了，请查收。",
                 action="retrieve",
                 item_id=context_item.id,
-                metadata={"context": context},
+                state_update=state_update,
             )
         except Exception as exc:
             logger.exception("Failed to send file to user")

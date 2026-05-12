@@ -12,7 +12,7 @@ from core.schemas.tool import ToolCall, ToolResult, ToolSpec
 
 
 class AgentToolExecutor(Protocol):
-    async def execute(
+    async def execute_tool_call(
         self,
         *,
         session_id: str,
@@ -23,19 +23,29 @@ class AgentToolExecutor(Protocol):
 
 
 @dataclass(slots=True)
+class ToolExecutionTrace:
+    tool_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    action: str = "chat"
+    status: str = "completed"
+    disposition: str = "continue"
+    content: str = ""
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class LoopResult:
     final_response: str
     trace: list[Message]
     runtime: ConversationRuntimeState
     exit_reason: str
     steps: int
-    action: str = "chat"
-    item_id: str | None = None
-    needs_clarification: bool = False
-    tool_name: str = "none"
-    tool_arguments: dict[str, Any] = field(default_factory=dict)
-    last_tool_reply: str | None = None
-    assistant_text: str | None = None
+    status: str = "completed"
+    disposition: str = "respond"
+    tool_trace: list[ToolExecutionTrace] = field(default_factory=list)
+    assistant_response: str | None = None
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -55,12 +65,8 @@ class AgentLoop:
     ) -> LoopResult:
         messages = list(initial_messages)
         trace: list[Message] = []
-        last_tool_name = "none"
-        last_tool_arguments: dict[str, Any] = {}
-        last_action = "chat"
-        last_item_id: str | None = None
-        last_needs_clarification = False
-        last_tool_reply: str | None = None
+        tool_trace: list[ToolExecutionTrace] = []
+        artifacts: list[dict[str, Any]] = []
 
         for step in range(self.max_steps):
             estimated_prompt_tokens = None
@@ -89,13 +95,11 @@ class AgentLoop:
                     runtime=runtime,
                     exit_reason="assistant_text",
                     steps=step + 1,
-                    action=last_action,
-                    item_id=last_item_id,
-                    needs_clarification=last_needs_clarification,
-                    tool_name=last_tool_name,
-                    tool_arguments=dict(last_tool_arguments),
-                    last_tool_reply=last_tool_reply,
-                    assistant_text=response.assistant_text,
+                    status="completed",
+                    disposition="respond",
+                    tool_trace=list(tool_trace),
+                    assistant_response=response.assistant_text,
+                    artifacts=list(artifacts),
                 )
 
             assistant_tool_message = Message.assistant_tool_calls(
@@ -108,17 +112,23 @@ class AgentLoop:
             trace.append(assistant_tool_message)
 
             for tool_call in response.tool_calls:
-                result = await self.tool_executor.execute(
+                result = await self.tool_executor.execute_tool_call(
                     session_id=session_id,
                     tool_call=tool_call,
                     runtime=runtime,
                 )
-                last_tool_name = tool_call.tool_name
-                last_tool_arguments = dict(tool_call.arguments)
-                last_action = str(result.metadata.get("action") or "chat")
-                last_item_id = result.metadata.get("item_id")
-                last_needs_clarification = bool(result.metadata.get("needs_clarification"))
-                last_tool_reply = result.content
+                current_trace = ToolExecutionTrace(
+                    tool_name=tool_call.tool_name,
+                    arguments=dict(tool_call.arguments),
+                    action=str(result.action or result.metadata.get("action") or "chat"),
+                    status=result.status,
+                    disposition=result.disposition,
+                    content=result.content,
+                    artifacts=list(result.artifacts),
+                    metadata=dict(result.metadata),
+                )
+                tool_trace.append(current_trace)
+                artifacts.extend(result.artifacts)
                 next_runtime = result.metadata.get("runtime_state")
                 if isinstance(next_runtime, ConversationRuntimeState):
                     runtime = next_runtime
@@ -131,19 +141,17 @@ class AgentLoop:
                 )
                 messages.append(tool_message)
                 trace.append(tool_message)
-                if last_needs_clarification:
+                if result.disposition == "clarify" or bool(result.metadata.get("needs_clarification")):
                     return LoopResult(
                         final_response=result.content,
                         trace=trace,
                         runtime=runtime,
                         exit_reason="needs_clarification",
                         steps=step + 1,
-                        action=last_action,
-                        item_id=last_item_id,
-                        needs_clarification=True,
-                        tool_name=last_tool_name,
-                        tool_arguments=dict(last_tool_arguments),
-                        last_tool_reply=last_tool_reply,
+                        status="completed",
+                        disposition="clarify",
+                        tool_trace=list(tool_trace),
+                        artifacts=list(artifacts),
                     )
 
         fallback = Message.assistant(
@@ -158,12 +166,10 @@ class AgentLoop:
             runtime=runtime,
             exit_reason="max_steps",
             steps=self.max_steps,
-            action=last_action,
-            item_id=last_item_id,
-            needs_clarification=last_needs_clarification,
-            tool_name=last_tool_name,
-            tool_arguments=dict(last_tool_arguments),
-            last_tool_reply=last_tool_reply,
+            status="incomplete",
+            disposition="respond",
+            tool_trace=list(tool_trace),
+            artifacts=list(artifacts),
         )
 
     @staticmethod
@@ -201,6 +207,10 @@ class AgentLoop:
         payload = {
             "success": result.success,
             "content": result.content,
+            "status": result.status,
+            "disposition": result.disposition,
+            "action": result.action,
+            "artifacts": result.artifacts,
             "metadata": {
                 key: value
                 for key, value in result.metadata.items()

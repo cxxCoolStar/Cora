@@ -1,20 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi import UploadFile
 
 from core.agent.context_budget import ContextBudgetManager
+from core.agent.context_manager import SessionContextManager
 from core.agent.loop import AgentLoop
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
-from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot
+from core.agent.runtime_manager import AgentRuntimeManager
+from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, RuntimeContextSnapshot, ToolStateDelta
+from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillLoader
+from core.clawbot import RuntimeToolExecutor
+from core.clawbot.source_events import SourceEventManager
+from core.clawbot.tools import ToolExecutionResult
+from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
+from core.storage.db import DatabaseManager
+from core.storage.repositories import ClarificationRepository, ItemRepository, MessageRepository, UserSignalRepository
 
 
 class StubModelClient(ModelClient):
@@ -33,10 +45,52 @@ class StubModelClient(ModelClient):
 class StubExecutor:
     results: list[ToolResult]
 
-    async def execute(self, *, session_id: str, tool_call: ToolCall, runtime: ConversationRuntimeState) -> ToolResult:
+    async def execute_tool_call(self, *, session_id: str, tool_call: ToolCall, runtime: ConversationRuntimeState) -> ToolResult:
         if not self.results:
             raise AssertionError("No stub tool results left")
         return self.results.pop(0)
+
+
+class StubClarificationRepository:
+    def get_latest_pending(self, *, session_id: str):
+        return None
+
+
+@dataclass
+class StubMessageRepository:
+    context: dict
+
+    def get_latest_assistant_context(self, *, session_id: str) -> dict:
+        return dict(self.context)
+
+
+@dataclass
+class StubSourceEventRecord:
+    id: str
+    event_type: str
+    channel: str
+    raw_text: str
+    original_file_name: str | None
+    mime_type: str | None
+    created_at: Any
+
+
+@dataclass
+class StubSourceEventRepository:
+    events: list[StubSourceEventRecord]
+    created_payloads: list[dict] | None = None
+
+    def __post_init__(self) -> None:
+        if self.created_payloads is None:
+            self.created_payloads = []
+
+    def list_by_session(self, *, session_id: str, limit: int = 5) -> list[StubSourceEventRecord]:
+        return self.events[:limit]
+
+    def create(self, **kwargs):
+        assert self.created_payloads is not None
+        self.created_payloads.append(kwargs)
+        return type("CreatedSourceEvent", (), {"id": "evt-created"})()
 
 
 def test_skill_loader_reads_archive_core_skill() -> None:
@@ -67,11 +121,57 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     assert "Execution guidance:" in messages[0].content
     assert "Memory guidance:" in messages[0].content
     assert "Skills guidance:" in messages[0].content
-    assert "Runtime state:" in messages[0].content
-    assert "Skills (mandatory):" in messages[0].content
+    assert "Runtime summary:" in messages[0].content
+    assert "Shared skills summary:" in messages[0].content
     assert "must load it with skill_view(name)" in messages[0].content
     assert "archive-core" in messages[0].content
     assert messages[-1].content == "save this photo"
+
+
+def test_prompt_builder_uses_explicit_hermes_lite_section_order(tmp_path: Path) -> None:
+    runtime = ConversationRuntimeState(
+        session_id="session-ordered",
+        last_action="archive.read",
+        recent_events=[
+            EventSnapshot(
+                source_event_id="event-1",
+                event_type="message",
+                channel="wechat",
+                raw_text="把上次那份简历发我",
+            )
+        ],
+    )
+    memory_path = tmp_path / "user-memory" / "USER.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text("# User Memory\n\n- 用户偏好中文回复。", encoding="utf-8")
+    builder = AgentPromptBuilder(user_memory_path=memory_path)
+
+    messages = builder.build_messages(
+        session_id="session-ordered",
+        user_text="把上次那份简历发我",
+        runtime=runtime,
+        skills=SkillLoader().list_skills(),
+        history=[],
+        upload_name="resume.pdf",
+        delivery_available=True,
+    )
+
+    content = messages[0].content
+    section_order = [
+        "Execution guidance:",
+        "Memory guidance:",
+        "Skills guidance:",
+        "Platform hints:",
+        "Runtime summary:",
+        "User memory snapshot:",
+        "Shared skills summary:",
+        "Upload hint:",
+        "Structured conversation state:",
+    ]
+    positions = [content.index(section) for section in section_order]
+    assert positions == sorted(positions)
+    assert "Conversation state:\n" in content
+    assert '"pending_clarification": {}' in content
 
 
 def test_prompt_builder_includes_wechat_platform_hint_when_delivery_available() -> None:
@@ -119,7 +219,7 @@ def test_prompt_builder_includes_user_memory_when_present(tmp_path: Path) -> Non
         history=[],
     )
 
-    assert "User memory:" in messages[0].content
+    assert "User memory snapshot:" in messages[0].content
     assert "用户常买的布洛芬品牌是芬必得" in messages[0].content
 
 
@@ -138,7 +238,29 @@ def test_prompt_builder_skips_empty_user_memory(tmp_path: Path) -> None:
         history=[],
     )
 
-    assert "User memory:" not in messages[0].content
+    assert "User memory snapshot:" not in messages[0].content
+
+
+def test_session_summary_message_marks_boundary_from_long_term_memory() -> None:
+    payload = {
+        "covered_message_count": 8,
+        "summary": {
+            "active_task": "send resume back to user",
+            "user_facts": ["User stores job materials in WeChat."],
+            "open_loops": ["Need to confirm which resume version to send."],
+            "resolved_requests": [],
+            "recent_decisions": ["Use archive retrieval before answering."],
+            "critical_context": ["Latest candidate item title is resume-v2.pdf."],
+        },
+    }
+
+    rendered = SessionContextManager._format_summary_message(  # type: ignore[attr-defined]
+        payload,
+        decision=type("Decision", (), {"tail_budget_tokens": 1024})(),
+    )
+
+    assert "This is temporary session context, not long-term user memory." in rendered
+    assert "Treat this as background context" in rendered
 
 
 @pytest.mark.anyio
@@ -235,6 +357,120 @@ async def test_orchestrator_builds_messages_and_runs_loop() -> None:
     first_call_messages = model.calls[0]
     assert first_call_messages[0].role == "system"
     assert "archive-core" in first_call_messages[0].content
+
+
+def test_session_runtime_snapshot_loader_builds_context_from_history_and_events() -> None:
+    source_events = StubSourceEventRepository(
+        events=[
+            StubSourceEventRecord(
+                id="evt-1",
+                event_type="image",
+                channel="wechat",
+                raw_text="",
+                original_file_name="photo.jpg",
+                mime_type="image/jpeg",
+                created_at=type("T", (), {"isoformat": lambda self: "2025-01-01T00:00:00"})(),
+            )
+        ]
+    )
+    loader = SessionRuntimeSnapshotLoader(
+        message_repository=StubMessageRepository(
+            context={
+                "current_source_event_id": "evt-1",
+                "last_action": "archive.search",
+            }
+        ),
+        source_event_repository=source_events,
+    )
+
+    snapshot = loader.load_context_snapshot(session_id="session-1")
+
+    assert snapshot.current_source_event_id == "evt-1"
+    assert snapshot.last_action == "archive.search"
+    assert len(snapshot.recent_events) == 1
+    assert snapshot.recent_events[0].metadata["mime_type"] == "image/jpeg"
+
+
+def test_source_event_manager_classifies_links_and_images() -> None:
+    repository = StubSourceEventRepository(events=[])
+    manager = SourceEventManager(source_event_repository=repository)
+
+    image_event = manager.create_source_event(
+        session_id="session-1",
+        source_message_id="msg-1",
+        text=None,
+        upload=UploadFile(filename="wechat_image.jpg", file=BytesIO(b"img")),
+    )
+    link_event = manager.create_source_event(
+        session_id="session-1",
+        source_message_id="msg-2",
+        text="https://example.com/file.pdf",
+        upload=None,
+    )
+
+    assert image_event.id == "evt-created"
+    assert repository.created_payloads is not None
+    assert repository.created_payloads[0]["event_type"] == "image"
+    assert repository.created_payloads[1]["event_type"] == "link"
+
+
+@pytest.mark.anyio
+async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runtime() -> None:
+    database = DatabaseManager("sqlite:///:memory:")
+    database.create_all()
+    item_repository = ItemRepository(database)
+    message_repository = MessageRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    clarification_repository = ClarificationRepository(database)
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=Path.cwd() / ".tmp-test-files",
+    )
+    executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        clarification_repository=clarification_repository,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_execute(**kwargs) -> ToolExecutionResult:
+        calls.append(kwargs)
+        return ToolExecutionResult(
+            reply="saved",
+            action="capture",
+            item_id="item-1",
+            state_update=ToolStateDelta(
+                last_action="archive.save",
+                current_source_event_id="event-2",
+            ),
+        )
+
+    executor.execute = _fake_execute  # type: ignore[method-assign]
+    runtime = ConversationRuntimeState(
+        session_id="session-bridge",
+        current_source_event_id="event-1",
+        last_action="archive.open",
+        metadata={
+            "source_message_id": "msg-1",
+            "raw_text": "save this",
+            "upload": None,
+        },
+    )
+
+    result = await executor.execute_tool_call(
+        session_id="session-bridge",
+        tool_call=ToolCall(tool_name="archive", arguments={"action": "save"}),
+        runtime=runtime,
+    )
+
+    assert calls[0]["plan"].tool == "archive"
+    assert calls[0]["context"]["current_source_event_id"] == "event-1"
+    assert result.metadata is not None
+    next_runtime = result.metadata["runtime_state"]
+    assert next_runtime.last_action == "archive.save"
+    assert next_runtime.current_source_event_id == "event-2"
 
 
 @pytest.mark.anyio

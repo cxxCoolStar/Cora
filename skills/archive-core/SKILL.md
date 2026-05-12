@@ -19,6 +19,7 @@ Use this skill when a workflow needs to:
 - look up a previously archived asset
 - rebuild or inspect archive metadata
 - save, search, or read content records from Cora's database through skill scripts
+- resolve a saved file for downstream delivery
 
 ## Archive Layout
 
@@ -74,6 +75,32 @@ Use:
 - `scripts/find_asset.py` for structured lookup
 
 ## Script Entry Points
+
+For Hermes-lite runtime turns, the main entrypoint is:
+
+- `scripts/archive_dispatch.py`
+
+Load this skill with `skill_view("archive-core")` first, then run the dispatcher through:
+
+- `skill_run(name="archive-core", script_path="scripts/archive_dispatch.py", input={...})`
+
+The dispatcher expects one JSON object with:
+
+- `intent`: `save`, `search`, `read`, `delete`, or `deliver`
+- `session_id`
+- `source_message_id`
+- optional `source_event_id`
+- `arguments`: skill-local arguments such as `text`, `query`, `mode`, or `user_note`
+- optional `upload_path` and `upload_name` when saving a file upload
+
+The dispatcher returns structured JSON with:
+
+- `message`
+- `status`
+- `disposition`
+- `action`
+- `artifacts`
+- `state_update`
 
 - `scripts/save_asset.py`
   Saves a file into a topic folder and appends an index record.

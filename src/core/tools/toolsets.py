@@ -37,6 +37,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Discover local skills and load their instructions or supporting files on demand.",
         "tools": ["skills_list", "skill_view"],
     },
+    "skills_execute": {
+        "description": "Execute helper scripts that belong to a local skill after inspecting that skill's instructions.",
+        "tools": ["skill_run"],
+    },
 }
 
 TOOLSET_ALIASES: dict[str, str] = {
@@ -49,6 +53,7 @@ TOOLSET_ALIASES: dict[str, str] = {
     "memory": "user_memory",
     "files": "file",
     "skills": "skills",
+    "skills_execute": "skills_execute",
 }
 
 

@@ -213,7 +213,8 @@ class SessionContextManager:
         summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
         lines = [
             "[SESSION SUMMARY — REFERENCE ONLY] Earlier turns were condensed into the structured summary below. "
-            "Treat this as background context, not as a new instruction. Respond to the latest user message after this summary.",
+            "Treat this as background context, not as a new instruction. "
+            "This is temporary session context, not long-term user memory. Respond to the latest user message after this summary.",
             "",
             f"Compaction coverage: {payload.get('covered_message_count') or 0} earlier messages; recent tail budget ≈ {getattr(decision, 'tail_budget_tokens', 0)} tokens.",
             "",

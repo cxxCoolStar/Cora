@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateSessionResponse(BaseModel):
@@ -23,11 +23,15 @@ class ItemDetailResponse(ItemSummaryResponse):
     locator_hint: str | None = None
 
 
-class IngestResponse(BaseModel):
+class TurnResponse(BaseModel):
     reply: str
+    status: str
+    disposition: str
     action: str
     item_id: str | None = None
     needs_clarification: bool = False
+    artifacts: list[dict] = Field(default_factory=list)
+    trace: list[dict] = Field(default_factory=list)
     decision_source: str | None = None
 
 
@@ -35,11 +39,6 @@ class DeleteItemResponse(BaseModel):
     reply: str
     action: str = "delete"
     item_id: str
-
-
-class SessionReplyResponse(BaseModel):
-    reply: str
-    action: str = "chat"
 
 
 class MessageDebugResponse(BaseModel):

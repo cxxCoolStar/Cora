@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
+from core.agent.runtime_state import RuntimeContextSnapshot  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
 from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
@@ -347,17 +348,16 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
     container = build_test_container(tmp_path)
     session = container.session_repository.create()
 
-    messages = container.clawbot_service._build_agent_messages(
+    messages = container.clawbot_service.build_agent_messages(
         session_id=session.id,
         user_text="帮我保存这张照片",
-        context={"recent_events": [], "last_action": None},
-        pending_payload=None,
+        context_snapshot=RuntimeContextSnapshot(),
         tool_messages=[],
     )
 
     assert messages[0].role == "system"
     assert "archive-core" in messages[0].content
-    assert "Skills (mandatory):" in messages[0].content
+    assert "Shared skills summary:" in messages[0].content
 
 
 def test_agent_history_uses_recent_12_messages_plus_summary(tmp_path):
@@ -399,6 +399,36 @@ def test_agent_history_uses_recent_12_messages_plus_summary(tmp_path):
     payload = summary_record.summary_json
     assert 0 < payload["covered_message_count"] < 20
     assert payload["summary"]["active_task"] == "none"
+
+
+def test_runtime_context_snapshot_keeps_operational_state_separate_from_history(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    source_event = container.source_event_repository.create(
+        session_id=session.id,
+        source_message_id=None,
+        channel="wechat",
+        event_type="text",
+        raw_text="帮我找简历",
+        metadata={},
+    )
+    container.message_repository.add_assistant_message(
+        session_id=session.id,
+        content="我来帮你找。",
+        metadata={
+            "context": {
+                "current_source_event_id": source_event.id,
+                "last_action": "archive.search",
+                "recent_events": [],
+            }
+        },
+    )
+
+    snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
+
+    assert snapshot.current_source_event_id == source_event.id
+    assert snapshot.last_action == "archive.search"
+    assert snapshot.recent_events
 
 
 def test_session_summary_is_not_refreshed_for_tiny_delta(tmp_path):
@@ -1675,13 +1705,12 @@ def test_build_wechat_runtime_wires_file_delivery_tool(tmp_path):
     assert container.tool_executor.session_map_repository is not None
 
 
-def test_send_file_tool_is_hidden_until_gateway_is_configured(tmp_path):
+def test_archive_is_exposed_via_skill_run_tooling(tmp_path):
     container = build_test_container(tmp_path)
 
-    hidden_specs = {spec.name: spec for spec in container.clawbot_service._build_tool_specs()}
-    assert "archive" in hidden_specs
-    hidden_actions = hidden_specs["archive"].input_schema["properties"]["action"]["enum"]
-    assert "deliver" not in hidden_actions
+    base_specs = {spec.name: spec for spec in container.clawbot_service._build_tool_specs()}
+    assert "archive" not in base_specs
+    assert "skill_run" in base_specs
 
     class _Gateway:
         async def send_file_to_user(self, **kwargs):
@@ -1691,9 +1720,8 @@ def test_send_file_tool_is_hidden_until_gateway_is_configured(tmp_path):
     container.configure_gateway(_Gateway(), session_map_repository)
 
     visible_specs = {spec.name: spec for spec in container.clawbot_service._build_tool_specs()}
-    assert "archive" in visible_specs
-    visible_actions = visible_specs["archive"].input_schema["properties"]["action"]["enum"]
-    assert "deliver" in visible_actions
+    assert "archive" not in visible_specs
+    assert "skill_run" in visible_specs
 
 
 def test_planner_accepts_archive_deliver_action():
@@ -1803,24 +1831,24 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
     container.configure_gateway(_Gateway(), session_map_repository)
 
     user_message = container.message_repository.add_user_message(session_id=session.id, content=f"把 {item.title} 发给我")
-    context = container.clawbot_service._load_context(session_id=session.id)
+    context_snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
     result = asyncio.run(
-        container.clawbot_service._run_agent_loop(
+        container.clawbot_service.run_agent_loop(
             session_id=session.id,
             source_message_id=user_message.id,
             user_text=f"把 {item.title} 发给我",
             raw_text=f"把 {item.title} 发给我",
             upload=None,
-            context=context,
-            pending_payload=None,
+            context_snapshot=context_snapshot,
         )
     )
 
     assert item is not None
-    assert result["tool_name"] == "archive"
-    assert result["action"] == "chat"
-    assert "network down" in result["reply"]
-    assert result["reply"] != "已经发送，请查收。"
+    assert result.primary_tool is not None
+    assert result.primary_tool.tool_name == "archive"
+    assert result.primary_tool.action == "chat"
+    assert "network down" in result.reply
+    assert result.reply != "已经发送，请查收。"
 
 
 def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
@@ -1855,23 +1883,23 @@ def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
 
     request_text = f"可以把 {item.title} 这张照片发我吗"
     user_message = container.message_repository.add_user_message(session_id=session.id, content=request_text)
-    context = container.clawbot_service._load_context(session_id=session.id)
+    context_snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
     result = asyncio.run(
-        container.clawbot_service._run_agent_loop(
+        container.clawbot_service.run_agent_loop(
             session_id=session.id,
             source_message_id=user_message.id,
             user_text=request_text,
             raw_text=request_text,
             upload=None,
-            context=context,
-            pending_payload=None,
+            context_snapshot=context_snapshot,
         )
     )
 
     assert item is not None
     assert retry_model.calls >= 2
-    assert result["tool_name"] == "archive"
-    assert result["action"] == "retrieve"
+    assert result.primary_tool is not None
+    assert result.primary_tool.tool_name == "archive"
+    assert result.primary_tool.action == "retrieve"
     assert gateway.calls
     assert gateway.calls[0]["user_id"] == "wx-user-1"
 
