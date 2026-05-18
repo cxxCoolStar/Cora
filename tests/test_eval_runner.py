@@ -19,6 +19,11 @@ def test_eval_runner_loads_cases(tmp_path: Path) -> None:
           "id": "sample_case",
           "type": "regression",
           "description": "sample",
+          "setup": {
+            "workspace_files": {
+              "src/example.py": "print('hello')\\n"
+            }
+          },
           "steps": [
             {
               "input": {"text": "hello"},
@@ -36,6 +41,7 @@ def test_eval_runner_loads_cases(tmp_path: Path) -> None:
     assert len(cases) == 1
     assert cases[0].id == "sample_case"
     assert cases[0].case_type == "regression"
+    assert cases[0].setup.workspace_files == {"src/example.py": "print('hello')\n"}
     assert cases[0].steps[0].input.text == "hello"
 
 
@@ -133,6 +139,72 @@ def test_eval_runner_evaluate_step_checks_state_assertions(tmp_path: Path) -> No
         pending_exists=False,
         pending_kind=None,
         user_memory_text="# User Memory\ncoffee\n",
+    )
+
+    result = runner.evaluate_step(
+        case=case,
+        step=case.steps[0],
+        index=1,
+        response=response,
+        observed_state=observed_state,
+    )
+
+    assert result.ok
+    assert result.observed_state is observed_state
+
+
+def test_eval_runner_evaluate_step_checks_workspace_file_assertions(tmp_path: Path) -> None:
+    path = tmp_path / "sample-workspace.json"
+    path.write_text(
+        """
+        {
+          "id": "sample_case",
+          "type": "tooling",
+          "steps": [
+            {
+              "input": {"text": "hello"},
+              "expect": {
+                "state": {
+                  "workspace_files_exist": ["notes/todo.txt"],
+                  "workspace_files_not_exist": ["notes/missing.txt"],
+                  "workspace_file_contains_all": {
+                    "notes/todo.txt": ["ship it", "add tests"]
+                  },
+                  "workspace_file_not_contains": {
+                    "notes/todo.txt": ["rollback"]
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "notes").mkdir()
+    (workspace_root / "notes" / "todo.txt").write_text("ship it\nadd tests\n", encoding="utf-8")
+    case = EvalCase.from_path(path)
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path)
+    response = TurnResponse(
+        reply="ok",
+        status="completed",
+        disposition="respond",
+        action="edit",
+        item_id=None,
+        needs_clarification=False,
+        artifacts=[],
+        trace=[],
+        decision_source="llm_tool_call",
+    )
+    observed_state = EvalObservedState(
+        item_count=0,
+        deleted_item_count=0,
+        pending_exists=False,
+        pending_kind=None,
+        user_memory_text="# User Memory\n",
+        workspace_root=str(workspace_root),
     )
 
     result = runner.evaluate_step(

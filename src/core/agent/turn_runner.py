@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Any, Callable
 
 from fastapi import UploadFile
@@ -51,6 +52,12 @@ class AgentTurnResult:
         if not self.tool_trace:
             return None
         return self.tool_trace[-1]
+
+
+@dataclass(slots=True)
+class ForcedToolSelection:
+    tool_call: ToolCall
+    category: str
 
 
 @dataclass(slots=True)
@@ -121,6 +128,18 @@ class AgentTurnRunner:
                 history=prepared_turn.history,
             )
         )
+        forced_tool_selection = self.forced_tool_selection(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+        if forced_tool_selection is not None:
+            loop_result = await self._forced_tool_loop_result(
+                selection=forced_tool_selection,
+                session_id=session_id,
+                prepared_turn=prepared_turn,
+            )
         retry_category = self.tool_retry_category(
             user_text=user_text,
             raw_text=raw_text,
@@ -128,34 +147,25 @@ class AgentTurnRunner:
             loop_result=loop_result,
         )
         if retry_category is not None:
-            forced_result = await self._forced_tool_loop_result(
-                category=retry_category,
+            retry_instruction = self.tool_retry_instruction(retry_category)
+            retry_messages = self.orchestrator.prompt_builder.build_messages(
                 session_id=session_id,
                 user_text=user_text,
-                prepared_turn=prepared_turn,
+                runtime=prepared_turn.runtime,
+                skills=self.skill_loader.list_skills(),
+                history=prepared_turn.history,
+                upload_name=upload.filename if upload is not None else None,
+                delivery_available=self.delivery_available(),
             )
-            if forced_result is not None:
-                loop_result = forced_result
-            else:
-                retry_instruction = self.tool_retry_instruction(retry_category)
-                retry_messages = self.orchestrator.prompt_builder.build_messages(
-                    session_id=session_id,
-                    user_text=user_text,
-                    runtime=prepared_turn.runtime,
-                    skills=self.skill_loader.list_skills(),
-                    history=prepared_turn.history,
-                    upload_name=upload.filename if upload is not None else None,
-                    delivery_available=self.delivery_available(),
-                )
-                retry_messages.insert(
-                    1,
-                    Message.system(session_id=session_id, content=retry_instruction),
-                )
-                loop_result = await self.loop.run(
-                    session_id=session_id,
-                    initial_messages=retry_messages,
-                    runtime=prepared_turn.runtime,
-                )
+            retry_messages.insert(
+                1,
+                Message.system(session_id=session_id, content=retry_instruction),
+            )
+            loop_result = await self.loop.run(
+                session_id=session_id,
+                initial_messages=retry_messages,
+                runtime=prepared_turn.runtime,
+            )
         return self.loop_result_to_turn_result(loop_result)
 
     def prepare_turn(
@@ -183,33 +193,21 @@ class AgentTurnRunner:
     async def _forced_tool_loop_result(
         self,
         *,
-        category: str,
+        selection: ForcedToolSelection,
         session_id: str,
-        user_text: str,
         prepared_turn: PreparedTurn,
     ) -> LoopResult | None:
-        if category != "deliver":
-            return None
-        tool_call = ToolCall(
-            tool_name="skill_run",
-            arguments={
-                "name": "archive-core",
-                "script_path": "scripts/archive_dispatch.py",
-                "input": {
-                    "query": user_text,
-                },
-            },
-        )
         result = await self.loop.tool_executor.execute_tool_call(
             session_id=session_id,
-            tool_call=tool_call,
+            tool_call=selection.tool_call,
             runtime=prepared_turn.runtime,
         )
         return self._loop_result_from_forced_tool(
             session_id=session_id,
             runtime=prepared_turn.runtime,
-            tool_call=tool_call,
+            tool_call=selection.tool_call,
             result=result,
+            category=selection.category,
         )
 
     @staticmethod
@@ -219,6 +217,7 @@ class AgentTurnRunner:
         runtime: ConversationRuntimeState,
         tool_call: ToolCall,
         result: ToolResult,
+        category: str,
     ) -> LoopResult:
         next_runtime = result.metadata.get("runtime_state")
         final_runtime = next_runtime if isinstance(next_runtime, ConversationRuntimeState) else runtime
@@ -235,7 +234,7 @@ class AgentTurnRunner:
                     },
                 }
             ],
-            metadata={"turn_type": "forced_tool_call", "category": "deliver"},
+            metadata={"turn_type": "forced_tool_call", "category": category},
         )
         tool_message = Message.tool(
             session_id=session_id,
@@ -267,6 +266,36 @@ class AgentTurnRunner:
             artifacts=list(result.artifacts),
         )
 
+    def forced_tool_selection(
+        self,
+        *,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        loop_result: LoopResult,
+    ) -> ForcedToolSelection | None:
+        if upload is not None:
+            return None
+        if loop_result.tool_trace or loop_result.exit_reason != "assistant_text":
+            return None
+        text = (raw_text or user_text or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if self._looks_like_delivery_request(text=text, lowered=lowered):
+            return ForcedToolSelection(
+                tool_call=ToolCall(
+                    tool_name="skill_run",
+                    arguments={
+                        "name": "archive-core",
+                        "script_path": "scripts/archive_dispatch.py",
+                        "input": {"query": text},
+                    },
+                ),
+                category="deliver",
+            )
+        return self._forced_file_tool_selection(text=text)
+
     def tool_retry_category(
         self,
         *,
@@ -281,8 +310,6 @@ class AgentTurnRunner:
         if not text:
             return None
         lowered = text.lower()
-        if self._looks_like_delivery_request(text=text, lowered=lowered):
-            return "deliver"
         if self._looks_like_delete_request(text=text, lowered=lowered):
             return "delete"
         if self._looks_like_user_memory_request(text=text, lowered=lowered):
@@ -422,6 +449,68 @@ class AgentTurnRunner:
             "remember this", "forget this", "show my memory", "user memory",
         )
         return any(token in text or token in lowered for token in memory_markers)
+
+    @classmethod
+    def _forced_file_tool_selection(cls, *, text: str) -> ForcedToolSelection | None:
+        search_match = re.match(
+            r"(?is)^\s*(?:please\s+)?(?:find|search(?:\s+for)?|look\s+for|locate|grep|查找|搜索|找一下)\s+`(?P<query>[^`]+)`(?:\s+(?:in|under|within|在)\s+`(?P<path>[^`]+)`)?\s*[.?!。？！]?\s*$",
+            text,
+        )
+        if search_match:
+            query = search_match.group("query").strip()
+            path = (search_match.group("path") or ".").strip() or "."
+            if query:
+                return ForcedToolSelection(
+                    tool_call=ToolCall(
+                        tool_name="search_files",
+                        arguments={"query": query, "path": path},
+                    ),
+                    category="file_search",
+                )
+
+        read_match = re.match(
+            r"(?is)^\s*(?:please\s+)?(?:read|show|open|cat|display|读取|读一下|查看|打开)\s+(?:the\s+file\s+)?`(?P<path>[^`]+)`\s*[.?!。？！]?\s*$",
+            text,
+        )
+        if read_match:
+            path = read_match.group("path").strip()
+            if path:
+                return ForcedToolSelection(
+                    tool_call=ToolCall(
+                        tool_name="read_file",
+                        arguments={"path": path},
+                    ),
+                    category="file_read",
+                )
+
+        write_match = re.match(
+            r"(?is)^\s*(?:please\s+)?(?P<mode>write|append|写入|写到|追加)\s+`(?P<content>[^`]+)`\s+(?:to|into|in|写到|追加到)\s+`(?P<path>[^`]+)`\s*[.?!。？！]?\s*$",
+            text,
+        )
+        if write_match:
+            path = write_match.group("path").strip()
+            content = cls._normalized_forced_write_content(write_match.group("content"))
+            append_mode = write_match.group("mode").strip().lower() in {"append", "追加"}
+            if path and content:
+                arguments = {"path": path, "content": content}
+                if append_mode:
+                    arguments["append"] = True
+                return ForcedToolSelection(
+                    tool_call=ToolCall(
+                        tool_name="write_file",
+                        arguments=arguments,
+                    ),
+                    category="file_write",
+                )
+
+        return None
+
+    @staticmethod
+    def _normalized_forced_write_content(content: str) -> str:
+        normalized = content.replace("\r\n", "\n")
+        if not normalized.endswith("\n"):
+            normalized += "\n"
+        return normalized
 
     @staticmethod
     def _sanitize_json(value: Any) -> Any:

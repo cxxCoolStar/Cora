@@ -100,14 +100,15 @@ def get_clawbot_container() -> ClawBotContainer:
             image_parser=image_parser,
         )
         model_client = None
-        if settings.model_provider == "openai" or (settings.openai_api_key and settings.model):
+        model_provider = (settings.model_provider or "dev").strip().lower()
+        if model_provider in {"dev", "development"} or settings.debug:
+            model_client = DevelopmentModelClient()
+        elif model_provider == "openai" or (settings.openai_api_key and settings.model):
             model_client = OpenAIChatModelClient(
                 api_key=settings.openai_api_key or "",
                 model=settings.model or "",
                 base_url=settings.openai_base_url,
             )
-        elif settings.debug:
-            model_client = DevelopmentModelClient()
         if model_client is None:
             raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from core.clawbot.schemas import TurnResponse
@@ -57,6 +58,7 @@ def evaluate_step(
                     f"artifact refs must include one of {step.expect.artifact_ref_contains_any!r}; got {refs!r}"
                 )
             )
+
     state_expect = step.expect.state
     if state_expect.item_count is not None:
         actual = observed_state.item_count if observed_state is not None else None
@@ -78,6 +80,7 @@ def evaluate_step(
         actual = observed_state.pending_kind if observed_state is not None else None
         if actual != state_expect.pending_kind:
             failures.append(EvalAssertionFailure(f"expected state.pending_kind={state_expect.pending_kind!r}, got {actual!r}"))
+
     user_memory_text = observed_state.user_memory_text if observed_state is not None else ""
     for token in state_expect.user_memory_contains_all:
         if token not in user_memory_text:
@@ -89,6 +92,36 @@ def evaluate_step(
     for token in state_expect.user_memory_not_contains:
         if token in user_memory_text:
             failures.append(EvalAssertionFailure(f"user memory unexpectedly contains text: {token!r}"))
+
+    workspace_root = Path(observed_state.workspace_root) if observed_state and observed_state.workspace_root else None
+    for relative_path in state_expect.workspace_files_exist:
+        target = _workspace_target(workspace_root=workspace_root, relative_path=relative_path)
+        if target is None or not target.exists():
+            failures.append(EvalAssertionFailure(f"expected workspace file to exist: {relative_path!r}"))
+    for relative_path in state_expect.workspace_files_not_exist:
+        target = _workspace_target(workspace_root=workspace_root, relative_path=relative_path)
+        if target is not None and target.exists():
+            failures.append(EvalAssertionFailure(f"expected workspace file to be absent: {relative_path!r}"))
+    for relative_path, tokens in state_expect.workspace_file_contains_all.items():
+        target = _workspace_target(workspace_root=workspace_root, relative_path=relative_path)
+        text = _read_workspace_text(target)
+        if text is None:
+            failures.append(EvalAssertionFailure(f"workspace file missing or unreadable: {relative_path!r}"))
+            continue
+        for token in tokens:
+            if token not in text:
+                failures.append(EvalAssertionFailure(f"workspace file {relative_path!r} missing text: {token!r}"))
+    for relative_path, tokens in state_expect.workspace_file_not_contains.items():
+        target = _workspace_target(workspace_root=workspace_root, relative_path=relative_path)
+        text = _read_workspace_text(target)
+        if text is None:
+            failures.append(EvalAssertionFailure(f"workspace file missing or unreadable: {relative_path!r}"))
+            continue
+        for token in tokens:
+            if token in text:
+                failures.append(
+                    EvalAssertionFailure(f"workspace file {relative_path!r} unexpectedly contains text: {token!r}")
+                )
 
     return EvalStepResult(
         index=index,
@@ -112,3 +145,26 @@ def tool_names_from_trace(trace: list[dict[str, Any]]) -> list[str]:
             if name:
                 tool_names.append(name)
     return tool_names
+
+
+def _workspace_target(*, workspace_root: Path | None, relative_path: str) -> Path | None:
+    if workspace_root is None:
+        return None
+    cleaned = relative_path.strip()
+    if not cleaned:
+        return None
+    candidate = (workspace_root / cleaned).resolve()
+    try:
+        candidate.relative_to(workspace_root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _read_workspace_text(target: Path | None) -> str | None:
+    if target is None or not target.exists() or not target.is_file():
+        return None
+    raw = target.read_bytes()
+    if b"\x00" in raw[:1024]:
+        return None
+    return raw.decode("utf-8", errors="replace")

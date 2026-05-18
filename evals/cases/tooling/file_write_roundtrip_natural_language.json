@@ -1,0 +1,63 @@
+{
+  "id": "file_write_roundtrip_natural_language",
+  "type": "tooling",
+  "description": "Natural-language write, append, and read requests should route to native file tools.",
+  "tags": ["file", "write", "append", "read", "natural-language"],
+  "steps": [
+    {
+      "label": "write by natural language",
+      "input": {
+        "text": "Write `ship the general agent` to `notes/todo.txt`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["write_file"],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_contains_all": {
+            "notes/todo.txt": ["ship the general agent"]
+          }
+        }
+      }
+    },
+    {
+      "label": "append by natural language",
+      "input": {
+        "text": "Append `add terminal and web tools` to `notes/todo.txt`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["write_file"],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_contains_all": {
+            "notes/todo.txt": ["ship the general agent", "add terminal and web tools"]
+          }
+        }
+      }
+    },
+    {
+      "label": "read by natural language",
+      "input": {
+        "text": "Read `notes/todo.txt`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["read_file"],
+        "reply_contains_all": [
+          "1: ship the general agent",
+          "2: add terminal and web tools"
+        ],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_contains_all": {
+            "notes/todo.txt": ["ship the general agent", "add terminal and web tools"]
+          }
+        }
+      }
+    }
+  ]
+}

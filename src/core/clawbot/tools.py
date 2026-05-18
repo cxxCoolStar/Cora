@@ -254,6 +254,10 @@ class RuntimeToolExecutor:
         result = self.file_tools.read_file(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
+    def _tool_write_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.file_tools.write_file(invocation)
+        return ToolExecutionResult(reply=result.reply, action=result.action)
+
     def _tool_skills_list(self, invocation: ToolInvocation) -> ToolExecutionResult:
         result = self.skill_tools.list_skills(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)

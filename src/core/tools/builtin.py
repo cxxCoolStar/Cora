@@ -91,6 +91,25 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
+    if registry.get("write_file") is None:
+        registry.register(
+            ToolSpec(
+                name="write_file",
+                toolset="file",
+                description="Create or overwrite a text file in the local workspace, or append text when append=true. Use this to make explicit file edits instead of only describing them.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "append": {"type": "boolean"},
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_write_file(invocation),
+            )
+        )
     if registry.get("skills_list") is None:
         registry.register(
             ToolSpec(

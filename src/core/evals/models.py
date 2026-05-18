@@ -14,6 +14,10 @@ class EvalStateExpectation:
     user_memory_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_any: list[str] = field(default_factory=list)
     user_memory_not_contains: list[str] = field(default_factory=list)
+    workspace_files_exist: list[str] = field(default_factory=list)
+    workspace_files_not_exist: list[str] = field(default_factory=list)
+    workspace_file_contains_all: dict[str, list[str]] = field(default_factory=dict)
+    workspace_file_not_contains: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "EvalStateExpectation":
@@ -26,6 +30,10 @@ class EvalStateExpectation:
             user_memory_contains_all=_string_list(payload.get("user_memory_contains_all")),
             user_memory_contains_any=_string_list(payload.get("user_memory_contains_any")),
             user_memory_not_contains=_string_list(payload.get("user_memory_not_contains")),
+            workspace_files_exist=_string_list(payload.get("workspace_files_exist")),
+            workspace_files_not_exist=_string_list(payload.get("workspace_files_not_exist")),
+            workspace_file_contains_all=_string_list_map(payload.get("workspace_file_contains_all")),
+            workspace_file_not_contains=_string_list_map(payload.get("workspace_file_not_contains")),
         )
 
 
@@ -91,11 +99,15 @@ class EvalStep:
 @dataclass(slots=True)
 class EvalSetup:
     user_memory_markdown: str | None = None
+    workspace_files: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "EvalSetup":
         payload = payload or {}
-        return cls(user_memory_markdown=_maybe_str(payload.get("user_memory_markdown")))
+        return cls(
+            user_memory_markdown=_maybe_str(payload.get("user_memory_markdown")),
+            workspace_files=_string_map(payload.get("workspace_files")),
+        )
 
 
 @dataclass(slots=True)
@@ -127,6 +139,7 @@ class EvalObservedState:
     pending_exists: bool
     pending_kind: str | None = None
     user_memory_text: str = ""
+    workspace_root: str = ""
 
 
 @dataclass(slots=True)
@@ -196,6 +209,32 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not key:
+            continue
+        normalized[key] = str(raw_value)
+    return normalized
+
+
+def _string_list_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not key:
+            continue
+        tokens = _string_list(raw_value)
+        if tokens:
+            normalized[key] = tokens
+    return normalized
 
 
 def _maybe_str(value: Any) -> str | None:

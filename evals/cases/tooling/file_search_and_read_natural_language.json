@@ -1,0 +1,44 @@
+{
+  "id": "file_search_and_read_natural_language",
+  "type": "tooling",
+  "description": "Natural-language search and read requests should route to native file tools.",
+  "tags": ["file", "search", "read", "natural-language"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "search by natural language",
+      "input": {
+        "text": "Find `hello_agent` in `src`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["search_files"],
+        "reply_contains_all": [
+          "Matches for `hello_agent`",
+          "src/example.py"
+        ]
+      }
+    },
+    {
+      "label": "read by natural language",
+      "input": {
+        "text": "Read `src/example.py`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["read_file"],
+        "reply_contains_all": [
+          "File `src/example.py`",
+          "1: def hello_agent()",
+          "2:     return 'ok'"
+        ]
+      }
+    }
+  ]
+}

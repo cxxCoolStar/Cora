@@ -106,7 +106,7 @@ class StubTopicModelClient(ModelClient):
                         "user_facts": ["User is archiving conversation artifacts."],
                         "open_loops": [],
                         "resolved_requests": ["Historical turns were compacted into a structured summary."],
-                        "recent_decisions": ["Use the archive-core skill workflow as the main tool surface."],
+                        "recent_decisions": ["Prefer generic tools first and use skills for domain workflows."],
                         "critical_context": ["Preserve item references and pending state when relevant."],
                     },
                     ensure_ascii=False,
@@ -2052,6 +2052,99 @@ def test_toolless_delivery_request_forces_archive_skill_run(tmp_path):
     assert result.primary_tool.arguments["script_path"] == "scripts/archive_dispatch.py"
     assert result.primary_tool.action == "retrieve"
     assert gateway.calls
+
+
+def test_toolless_file_search_request_forces_native_file_tool(tmp_path):
+    class _AlwaysChatModel(ModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            return ModelResponse(assistant_text="Let me think.")
+
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = _AlwaysChatModel()
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "example.py").write_text(
+        "def hello_agent():\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    container.tool_executor.file_tools.store.root = workspace
+
+    session = container.session_repository.create()
+    request_text = "Find `hello_agent` in `src`"
+    user_message = container.message_repository.add_user_message(session_id=session.id, content=request_text)
+    context_snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
+    result = asyncio.run(
+        container.clawbot_service.run_agent_loop(
+            session_id=session.id,
+            source_message_id=user_message.id,
+            user_text=request_text,
+            raw_text=request_text,
+            upload=None,
+            context_snapshot=context_snapshot,
+        )
+    )
+
+    assert result.primary_tool is not None
+    assert result.primary_tool.tool_name == "search_files"
+    assert result.primary_tool.arguments == {"query": "hello_agent", "path": "src"}
+    assert "src/example.py:1" in result.reply or "src/example.py:2" in result.reply
+    assert result.trace[0]["metadata"]["category"] == "file_search"
+
+
+def test_toolless_file_write_and_read_requests_force_native_file_tools(tmp_path):
+    class _AlwaysChatModel(ModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            return ModelResponse(assistant_text="Sure.")
+
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = _AlwaysChatModel()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    container.tool_executor.file_tools.store.root = workspace
+
+    session = container.session_repository.create()
+
+    def run_request(text: str):
+        user_message = container.message_repository.add_user_message(session_id=session.id, content=text)
+        context_snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
+        return asyncio.run(
+            container.clawbot_service.run_agent_loop(
+                session_id=session.id,
+                source_message_id=user_message.id,
+                user_text=text,
+                raw_text=text,
+                upload=None,
+                context_snapshot=context_snapshot,
+            )
+        )
+
+    write_result = run_request("Write `ship the general agent` to `notes/todo.txt`")
+    append_result = run_request("Append `add terminal and web tools` to `notes/todo.txt`")
+    read_result = run_request("Read `notes/todo.txt`")
+
+    assert write_result.primary_tool is not None
+    assert write_result.primary_tool.tool_name == "write_file"
+    assert write_result.primary_tool.arguments == {
+        "path": "notes/todo.txt",
+        "content": "ship the general agent\n",
+    }
+    assert append_result.primary_tool is not None
+    assert append_result.primary_tool.tool_name == "write_file"
+    assert append_result.primary_tool.arguments == {
+        "path": "notes/todo.txt",
+        "content": "add terminal and web tools\n",
+        "append": True,
+    }
+    assert read_result.primary_tool is not None
+    assert read_result.primary_tool.tool_name == "read_file"
+    assert (workspace / "notes" / "todo.txt").read_text(encoding="utf-8") == (
+        "ship the general agent\n"
+        "add terminal and web tools\n"
+    )
+    assert "1: ship the general agent" in read_result.reply
+    assert "2: add terminal and web tools" in read_result.reply
+    assert read_result.trace[0]["metadata"]["category"] == "file_read"
 
 
 def test_record_inbound_turn_persists_upload_reference(tmp_path):

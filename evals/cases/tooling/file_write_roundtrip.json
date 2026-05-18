@@ -1,0 +1,65 @@
+{
+  "id": "file_write_roundtrip",
+  "type": "tooling",
+  "description": "The agent should write, append, and read a text file through native tool calls in the isolated eval workspace.",
+  "tags": ["tooling", "file", "write"],
+  "steps": [
+    {
+      "label": "write new file",
+      "input": {
+        "text": "/tool write_file {\"path\":\"notes/todo.txt\",\"content\":\"ship the general agent\\n\"}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "edit",
+        "tool_names_all": ["write_file"],
+        "reply_contains_all": ["Wrote `notes/todo.txt`"],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_contains_all": {
+            "notes/todo.txt": ["ship the general agent"]
+          }
+        }
+      }
+    },
+    {
+      "label": "append second line",
+      "input": {
+        "text": "/tool write_file {\"path\":\"notes/todo.txt\",\"content\":\"add terminal and web tools\\n\",\"append\":true}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "edit",
+        "tool_names_all": ["write_file"],
+        "reply_contains_all": ["Appended to `notes/todo.txt`"],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_contains_all": {
+            "notes/todo.txt": ["ship the general agent", "add terminal and web tools"]
+          }
+        }
+      }
+    },
+    {
+      "label": "read written file",
+      "input": {
+        "text": "/tool read_file {\"path\":\"notes/todo.txt\"}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "inspect",
+        "tool_names_all": ["read_file"],
+        "reply_contains_all": ["1: ship the general agent", "2: add terminal and web tools"],
+        "state": {
+          "workspace_files_exist": ["notes/todo.txt"],
+          "workspace_file_not_contains": {
+            "notes/todo.txt": ["rollback archive-first"]
+          }
+        }
+      }
+    }
+  ]
+}

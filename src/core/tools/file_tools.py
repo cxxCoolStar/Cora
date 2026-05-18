@@ -10,6 +10,7 @@ MAX_LIST_LIMIT = 200
 MAX_SEARCH_LIMIT = 50
 MAX_READ_LINES = 200
 MAX_MATCH_LINE_LENGTH = 200
+MAX_WRITE_CHARS = 200_000
 
 
 @dataclass(slots=True)
@@ -27,9 +28,9 @@ class FileToolStore:
         limit = max(1, min(max_results, MAX_LIST_LIMIT))
         target = self._resolve_path(path)
         if not target.exists():
-            raise ValueError(f"路径不存在：{path}")
+            raise ValueError(f"path does not exist: {path}")
         if not target.is_dir():
-            raise ValueError(f"路径不是目录：{path}")
+            raise ValueError(f"path is not a directory: {path}")
 
         entries: list[tuple[str, str]] = []
         iterator = target.rglob("*") if recursive else target.iterdir()
@@ -44,12 +45,12 @@ class FileToolStore:
 
         relative_target = target.relative_to(self._resolved_root()).as_posix() or "."
         if not entries:
-            return f"目录 `{relative_target}` 下没有可展示的内容。"
+            return f"Directory `{relative_target}` is empty."
 
-        lines = [f"目录 `{relative_target}` 下的内容："]
+        lines = [f"Contents of `{relative_target}`:"]
         lines.extend(f"- [{kind}] {name}" for kind, name in entries)
         if len(entries) >= limit:
-            lines.append(f"- 结果已截断到前 {limit} 条。")
+            lines.append(f"- Results truncated to the first {limit} entries.")
         return "\n".join(lines)
 
     def search_files(
@@ -68,7 +69,7 @@ class FileToolStore:
         limit = max(1, min(max_results, MAX_SEARCH_LIMIT))
         target = self._resolve_path(path)
         if not target.exists():
-            raise ValueError(f"路径不存在：{path}")
+            raise ValueError(f"path does not exist: {path}")
 
         matches: list[str] = []
         normalized_needle = needle if case_sensitive else needle.lower()
@@ -99,13 +100,14 @@ class FileToolStore:
             if len(matches) >= limit:
                 break
 
+        relative_target = target.relative_to(self._resolved_root()).as_posix() or "."
         if not matches:
-            return f"没有在 `{target.relative_to(self._resolved_root()).as_posix() or '.'}` 下找到与 `{needle}` 相关的结果。"
+            return f"No matches for `{needle}` under `{relative_target}`."
 
-        lines = [f"与 `{needle}` 相关的结果："]
+        lines = [f"Matches for `{needle}`:"]
         lines.extend(matches)
         if len(matches) >= limit:
-            lines.append(f"- 结果已截断到前 {limit} 条。")
+            lines.append(f"- Results truncated to the first {limit} matches.")
         return "\n".join(lines)
 
     def read_file(
@@ -117,13 +119,13 @@ class FileToolStore:
     ) -> str:
         target = self._resolve_path(path)
         if not target.exists():
-            raise ValueError(f"文件不存在：{path}")
+            raise ValueError(f"file does not exist: {path}")
         if not target.is_file():
-            raise ValueError(f"路径不是文件：{path}")
+            raise ValueError(f"path is not a file: {path}")
 
         text = self._read_text_file(target)
         if text is None:
-            raise ValueError(f"文件不是可直接阅读的文本格式：{path}")
+            raise ValueError(f"file is not readable text: {path}")
 
         if start_line < 1:
             raise ValueError("start_line must be >= 1")
@@ -132,8 +134,9 @@ class FileToolStore:
 
         lines = text.splitlines()
         total_lines = len(lines)
+        relative_path = target.relative_to(self._resolved_root()).as_posix()
         if total_lines == 0:
-            return f"文件 `{target.relative_to(self._resolved_root()).as_posix()}` 是空的。"
+            return f"File `{relative_path}` is empty."
 
         slice_end = min(
             end_line if end_line is not None else start_line + MAX_READ_LINES - 1,
@@ -141,15 +144,43 @@ class FileToolStore:
             total_lines,
         )
         selected = lines[start_line - 1 : slice_end]
-        relative_path = target.relative_to(self._resolved_root()).as_posix()
         rendered = "\n".join(
             f"{line_number}: {content}"
             for line_number, content in enumerate(selected, start=start_line)
         )
-        lines_out = [f"文件 `{relative_path}` 第 {start_line}-{slice_end} 行（共 {total_lines} 行）：", rendered]
+        lines_out = [f"File `{relative_path}` lines {start_line}-{slice_end} of {total_lines}:", rendered]
         if slice_end < total_lines and (end_line is None or end_line > slice_end):
-            lines_out.append(f"... 已截断，继续读取请从第 {slice_end + 1} 行开始。")
+            lines_out.append(f"... truncated; continue from line {slice_end + 1}.")
         return "\n".join(lines_out)
+
+    def write_file(
+        self,
+        *,
+        path: str,
+        content: str,
+        append: bool = False,
+    ) -> str:
+        cleaned_path = path.strip()
+        if not cleaned_path:
+            raise ValueError("path cannot be empty")
+        if len(content) > MAX_WRITE_CHARS:
+            raise ValueError(f"content is too large; limit is {MAX_WRITE_CHARS} characters")
+
+        target = self._resolve_path(cleaned_path)
+        if target.exists() and target.is_dir():
+            raise ValueError(f"path is a directory, not a file: {path}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if append:
+            with target.open("a", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+        else:
+            target.write_text(content, encoding="utf-8", newline="")
+
+        relative_path = target.relative_to(self._resolved_root()).as_posix()
+        line_count = len(content.splitlines()) or (1 if content else 0)
+        verb = "Appended to" if append else "Wrote"
+        return f"{verb} `{relative_path}` ({len(content)} chars, {line_count} lines)."
 
     def _resolve_path(self, path: str) -> Path:
         cleaned = path.strip() or "."
@@ -161,7 +192,7 @@ class FileToolStore:
         try:
             candidate.relative_to(root)
         except ValueError as exc:
-            raise ValueError("路径超出了文件工具允许访问的工作区范围。") from exc
+            raise ValueError("path escapes the allowed workspace root") from exc
         return candidate
 
     def _iter_files(self, *, target: Path, include_hidden: bool) -> list[Path]:

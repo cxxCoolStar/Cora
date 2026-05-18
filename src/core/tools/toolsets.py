@@ -6,8 +6,8 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "tools": ["user_memory"],
     },
     "file": {
-        "description": "Inspect the local workspace through read-only file listing, search, and file reading tools.",
-        "tools": ["list_files", "search_files", "read_file"],
+        "description": "Inspect and edit text files in the local workspace through listing, search, read, and write tools.",
+        "tools": ["list_files", "search_files", "read_file", "write_file"],
     },
     "skills": {
         "description": "Discover local skills and load their instructions or supporting files on demand.",

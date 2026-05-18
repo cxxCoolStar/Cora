@@ -98,6 +98,17 @@ class FileToolHandler:
             return DomainToolReply(reply=str(exc), action="inspect")
         return DomainToolReply(reply=reply, action="inspect")
 
+    def write_file(self, invocation: "ToolInvocation") -> DomainToolReply:
+        try:
+            reply = self.store.write_file(
+                path=str(invocation.plan.arguments.get("path") or ""),
+                content=str(invocation.plan.arguments.get("content") or ""),
+                append=bool(invocation.plan.arguments.get("append") or False),
+            )
+        except ValueError as exc:
+            return DomainToolReply(reply=str(exc), action="edit")
+        return DomainToolReply(reply=reply, action="edit")
+
 
 @dataclass(slots=True)
 class SkillToolHandler:

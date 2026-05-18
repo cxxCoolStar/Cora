@@ -47,6 +47,7 @@ def run_result_to_dict(run_result: EvalRunResult) -> dict[str, Any]:
                                 "pending_exists": step.observed_state.pending_exists,
                                 "pending_kind": step.observed_state.pending_kind,
                                 "user_memory_text": step.observed_state.user_memory_text,
+                                "workspace_root": getattr(step.observed_state, "workspace_root", ""),
                             }
                             if step.observed_state is not None
                             else None
@@ -327,6 +328,7 @@ def _render_step_html(step: Any) -> str:
                 "pending_exists": step.observed_state.pending_exists,
                 "pending_kind": step.observed_state.pending_kind,
                 "user_memory_text": step.observed_state.user_memory_text,
+                "workspace_root": getattr(step.observed_state, "workspace_root", ""),
             },
             ensure_ascii=False,
             indent=2,

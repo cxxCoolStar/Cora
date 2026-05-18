@@ -12,8 +12,8 @@ from core.agent.runtime_state import RuntimeContextSnapshot
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
-from core.schemas.tool import ToolCall
 from core.schemas.model import ModelResponse
+from core.schemas.tool import ToolCall
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
     ItemRepository,
@@ -55,7 +55,7 @@ def test_file_tool_store_lists_reads_and_searches_workspace(tmp_path: Path) -> N
 
     assert "[file] src/app.py" in listed
     assert "src/app.py:1" in searched or "src/app.py:2" in searched
-    assert "文件 `src/app.py` 第 1-2 行" in read
+    assert "File `src/app.py` lines 1-2 of 5:" in read
     assert "1: def hello_agent()" in read
 
 
@@ -70,9 +70,24 @@ def test_file_tool_store_rejects_workspace_escape(tmp_path: Path) -> None:
     try:
         store.read_file(path="../secret.txt")
     except ValueError as exc:
-        assert "工作区范围" in str(exc)
+        assert "workspace root" in str(exc)
     else:
         raise AssertionError("Expected workspace escape to be rejected")
+
+
+def test_file_tool_store_writes_text_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = FileToolStore(workspace)
+
+    result = store.write_file(
+        path="src/new_module.py",
+        content="def created_by_agent():\n    return True\n",
+    )
+
+    written = (workspace / "src" / "new_module.py").read_text(encoding="utf-8")
+    assert "Wrote `src/new_module.py`" in result
+    assert "created_by_agent" in written
 
 
 def test_runtime_tool_executor_file_tools(tmp_path: Path) -> None:
@@ -112,6 +127,49 @@ def test_runtime_tool_executor_file_tools(tmp_path: Path) -> None:
 
     assert result.action == "inspect"
     assert "src/memory.py:1" in result.reply
+
+
+def test_runtime_tool_executor_write_file(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    item_repository = ItemRepository(database)
+    message_repository = MessageRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    pending_state_repository = PendingStateRepository(database)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=tmp_path / "files",
+    )
+    executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        pending_state_repository=pending_state_repository,
+        file_tool_root=workspace,
+    )
+
+    result = executor._tool_write_file(
+        ToolInvocation(
+            session_id="session-1",
+            source_message_id="msg-1",
+            plan=ToolPlan(
+                tool="write_file",
+                arguments={"path": "src/generated.py", "content": "VALUE = 1\n"},
+                reason="test",
+            ),
+            text=None,
+            upload=None,
+            context={},
+        )
+    )
+
+    assert result.action == "edit"
+    assert "Wrote `src/generated.py`" in result.reply
+    assert (workspace / "src" / "generated.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
 
 def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
@@ -153,7 +211,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
 
     specs = {spec.name for spec in service._build_tool_specs()}
 
-    assert {"list_files", "search_files", "read_file"}.issubset(specs)
+    assert {"list_files", "search_files", "read_file", "write_file"}.issubset(specs)
 
 
 def test_runtime_tool_executor_strips_tool_name_whitespace(tmp_path: Path) -> None:

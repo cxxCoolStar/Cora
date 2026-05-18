@@ -1,0 +1,45 @@
+{
+  "id": "file_search_and_read",
+  "type": "tooling",
+  "description": "The agent should dispatch search and read file tools against the isolated eval workspace.",
+  "tags": ["tooling", "file", "search", "read"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "search file contents",
+      "input": {
+        "text": "/tool search_files {\"query\":\"hello_agent\",\"path\":\"src\"}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "inspect",
+        "tool_names_all": ["search_files"],
+        "reply_contains_all": ["src/example.py", "hello_agent"],
+        "state": {
+          "workspace_files_exist": ["src/example.py"],
+          "workspace_file_contains_all": {
+            "src/example.py": ["def hello_agent()", "return 'ok'"]
+          }
+        }
+      }
+    },
+    {
+      "label": "read file range",
+      "input": {
+        "text": "/tool read_file {\"path\":\"src/example.py\",\"start_line\":1,\"end_line\":2}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "inspect",
+        "tool_names_all": ["read_file"],
+        "reply_contains_all": ["File `src/example.py` lines 1-2 of 2:", "1: def hello_agent():", "2:     return 'ok'"]
+      }
+    }
+  ]
+}
