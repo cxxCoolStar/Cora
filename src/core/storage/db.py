@@ -34,6 +34,9 @@ class DatabaseManager:
             self._ensure_column(raw, "clawbot_items", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(raw, "clawbot_items", "superseded_by_item_id", "VARCHAR")
             self._ensure_column(raw, "clawbot_items", "source_event_id", "VARCHAR")
+            self._ensure_column(raw, "clawbot_channel_session_map", "session_started_at", "DATETIME")
+            self._ensure_column(raw, "clawbot_channel_session_map", "last_interaction_at", "DATETIME")
+            self._ensure_column(raw, "clawbot_channel_session_map", "last_reset_reason", "VARCHAR(64)")
 
     @staticmethod
     def _unwrap_sqlite_connection(raw: object) -> sqlite3.Connection | None:

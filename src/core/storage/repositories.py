@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -18,6 +19,7 @@ from core.storage.models import (
     TopicItemRecord,
     TopicRecord,
     UserSignalRecord,
+    utc_now,
 )
 
 
@@ -620,7 +622,7 @@ class ChannelSessionMapRepository:
     def __init__(self, database: DatabaseManager) -> None:
         self.database = database
 
-    def get_session_id(self, *, channel: str, external_user_id: str) -> str | None:
+    def get_binding(self, *, channel: str, external_user_id: str) -> ChannelSessionMapRecord | None:
         with self.database.session() as session:
             stmt = (
                 select(ChannelSessionMapRecord)
@@ -631,10 +633,25 @@ class ChannelSessionMapRepository:
                 .order_by(desc(ChannelSessionMapRecord.updated_at))
                 .limit(1)
             )
-            record = session.scalar(stmt)
-            return record.session_id if record is not None else None
+            return session.scalar(stmt)
 
-    def upsert(self, *, channel: str, external_user_id: str, session_id: str) -> ChannelSessionMapRecord:
+    def get_session_id(self, *, channel: str, external_user_id: str) -> str | None:
+        record = self.get_binding(channel=channel, external_user_id=external_user_id)
+        return record.session_id if record is not None else None
+
+    def upsert(
+        self,
+        *,
+        channel: str,
+        external_user_id: str,
+        session_id: str,
+        session_started_at: datetime | None = None,
+        last_interaction_at: datetime | None = None,
+        last_reset_reason: str | None = None,
+    ) -> ChannelSessionMapRecord:
+        started_at = session_started_at if session_started_at is not None else None
+        interacted_at = last_interaction_at if last_interaction_at is not None else None
+        timestamp = interacted_at or started_at or utc_now()
         with self.database.session() as session:
             stmt = (
                 select(ChannelSessionMapRecord)
@@ -647,10 +664,40 @@ class ChannelSessionMapRepository:
             )
             record = session.scalar(stmt)
             if record is None:
-                record = ChannelSessionMapRecord(channel=channel, external_user_id=external_user_id, session_id=session_id)
+                record = ChannelSessionMapRecord(
+                    channel=channel,
+                    external_user_id=external_user_id,
+                    session_id=session_id,
+                    session_started_at=started_at or timestamp,
+                    last_interaction_at=interacted_at or timestamp,
+                    last_reset_reason=last_reset_reason or "initial_bind",
+                    updated_at=timestamp,
+                )
+                session.add(record)
+            elif record.session_id != session_id:
+                record = ChannelSessionMapRecord(
+                    channel=channel,
+                    external_user_id=external_user_id,
+                    session_id=session_id,
+                    session_started_at=started_at or timestamp,
+                    last_interaction_at=interacted_at or timestamp,
+                    last_reset_reason=last_reset_reason or "session_rollover",
+                    updated_at=timestamp,
+                )
                 session.add(record)
             else:
                 record.session_id = session_id
+                record.updated_at = timestamp
+                if started_at is not None:
+                    record.session_started_at = started_at
+                elif record.session_started_at is None:
+                    record.session_started_at = timestamp
+                if interacted_at is not None:
+                    record.last_interaction_at = interacted_at
+                elif record.last_interaction_at is None:
+                    record.last_interaction_at = timestamp
+                if last_reset_reason is not None:
+                    record.last_reset_reason = last_reset_reason
             session.commit()
             session.refresh(record)
             return record

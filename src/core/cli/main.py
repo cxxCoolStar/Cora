@@ -87,6 +87,10 @@ def _build_wechat_runtime(
         event_repository=ChannelEventRepository(active_container.database),
         session_map_repository=session_map_repository,
         ilink_client=client,
+        session_idle_minutes=settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=settings.wechat_session_daily_reset_hour,
+        session_timezone=settings.wechat_session_timezone,
+        enable_manual_reset=settings.wechat_session_enable_manual_reset,
     )
     active_container.configure_gateway(gateway, session_map_repository)
     poller = WechatPoller(client=client, gateway_service=gateway)

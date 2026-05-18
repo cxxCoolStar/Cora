@@ -29,7 +29,6 @@ class HistoryContext:
 class SessionContextManager:
     SUMMARY_SESSION_ID = "session-summary-writer"
     SUMMARY_MAX_MESSAGE_CHARS = 500
-    MIN_DELTA_MESSAGES_FOR_REFRESH = 4
 
     def __init__(
         self,
@@ -113,15 +112,6 @@ class SessionContextManager:
                 return payload
 
         delta_messages = older_messages[covered_count:] if covered_count < len(older_messages) else []
-        if previous_summary is not None and 0 < len(delta_messages) < self.MIN_DELTA_MESSAGES_FOR_REFRESH:
-            payload = {
-                "version": int((record.summary_json or {}).get("version") or 1) if record is not None else 1,
-                "covered_message_count": len(older_messages),
-                "last_compacted_message_id": str(getattr(older_messages[-1], "id", "") or ""),
-                "summary": previous_summary,
-            }
-            self.summary_repository.upsert(session_id=session_id, summary=payload)
-            return payload
         summary = self._summarize_messages(previous_summary=previous_summary, messages=delta_messages or older_messages)
         payload = {
             "version": int((record.summary_json or {}).get("version") or 0) + 1 if record is not None else 1,

@@ -35,6 +35,10 @@ class CoreSettings(BaseSettings):
     wechat_account_name: str = "default"
     wechat_base_url: str = "https://ilinkai.weixin.qq.com"
     wechat_poll_timeout_seconds: int = 35
+    wechat_session_idle_minutes: int = 120
+    wechat_session_daily_reset_hour: int | None = 4
+    wechat_session_timezone: str | None = None
+    wechat_session_enable_manual_reset: bool = True
 
     model_config = SettingsConfigDict(
         env_prefix="CORA_",

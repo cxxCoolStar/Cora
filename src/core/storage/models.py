@@ -166,6 +166,9 @@ class ChannelSessionMapRecord(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    session_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_reset_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ChannelEventRecord(Base):

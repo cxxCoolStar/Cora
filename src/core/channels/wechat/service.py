@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.channels.wechat.ilink_client import WechatIlinkClient
+from core.channels.wechat.session_router import WechatSessionRouter
 from core.channels.wechat.types import WechatHandleResult, WechatInboundEvent
 from core.clawbot.service import ClawBotService
 from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository
@@ -25,11 +26,24 @@ class WechatGatewayService:
         event_repository: ChannelEventRepository,
         session_map_repository: ChannelSessionMapRepository,
         ilink_client: WechatIlinkClient | None = None,
+        session_idle_minutes: int = 120,
+        session_daily_reset_hour: int | None = 4,
+        session_timezone: str | None = None,
+        enable_manual_reset: bool = True,
+        session_router: WechatSessionRouter | None = None,
     ) -> None:
         self.clawbot_service = clawbot_service
         self.event_repository = event_repository
         self.session_map_repository = session_map_repository
         self._ilink_client = ilink_client
+        self._session_router = session_router or WechatSessionRouter(
+            clawbot_service=clawbot_service,
+            session_map_repository=session_map_repository,
+            idle_minutes=session_idle_minutes,
+            daily_reset_hour=session_daily_reset_hour,
+            timezone_name=session_timezone,
+            enable_manual_reset=enable_manual_reset,
+        )
 
     async def handle_inbound_event(self, *, event: WechatInboundEvent) -> WechatHandleResult:
         logger.info(
@@ -57,21 +71,30 @@ class WechatGatewayService:
                 action="deduplicated",
             )
 
-        session_id = self.session_map_repository.get_session_id(
-            channel=self.CHANNEL_NAME,
-            external_user_id=event.user_id,
+        resolution = self._session_router.resolve(channel=self.CHANNEL_NAME, event=event)
+        session_id = resolution.session_id
+        logger.info(
+            "wechat gateway session_resolution user_id=%s session_id=%s is_new=%s reason=%s",
+            event.user_id,
+            session_id,
+            resolution.is_new_session,
+            resolution.reason,
         )
-        if session_id is None:
-            session = self.clawbot_service.create_session()
-            session_id = session.id
-            logger.info("wechat gateway new_session user_id=%s session_id=%s", event.user_id, session_id)
-            self.session_map_repository.upsert(
+        if resolution.reply_text is not None:
+            self.event_repository.create(
                 channel=self.CHANNEL_NAME,
+                external_event_id=event.event_id,
                 external_user_id=event.user_id,
+                status="processed",
                 session_id=session_id,
+                reply_preview=resolution.reply_text[:300],
             )
-        else:
-            logger.info("wechat gateway reuse_session user_id=%s session_id=%s", event.user_id, session_id)
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=resolution.reply_text,
+                action="session_reset",
+            )
 
         upload = None
         try:
@@ -85,7 +108,7 @@ class WechatGatewayService:
                 )
             response = await self.clawbot_service.ingest(
                 session_id=session_id,
-                text=event.text,
+                text=resolution.normalized_text,
                 upload=upload,
                 source_metadata={
                     "channel": self.CHANNEL_NAME,
@@ -95,6 +118,8 @@ class WechatGatewayService:
                     "file_mime": event.file_mime,
                     "media_download_failed": event.media_download_failed,
                     "media_download_error": event.media_download_error,
+                    "session_reset_reason": resolution.reason,
+                    "session_is_new": resolution.is_new_session,
                 },
             )
             if event.media_download_failed and not event.file_path:

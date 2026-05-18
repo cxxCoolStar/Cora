@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import json
 from io import BytesIO
 import sys
@@ -53,6 +54,10 @@ def archive_skill_call(intent: str, **arguments) -> ToolCall:
             "input": {"intent": intent, **arguments},
         },
     )
+
+
+def utc_ms(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
+    return int(datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp() * 1000)
 
 
 class FakeLLMIntentClassifier:
@@ -241,6 +246,10 @@ def build_test_container(
     context_compression_threshold: float = 0.50,
     context_summary_target_ratio: float = 0.20,
     context_protect_last_n_min: int = 8,
+    wechat_session_idle_minutes: int = 120,
+    wechat_session_daily_reset_hour: int | None = 4,
+    wechat_session_timezone: str | None = None,
+    wechat_session_enable_manual_reset: bool = True,
     tool_manager: ToolManager | None = None,
     toolset_preset: str = "cora-wechat",
 ) -> ClawBotContainer:
@@ -252,6 +261,10 @@ def build_test_container(
         context_compression_threshold=context_compression_threshold,
         context_summary_target_ratio=context_summary_target_ratio,
         context_protect_last_n_min=context_protect_last_n_min,
+        wechat_session_idle_minutes=wechat_session_idle_minutes,
+        wechat_session_daily_reset_hour=wechat_session_daily_reset_hour,
+        wechat_session_timezone=wechat_session_timezone,
+        wechat_session_enable_manual_reset=wechat_session_enable_manual_reset,
     )
     database = DatabaseManager(settings.clawbot_database_url)
     session_repository = SessionRepository(database)
@@ -443,7 +456,7 @@ def test_runtime_context_snapshot_keeps_operational_state_separate_from_history(
     assert snapshot.recent_events
 
 
-def test_session_summary_is_not_refreshed_for_tiny_delta(tmp_path):
+def test_session_summary_refreshes_when_more_messages_fall_out_of_recent_tail(tmp_path):
     container = build_test_container(
         tmp_path,
         context_length=4096,
@@ -492,7 +505,7 @@ def test_session_summary_is_not_refreshed_for_tiny_delta(tmp_path):
     assert second_summary is not None
     second_payload = dict(second_summary.summary_json or {})
 
-    assert second_payload["summary"] == first_payload["summary"]
+    assert second_payload["version"] > first_payload["version"]
     assert second_payload["covered_message_count"] > first_payload["covered_message_count"]
 
 
@@ -1677,6 +1690,10 @@ def test_wechat_gateway_reuses_session_for_same_user(tmp_path):
         clawbot_service=container.clawbot_service,
         event_repository=ChannelEventRepository(container.database),
         session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
     )
 
     first = asyncio.run(
@@ -1694,12 +1711,174 @@ def test_wechat_gateway_reuses_session_for_same_user(tmp_path):
     assert second.action in {"retrieve", "organize", "chat"}
 
 
+def test_wechat_gateway_manual_new_command_starts_fresh_session(tmp_path):
+    container = build_test_container(tmp_path)
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-reset-1", user_id="wx-user-reset", text="remember this thread")
+        )
+    )
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-reset-2", user_id="wx-user-reset", text="/new")
+        )
+    )
+
+    assert first.session_id != second.session_id
+    assert second.action == "session_reset"
+    assert second.reply == "Started a new conversation."
+
+
+def test_wechat_gateway_rolls_session_after_idle_timeout(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        wechat_session_idle_minutes=30,
+        wechat_session_daily_reset_hour=None,
+    )
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-idle-1",
+                user_id="wx-user-idle",
+                text="first note",
+                create_time_ms=utc_ms(2025, 1, 1, 8, 0),
+            )
+        )
+    )
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-idle-2",
+                user_id="wx-user-idle",
+                text="after a break",
+                create_time_ms=utc_ms(2025, 1, 1, 9, 0),
+            )
+        )
+    )
+
+    assert first.session_id != second.session_id
+
+
+def test_wechat_gateway_keeps_pending_session_even_after_idle_timeout(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        wechat_session_idle_minutes=30,
+        wechat_session_daily_reset_hour=None,
+    )
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-pending-1",
+                user_id="wx-user-pending",
+                text="need a follow-up",
+                create_time_ms=utc_ms(2025, 1, 1, 8, 0),
+            )
+        )
+    )
+    source_message = container.message_repository.add_user_message(session_id=first.session_id, content="clarify this")
+    container.pending_state_repository.create(
+        session_id=first.session_id,
+        source_message_id=source_message.id,
+        question="Which file should I use?",
+        candidate_intents=["deliver"],
+        pending_payload={"type": "upload_save"},
+    )
+
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-pending-2",
+                user_id="wx-user-pending",
+                text="the PDF one",
+                create_time_ms=utc_ms(2025, 1, 1, 9, 0),
+            )
+        )
+    )
+
+    assert first.session_id == second.session_id
+
+
+def test_wechat_gateway_rolls_session_after_daily_boundary(tmp_path):
+    container = build_test_container(
+        tmp_path,
+        wechat_session_idle_minutes=0,
+        wechat_session_daily_reset_hour=4,
+        wechat_session_timezone="UTC",
+    )
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    first = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-day-1",
+                user_id="wx-user-day",
+                text="late night thought",
+                create_time_ms=utc_ms(2025, 1, 1, 3, 30),
+            )
+        )
+    )
+    second = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-day-2",
+                user_id="wx-user-day",
+                text="new day message",
+                create_time_ms=utc_ms(2025, 1, 1, 4, 30),
+            )
+        )
+    )
+
+    assert first.session_id != second.session_id
+
+
 def test_wechat_gateway_deduplicates_same_event_id(tmp_path):
     container = build_test_container(tmp_path)
     gateway = WechatGatewayService(
         clawbot_service=container.clawbot_service,
         event_repository=ChannelEventRepository(container.database),
         session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
     )
 
     first = asyncio.run(
@@ -1723,6 +1902,10 @@ def test_wechat_gateway_ingests_file_event(tmp_path):
         clawbot_service=container.clawbot_service,
         event_repository=ChannelEventRepository(container.database),
         session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
     )
     local_file = tmp_path / "wechat_note.md"
     local_file.write_text("# 微信资料\n\n这是从微信发来的文档内容。", encoding="utf-8")
@@ -1784,6 +1967,7 @@ def test_wechat_gateway_overrides_generic_reply_when_media_download_failed(tmp_p
         clawbot_service=_FallbackClawBotService(),
         event_repository=ChannelEventRepository(database),
         session_map_repository=ChannelSessionMapRepository(database),
+        session_daily_reset_hour=None,
     )
 
     result = asyncio.run(
