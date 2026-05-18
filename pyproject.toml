@@ -33,6 +33,7 @@ dev = [
 ]
 
 [project.scripts]
+cora = "core.cli.main:app"
 core-cli = "core.cli.main:app"
 
 [tool.setuptools]

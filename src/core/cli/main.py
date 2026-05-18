@@ -11,17 +11,33 @@ from core.channels.wechat.login import WechatQrLoginClient
 from core.channels.wechat.poller import WechatPoller
 from core.channels.wechat.service import WechatGatewayService
 from core.clawbot.dependencies import get_clawbot_container
+from core.cli.tui import launch_tui
 from core.config import CoreSettings
 from core.evals import EvalRunner
 from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository
 
-app = typer.Typer(help="CLI for ClawBot.")
+app = typer.Typer(help="CLI and interactive shell for ClawBot.", no_args_is_help=False)
 
 
-@app.callback()
-def main() -> None:
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
     """ClawBot command group."""
+    if ctx.invoked_subcommand is None:
+        exit_code = launch_tui()
+        if exit_code:
+            raise typer.Exit(code=exit_code)
     return None
+
+
+@app.command("tui")
+def tui(
+    session_id: str | None = typer.Option(None, "--session", help="Resume an existing session id."),
+    trace: bool = typer.Option(True, "--trace/--no-trace", help="Show tool trace after each turn."),
+) -> None:
+    """Start the local interactive chat shell."""
+    exit_code = launch_tui(session_id=session_id, trace=trace)
+    if exit_code:
+        raise typer.Exit(code=exit_code)
 
 
 @app.command("serve")

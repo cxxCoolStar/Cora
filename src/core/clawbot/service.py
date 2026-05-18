@@ -255,7 +255,40 @@ class ClawBotService:
         return self._session_shell.to_turn_response(outcome=outcome)
 
     async def reply(self, *, session_id: str, text: str) -> TurnResponse:
-        return await self.ingest(session_id=session_id, text=text, upload=None)
+        outcome = await self.reply_outcome(session_id=session_id, text=text)
+        return self._session_shell.to_turn_response(outcome=outcome)
+
+    async def reply_outcome(self, *, session_id: str, text: str) -> AssistantTurnOutcome:
+        self.session_repository.get(session_id)
+        inbound_turn = await self._session_shell.record_inbound_turn(
+            session_id=session_id,
+            text=text,
+            upload=None,
+            source_metadata=None,
+        )
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        context_snapshot.current_source_event_id = inbound_turn.source_event_id
+        turn_result = await self.run_agent_loop(
+            session_id=session_id,
+            source_message_id=inbound_turn.source_message_id,
+            user_text=inbound_turn.model_text,
+            raw_text=text,
+            upload=None,
+            context_snapshot=context_snapshot,
+        )
+        outcome = self._session_shell.outcome_from_turn_result(turn_result)
+        self._session_shell.persist_assistant_turn(
+            session_id=session_id,
+            outcome=outcome,
+        )
+        logger.info(
+            "clawbot reply_outcome_done session_id=%s action=%s disposition=%s tool=%s",
+            session_id,
+            outcome.action,
+            outcome.disposition,
+            outcome.tool_name,
+        )
+        return outcome
 
     def list_items(self, *, session_id: str) -> list[ItemSummaryResponse]:
         self.session_repository.get(session_id)
@@ -300,3 +333,6 @@ class ClawBotService:
 
     def load_context_snapshot(self, *, session_id: str) -> RuntimeContextSnapshot:
         return self._runtime_snapshot_loader.load_context_snapshot(session_id=session_id)
+
+    def list_tool_names(self) -> list[str]:
+        return [spec.name for spec in self._tool_specs]

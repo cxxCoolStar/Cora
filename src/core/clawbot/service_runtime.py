@@ -51,6 +51,7 @@ class AssistantTurnOutcome:
     reason: str
     artifacts: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+    tool_trace: list[dict[str, Any]]
     item_id: str | None = None
 
 
@@ -238,6 +239,22 @@ class ClawBotSessionShell:
             reason=result.reason,
             artifacts=list(result.artifacts),
             trace=list(result.trace),
+            tool_trace=[
+                {
+                    "tool_name": entry.tool_name,
+                    "arguments": dict(entry.arguments),
+                    "action": entry.action,
+                    "status": entry.status,
+                    "disposition": entry.disposition,
+                    "artifacts": list(entry.artifacts),
+                    "metadata": {
+                        key: value
+                        for key, value in entry.metadata.items()
+                        if key != "runtime_state"
+                    },
+                }
+                for entry in result.tool_trace
+            ],
             item_id=item_id if isinstance(item_id, str) else None,
         )
 
