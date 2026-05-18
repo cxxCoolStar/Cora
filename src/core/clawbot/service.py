@@ -72,6 +72,7 @@ class ClawBotService:
         user_memory_path: Path | None = None,
         file_tool_root: Path | None = None,
         tool_manager: ToolManager | None = None,
+        toolset_preset: str = "cora-wechat",
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -86,6 +87,7 @@ class ClawBotService:
         self.user_memory_path = user_memory_path or Path("user-memory/USER.md")
         self.file_tool_root = file_tool_root or Path(".")
         self.tool_manager = tool_manager or ToolManager()
+        self.toolset_preset = toolset_preset or "cora-wechat"
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         self.runtime_manager = AgentRuntimeManager(
@@ -154,8 +156,7 @@ class ClawBotService:
         return self.session_repository.create()
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
-        toolsets = ["user_memory", "file", "skills", "skills_execute"]
-        return self.tool_manager.build_model_tool_specs(toolsets=toolsets)
+        return self.tool_manager.build_model_tool_specs(toolset_preset=self.toolset_preset)
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()

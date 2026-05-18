@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.agent.skill_loader import SkillLoader
 from core.tools.file_tools import FileToolStore
+from core.tools.terminal_tools import TerminalToolStore
 from core.user_memory import UserMemoryStore
 
 if TYPE_CHECKING:
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 class DomainToolReply:
     reply: str
     action: str
+    status: str = "completed"
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -178,3 +181,28 @@ class SkillToolHandler:
                     lines.append(f"- {linked_file}")
             lines.append("Use skill_view again with file_path to load one of these files.")
         return DomainToolReply(reply="\n".join(lines), action="skill")
+
+
+@dataclass(slots=True)
+class TerminalToolHandler:
+    store: TerminalToolStore
+
+    @classmethod
+    def from_root(cls, root: Path) -> "TerminalToolHandler":
+        return cls(store=TerminalToolStore(root))
+
+    def execute(self, invocation: "ToolInvocation") -> DomainToolReply:
+        try:
+            result = self.store.run_command(
+                command=str(invocation.plan.arguments.get("command") or ""),
+                cwd=str(invocation.plan.arguments.get("cwd") or "."),
+                timeout_seconds=int(invocation.plan.arguments.get("timeout_seconds") or 20),
+            )
+        except ValueError as exc:
+            return DomainToolReply(reply=str(exc), action="execute", status="failed")
+        return DomainToolReply(
+            reply=result.render(),
+            action="execute",
+            status=result.status,
+            metadata=result.metadata(),
+        )

@@ -21,6 +21,7 @@ EXECUTION_GUIDANCE = (
     "Do not pretend a tool action happened if it did not. If the user asks about current saved state, inspect the relevant tool-backed state instead of guessing. "
     "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details. "
     "If the user asks you to create or update a text file and write_file is available, use it instead of only describing the edit. "
+    "If the user asks you to run a shell or terminal command and shell_exec is available, use it instead of only describing the command. "
     "When a project-specific workflow may exist, inspect relevant skills with skills_list or skill_view before improvising. "
     "If a loaded skill points you to an executable helper script, use skill_run with the exact script path and structured input instead of free-chatting the workflow. "
     "Do not invent script names, file paths, alternate entrypoints, or unavailable tools. "

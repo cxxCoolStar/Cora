@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from core.tools.registry import ToolSpec, registry
+from core.tools.registry import ToolRegistry, ToolSpec, registry
 
 
-def register_builtin_tools() -> None:
-    if registry.get("user_memory") is None:
-        registry.register(
+def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
+    active_registry = target_registry or registry
+    if active_registry.get("user_memory") is None:
+        active_registry.register(
             ToolSpec(
                 name="user_memory",
                 toolset="user_memory",
@@ -28,8 +29,8 @@ def register_builtin_tools() -> None:
                 is_agent_stateful=True,
             )
         )
-    if registry.get("list_files") is None:
-        registry.register(
+    if active_registry.get("list_files") is None:
+        active_registry.register(
             ToolSpec(
                 name="list_files",
                 toolset="file",
@@ -48,8 +49,8 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
-    if registry.get("search_files") is None:
-        registry.register(
+    if active_registry.get("search_files") is None:
+        active_registry.register(
             ToolSpec(
                 name="search_files",
                 toolset="file",
@@ -71,8 +72,8 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
-    if registry.get("read_file") is None:
-        registry.register(
+    if active_registry.get("read_file") is None:
+        active_registry.register(
             ToolSpec(
                 name="read_file",
                 toolset="file",
@@ -91,8 +92,8 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
-    if registry.get("write_file") is None:
-        registry.register(
+    if active_registry.get("write_file") is None:
+        active_registry.register(
             ToolSpec(
                 name="write_file",
                 toolset="file",
@@ -110,8 +111,27 @@ def register_builtin_tools() -> None:
                 handler=lambda executor, invocation: executor._tool_write_file(invocation),
             )
         )
-    if registry.get("skills_list") is None:
-        registry.register(
+    if active_registry.get("shell_exec") is None:
+        active_registry.register(
+            ToolSpec(
+                name="shell_exec",
+                toolset="terminal",
+                description="Run a terminal command inside the local workspace and capture stdout, stderr, exit code, and working directory.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "cwd": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_shell_exec(invocation),
+            )
+        )
+    if active_registry.get("skills_list") is None:
+        active_registry.register(
             ToolSpec(
                 name="skills_list",
                 toolset="skills",
@@ -127,8 +147,8 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
-    if registry.get("skill_view") is None:
-        registry.register(
+    if active_registry.get("skill_view") is None:
+        active_registry.register(
             ToolSpec(
                 name="skill_view",
                 toolset="skills",
@@ -146,8 +166,8 @@ def register_builtin_tools() -> None:
                 read_only=True,
             )
         )
-    if registry.get("skill_run") is None:
-        registry.register(
+    if active_registry.get("skill_run") is None:
+        active_registry.register(
             ToolSpec(
                 name="skill_run",
                 toolset="skills_execute",

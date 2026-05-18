@@ -40,7 +40,8 @@ from core.llm.base import ModelClient  # noqa: E402
 from core.schemas.message import Message  # noqa: E402
 from core.schemas.model import ModelResponse  # noqa: E402
 from core.schemas.tool import ToolCall, ToolSpec  # noqa: E402
-from core.tools.registry import ToolInvocation  # noqa: E402
+from core.tools import ToolManager  # noqa: E402
+from core.tools.registry import ToolInvocation, ToolRegistry, ToolSpec as RegisteredToolSpec  # noqa: E402
 
 
 def archive_skill_call(intent: str, **arguments) -> ToolCall:
@@ -240,6 +241,8 @@ def build_test_container(
     context_compression_threshold: float = 0.50,
     context_summary_target_ratio: float = 0.20,
     context_protect_last_n_min: int = 8,
+    tool_manager: ToolManager | None = None,
+    toolset_preset: str = "cora-wechat",
 ) -> ClawBotContainer:
     settings = CoreSettings(
         clawbot_database_path=tmp_path / "clawbot.db",
@@ -303,6 +306,8 @@ def build_test_container(
         tool_executor=tool_executor,
         topic_organizer=topic_organizer,
         context_budget_manager=context_budget_manager,
+        tool_manager=tool_manager,
+        toolset_preset=toolset_preset,
     )
     container = ClawBotContainer(
         settings=settings,
@@ -337,6 +342,34 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
     assert messages[0].role == "system"
     assert "archive-core" in messages[0].content
     assert "Shared skills summary:" in messages[0].content
+
+
+def test_clawbot_service_toolset_preset_controls_exposed_tools(tmp_path):
+    registry = ToolRegistry()
+    tool_manager = ToolManager(registry=registry)
+    registry.register(
+        RegisteredToolSpec(
+            name="shell_exec",
+            toolset="terminal",
+            description="Run a shell command.",
+            schema={"type": "object", "properties": {}},
+            handler=lambda executor, invocation: None,
+        )
+    )
+
+    cli_container = build_test_container(
+        tmp_path / "cli",
+        tool_manager=tool_manager,
+        toolset_preset="cora-cli",
+    )
+    wechat_container = build_test_container(
+        tmp_path / "wechat",
+        tool_manager=tool_manager,
+        toolset_preset="cora-wechat",
+    )
+
+    assert "shell_exec" in [spec.name for spec in cli_container.clawbot_service._tool_specs]
+    assert "shell_exec" not in [spec.name for spec in wechat_container.clawbot_service._tool_specs]
 
 
 def test_agent_history_uses_recent_12_messages_plus_summary(tmp_path):
@@ -494,6 +527,110 @@ def test_agent_history_uses_token_budget_not_fixed_message_count(tmp_path):
     assert "[SESSION SUMMARY — REFERENCE ONLY]" in history[0].content
     # Token-budget mode should keep fewer than the default 12 raw messages here.
     assert len(history) < 13
+
+
+def test_agent_history_continues_without_summary_when_summary_generation_times_out(tmp_path):
+    class _SummaryTimeoutModel(StubTopicModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            if messages and messages[0].session_id == "session-summary-writer":
+                raise httpx.ReadTimeout("summary timeout")
+            return super().generate(messages=messages, tools=tools)
+
+    container = build_test_container(
+        tmp_path,
+        context_length=4096,
+        context_compression_threshold=0.25,
+        context_summary_target_ratio=0.08,
+        context_protect_last_n_min=4,
+    )
+    timeout_model = _SummaryTimeoutModel()
+    container.clawbot_service.model_client = timeout_model
+    container.clawbot_service._context_manager.model_client = timeout_model
+    session = container.session_repository.create()
+    long_text = "鍘嗗彶娑堟伅" * 220
+
+    for index in range(10):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"user message {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"assistant message {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    history = container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="fresh user input",
+    )
+
+    assert history
+    assert history[0].role != "system"
+    assert container.session_summary_repository.get_by_session(session_id=session.id) is None
+
+
+def test_agent_history_reuses_cached_summary_when_summary_refresh_times_out(tmp_path):
+    class _SummaryTimeoutModel(StubTopicModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            if messages and messages[0].session_id == "session-summary-writer":
+                raise httpx.ReadTimeout("summary timeout")
+            return super().generate(messages=messages, tools=tools)
+
+    container = build_test_container(
+        tmp_path,
+        context_length=4096,
+        context_compression_threshold=0.25,
+        context_summary_target_ratio=0.08,
+        context_protect_last_n_min=4,
+    )
+    session = container.session_repository.create()
+    long_text = "鍘嗗彶娑堟伅" * 220
+
+    for index in range(10):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"user message {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"assistant message {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="fresh user input",
+    )
+    first_summary = container.session_summary_repository.get_by_session(session_id=session.id)
+    assert first_summary is not None
+    first_payload = dict(first_summary.summary_json or {})
+
+    timeout_model = _SummaryTimeoutModel()
+    container.clawbot_service.model_client = timeout_model
+    container.clawbot_service._context_manager.model_client = timeout_model
+
+    for index in range(6):
+        container.message_repository.add_user_message(
+            session_id=session.id,
+            content=f"follow-up user {index} {long_text}",
+        )
+        container.message_repository.add_assistant_message(
+            session_id=session.id,
+            content=f"follow-up assistant {index} {long_text}",
+            metadata={"action": "chat", "tool": "archive"},
+        )
+
+    history = container.clawbot_service._load_agent_history(
+        session_id=session.id,
+        user_text="follow-up input",
+    )
+    second_summary = container.session_summary_repository.get_by_session(session_id=session.id)
+
+    assert history[0].role == "system"
+    assert "[SESSION SUMMARY" in history[0].content
+    assert second_summary is not None
+    assert dict(second_summary.summary_json or {}) == first_payload
 
 
 async def api_request(app, method: str, path: str, **kwargs):

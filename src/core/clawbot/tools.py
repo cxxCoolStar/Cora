@@ -16,7 +16,7 @@ from core.agent.skill_protocol import SkillExecutionResult, SkillStateDelta, UNS
 from core.agent.skill_executor import SkillScriptExecutor, SkillScriptRequest
 from core.agent.skill_loader import SkillLoader
 from core.clawbot.planner import ToolPlan
-from core.clawbot.tool_domains import FileToolHandler, SkillToolHandler, UserMemoryToolHandler
+from core.clawbot.tool_domains import FileToolHandler, SkillToolHandler, TerminalToolHandler, UserMemoryToolHandler
 from core.ingestion.service import IngestionService
 from core.schemas.tool import ToolCall, ToolResult
 from core.storage.repositories import (
@@ -96,6 +96,7 @@ class RuntimeToolExecutor:
         )
         self.user_memory_tools = UserMemoryToolHandler.from_path(user_memory_path or Path("user-memory/USER.md"))
         self.file_tools = FileToolHandler.from_root(file_tool_root or Path("."))
+        self.terminal_tools = TerminalToolHandler.from_root(file_tool_root or Path("."))
         self.skill_tools = SkillToolHandler.from_roots(skill_roots)
         self.skill_loader = SkillLoader(skill_roots=skill_roots)
         self.skill_script_executor = SkillScriptExecutor(skill_loader=self.skill_loader)
@@ -257,6 +258,15 @@ class RuntimeToolExecutor:
     def _tool_write_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
         result = self.file_tools.write_file(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
+
+    def _tool_shell_exec(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.terminal_tools.execute(invocation)
+        return ToolExecutionResult(
+            reply=result.reply,
+            action=result.action,
+            status=result.status,
+            metadata=dict(result.metadata or {}),
+        )
 
     def _tool_skills_list(self, invocation: ToolInvocation) -> ToolExecutionResult:
         result = self.skill_tools.list_skills(invocation)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +9,8 @@ from core.agent.context_budget import ContextBudgetManager
 from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.storage.repositories import MessageRepository, SessionSummaryRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -52,16 +55,39 @@ class SessionContextManager:
         recent_records = all_messages[decision.recent_start_index :]
         summary_message = None
         if decision.needs_summary and older_messages:
-            summary_payload = self._get_or_update_summary(session_id=session_id, older_messages=older_messages)
-            summary_message = Message.system(
+            summary_payload = self._load_summary_payload_best_effort(
                 session_id=session_id,
-                content=self._format_summary_message(summary_payload, decision=decision),
+                older_messages=older_messages,
             )
+            if summary_payload is not None:
+                summary_message = Message.system(
+                    session_id=session_id,
+                    content=self._format_summary_message(summary_payload, decision=decision),
+                )
 
         return HistoryContext(
             summary_message=summary_message,
             recent_messages=self._normalize_recent_messages(session_id=session_id, messages=recent_records),
         )
+
+    def _load_summary_payload_best_effort(
+        self,
+        *,
+        session_id: str,
+        older_messages: list[object],
+    ) -> dict[str, Any] | None:
+        try:
+            return self._get_or_update_summary(session_id=session_id, older_messages=older_messages)
+        except Exception:
+            logger.exception(
+                "session summary refresh failed; continuing without refreshed summary session_id=%s",
+                session_id,
+            )
+            record = self.summary_repository.get_by_session(session_id=session_id)
+            if record is None:
+                return None
+            payload = dict(record.summary_json or {})
+            return payload if isinstance(payload.get("summary"), dict) else None
 
     def _normalize_recent_messages(self, *, session_id: str, messages: list[object]) -> list[Message]:
         normalized: list[Message] = []

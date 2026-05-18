@@ -127,6 +127,7 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     assert "archive-core" in messages[0].content
     assert "coding, local workspace tasks, research, and reusable domain workflows" in messages[0].content
     assert "If the user asks you to create or update a text file and write_file is available" in messages[0].content
+    assert "If the user asks you to run a shell or terminal command and shell_exec is available" in messages[0].content
     assert "do not leave them blank" in messages[0].content
     assert messages[-1].content == "save this photo"
 

@@ -214,6 +214,50 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     assert {"list_files", "search_files", "read_file", "write_file"}.issubset(specs)
 
 
+def test_clawbot_service_cli_preset_exposes_shell_exec(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    session_repository = SessionRepository(database)
+    session_summary_repository = SessionSummaryRepository(database)
+    message_repository = MessageRepository(database)
+    source_event_repository = SourceEventRepository(database)
+    item_repository = ItemRepository(database)
+    pending_state_repository = PendingStateRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    topic_repository = TopicRepository(database)
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=tmp_path / "files",
+    )
+    tool_executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        pending_state_repository=pending_state_repository,
+        file_tool_root=tmp_path / "workspace",
+    )
+    service = ClawBotService(
+        session_repository=session_repository,
+        session_summary_repository=session_summary_repository,
+        message_repository=message_repository,
+        source_event_repository=source_event_repository,
+        item_repository=item_repository,
+        ingestion_service=ingestion_service,
+        pending_state_repository=pending_state_repository,
+        user_signal_repository=user_signal_repository,
+        topic_repository=topic_repository,
+        model_client=DummyModelClient(),
+        tool_executor=tool_executor,
+        file_tool_root=tmp_path / "workspace",
+        toolset_preset="cora-cli",
+    )
+
+    specs = {spec.name for spec in service._build_tool_specs()}
+
+    assert "shell_exec" in specs
+
+
 def test_runtime_tool_executor_strips_tool_name_whitespace(tmp_path: Path) -> None:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
     database.create_all()

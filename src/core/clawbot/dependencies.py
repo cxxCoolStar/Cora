@@ -108,6 +108,7 @@ def get_clawbot_container() -> ClawBotContainer:
                 api_key=settings.openai_api_key or "",
                 model=settings.model or "",
                 base_url=settings.openai_base_url,
+                timeout=float(max(10, settings.openai_timeout_seconds)),
             )
         if model_client is None:
             raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")
@@ -157,6 +158,7 @@ def get_clawbot_container() -> ClawBotContainer:
             context_budget_manager=context_budget_manager,
             user_memory_path=settings.user_memory_path,
             file_tool_root=settings.file_tool_root,
+            toolset_preset=settings.toolset_preset,
         )
         _container = ClawBotContainer(
             settings=settings,
