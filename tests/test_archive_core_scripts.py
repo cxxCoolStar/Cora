@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_SCRIPTS_DIR = REPO_ROOT / "skills" / "archive-core" / "scripts"
+ARCHIVE_DISPATCH_SCRIPT = SKILL_SCRIPTS_DIR / "archive_dispatch.py"
 SAVE_SCRIPT = SKILL_SCRIPTS_DIR / "save_asset.py"
 FIND_SCRIPT = SKILL_SCRIPTS_DIR / "find_asset.py"
 UPDATE_SCRIPT = SKILL_SCRIPTS_DIR / "update_index.py"
@@ -16,6 +17,17 @@ UPDATE_SCRIPT = SKILL_SCRIPTS_DIR / "update_index.py"
 def _run_script(script: Path, *args: str) -> dict:
     completed = subprocess.run(
         [sys.executable, str(script), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def _run_dispatch(payload: dict) -> dict:
+    completed = subprocess.run(
+        [sys.executable, str(ARCHIVE_DISPATCH_SCRIPT)],
+        input=json.dumps(payload, ensure_ascii=False),
         capture_output=True,
         text=True,
         check=True,
@@ -138,3 +150,55 @@ def test_update_index_appends_record_from_json_file(tmp_path: Path) -> None:
     lines = index_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["id"] == "img_manual_001"
+
+
+def test_archive_dispatch_search_clarifies_ambiguous_open_request(tmp_path: Path) -> None:
+    sys.path.insert(0, str(SKILL_SCRIPTS_DIR))
+    from _content_common import build_database  # type: ignore
+    from core.storage.repositories import ItemRepository, SessionRepository
+
+    database = build_database(f"sqlite:///{tmp_path / 'clawbot.db'}")
+    session = SessionRepository(database).create()
+    item_repository = ItemRepository(database)
+    item_repository.create(
+        session_id=session.id,
+        source_message_id="m1",
+        source_event_id=None,
+        item_type="text_note",
+        title="项目A上线时间",
+        raw_content="项目A上线时间是周三晚上八点。",
+        normalized_text="项目A上线时间是周三晚上八点。",
+        summary="项目A上线时间是周三晚上八点。",
+        metadata={},
+        locator_hint=None,
+    )
+    item_repository.create(
+        session_id=session.id,
+        source_message_id="m2",
+        source_event_id=None,
+        item_type="text_note",
+        title="项目B上线时间",
+        raw_content="项目B上线时间是周五上午十点。",
+        normalized_text="项目B上线时间是周五上午十点。",
+        summary="项目B上线时间是周五上午十点。",
+        metadata={},
+        locator_hint=None,
+    )
+
+    result = _run_dispatch(
+        {
+            "intent": "search",
+            "session_id": session.id,
+            "source_message_id": "m3",
+            "database_url": f"sqlite:///{tmp_path / 'clawbot.db'}",
+            "arguments": {
+                "text": "打开上线时间那条资料。",
+            },
+            "text": "打开上线时间那条资料。",
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["disposition"] == "clarify"
+    assert result["action"] == "clarify"
+    assert result["pending_state_delta"]["request"]["kind"] == "item_selection"

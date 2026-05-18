@@ -1,0 +1,40 @@
+{
+  "id": "save_and_retrieve_text_note",
+  "type": "capability",
+  "description": "The agent should save a short text note and later retrieve it by meaning.",
+  "tags": ["save", "retrieve", "text"],
+  "steps": [
+    {
+      "label": "save note",
+      "input": {
+        "text": "帮我保存：明天给王医生带过敏化验单。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["skill_run"],
+        "state": {
+          "item_count": 1,
+          "deleted_item_count": 0,
+          "pending_exists": false
+        }
+      }
+    },
+    {
+      "label": "retrieve by meaning",
+      "input": {
+        "text": "我明天要带什么给王医生？"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_any": ["过敏化验单"],
+        "state": {
+          "item_count": 1,
+          "deleted_item_count": 0,
+          "pending_exists": false
+        }
+      }
+    }
+  ]
+}

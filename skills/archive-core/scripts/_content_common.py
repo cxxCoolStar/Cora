@@ -19,8 +19,9 @@ def ensure_repo_src() -> None:
 ensure_repo_src()
 
 from core.config import CoreSettings  # noqa: E402
+from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ItemRepository  # noqa: E402
+from core.storage.repositories import ItemRepository, MessageRepository, UserSignalRepository  # noqa: E402
 
 
 def build_database(database_url: str | None = None) -> DatabaseManager:
@@ -31,6 +32,20 @@ def build_database(database_url: str | None = None) -> DatabaseManager:
         database = DatabaseManager(settings.clawbot_database_url)
     database.create_all()
     return database
+
+
+def build_ingestion_service(
+    database: DatabaseManager,
+    storage_dir: str | Path | None = None,
+) -> IngestionService:
+    settings = CoreSettings()
+    resolved_storage_dir = Path(storage_dir) if storage_dir else settings.files_storage_dir
+    return IngestionService(
+        item_repository=ItemRepository(database),
+        message_repository=MessageRepository(database),
+        user_signal_repository=UserSignalRepository(database),
+        storage_dir=resolved_storage_dir,
+    )
 
 
 def item_to_summary(record: Any, *, score: int | None = None) -> dict[str, Any]:

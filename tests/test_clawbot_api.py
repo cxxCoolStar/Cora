@@ -18,14 +18,16 @@ from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
 from core.agent.runtime_state import RuntimeContextSnapshot  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
+from core.channels.wechat.poller import WechatPoller  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
-from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
+from core.channels.wechat.types import WechatHandleResult, WechatInboundEvent  # noqa: E402
 from core.clawbot import dependencies as deps  # noqa: E402
 from core.clawbot.dependencies import ClawBotContainer  # noqa: E402
 from core.config import CoreSettings  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentClassifier  # noqa: E402
 from core.clawbot.intent_llm import LLMIntentResult  # noqa: E402
 from core.clawbot.intent_router import IntentRouter  # noqa: E402
+from core.clawbot.planner import ToolPlan  # noqa: E402
 from core.clawbot.service import ClawBotService  # noqa: E402
 from core.clawbot import RuntimeToolExecutor  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
@@ -38,6 +40,7 @@ from core.llm.base import ModelClient  # noqa: E402
 from core.schemas.message import Message  # noqa: E402
 from core.schemas.model import ModelResponse  # noqa: E402
 from core.schemas.tool import ToolCall, ToolSpec  # noqa: E402
+from core.tools.registry import ToolInvocation  # noqa: E402
 
 
 def archive_skill_call(intent: str, **arguments) -> ToolCall:
@@ -1604,6 +1607,118 @@ def test_wechat_gateway_ingests_file_event(tmp_path):
     assert result.action == "capture"
 
 
+def test_wechat_gateway_overrides_generic_reply_when_media_download_failed(tmp_path):
+    class _FallbackClawBotService:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def ingest(self, *, session_id: str, text: str | None, upload: UploadFile | None, source_metadata: dict[str, object] | None = None):
+            self.calls.append(
+                {
+                    "session_id": session_id,
+                    "text": text,
+                    "upload": upload,
+                    "source_metadata": source_metadata or {},
+                }
+            )
+            from core.clawbot.schemas import TurnResponse
+
+            return TurnResponse(
+                reply="I do not have a final answer yet.",
+                status="completed",
+                disposition="respond",
+                action="chat",
+                item_id=None,
+                needs_clarification=False,
+                artifacts=[],
+                trace=[],
+                decision_source="llm_tool_call",
+            )
+
+        def create_session(self):
+            class _Session:
+                id = "session-wechat-media-fail"
+
+            return _Session()
+
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'clawbot.db').as_posix()}")
+    database.create_all()
+    gateway = WechatGatewayService(
+        clawbot_service=_FallbackClawBotService(),
+        event_repository=ChannelEventRepository(database),
+        session_map_repository=ChannelSessionMapRepository(database),
+    )
+
+    result = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(
+                event_id="wx-media-fail-1",
+                user_id="wx-user-media-fail",
+                text="这是我跟对象一起去玩的《污秽》的密室逃脱",
+                media_download_failed=True,
+                media_download_error="httpx.ReadTimeout('timed out')",
+            )
+        )
+    )
+
+    assert "图片下载失败" in result.reply
+    assert "还没有成功保存图片" in result.reply
+
+
+def test_wechat_poller_merges_nearby_text_and_media_failure_events():
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, str | None]] = []
+
+        async def send_text(self, *, peer_user_id: str, text: str, context_token: str | None = None):
+            self.sent.append({"peer_user_id": peer_user_id, "text": text, "context_token": context_token})
+            return {"ret": 0, "errcode": 0}
+
+    class _FakeGateway:
+        def __init__(self) -> None:
+            self.events: list[WechatInboundEvent] = []
+
+        async def handle_inbound_event(self, *, event: WechatInboundEvent):
+            self.events.append(event)
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id="session-1",
+                reply="merged",
+                action="chat",
+            )
+
+    client = _FakeClient()
+    gateway = _FakeGateway()
+    poller = WechatPoller(client=client, gateway_service=gateway, aggregation_window_seconds=10.0, late_media_window_ms=30000)
+
+    text_event = WechatInboundEvent(
+        event_id="text-1",
+        user_id="wx-user-1",
+        text="这是我跟对象一起去玩的《污秽》的密室逃脱",
+        create_time_ms=1000,
+        conversation_id="conv-1",
+    )
+    media_event = WechatInboundEvent(
+        event_id="media-1",
+        user_id="wx-user-1",
+        media_download_failed=True,
+        media_download_error="ConnectError('boom')",
+        create_time_ms=1500,
+        conversation_id="conv-1",
+    )
+
+    asyncio.run(poller._handle_event(text_event))
+    assert gateway.events == []
+    asyncio.run(poller._handle_event(media_event))
+
+    assert len(gateway.events) == 1
+    merged = gateway.events[0]
+    assert merged.text == text_event.text
+    assert merged.media_download_failed is True
+    assert merged.media_download_error == "ConnectError('boom')"
+    assert client.sent and client.sent[0]["text"] == "merged"
+
+
 def test_build_wechat_runtime_wires_file_delivery_runtime(tmp_path):
     class _SpyWechatIlinkClient:
         def __init__(self, config) -> None:
@@ -1649,6 +1764,90 @@ def test_archive_is_exposed_via_skill_run_tooling(tmp_path):
     visible_specs = {spec.name: spec for spec in container.clawbot_service._build_tool_specs()}
     assert "archive" not in visible_specs
     assert "skill_run" in visible_specs
+
+
+def test_skill_payload_uses_absolute_sqlite_database_url(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="deliver something")
+    runtime = container.clawbot_service._agent_turn_runner.prepare_turn(
+        session_id=session.id,
+        user_text="把照片发我",
+        source_message_id=source_message.id,
+        raw_text="把照片发我",
+        upload=None,
+        context_snapshot=container.clawbot_service.load_context_snapshot(session_id=session.id),
+    ).runtime
+    payload = container.tool_executor._build_skill_payload(
+        invocation=ToolInvocation(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            plan=ToolPlan(tool="skill_run", arguments={}, reason="test", source="test"),
+            text="把照片发我",
+            upload=None,
+            context=container.tool_executor.runtime_manager.runtime_to_context(runtime),
+        ),
+        input_payload={"intent": "deliver"},
+    )
+
+    assert payload["database_url"].startswith("sqlite:///")
+    assert str(tmp_path.resolve().as_posix()) in payload["database_url"]
+
+
+def test_archive_skill_run_infers_missing_deliver_intent(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="upload photo")
+    saved = asyncio.run(
+        container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            text=None,
+            upload=UploadFile(filename="wechat_image.jpg", file=BytesIO(b"fake image bytes")),
+        )
+    )
+    item = container.item_repository.get_any(item_id=saved.item_id)
+
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_file_to_user(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"ret": 0, "errcode": 0}
+
+    gateway = _Gateway()
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
+    container.configure_gateway(gateway, session_map_repository)
+
+    runtime = container.clawbot_service._agent_turn_runner.prepare_turn(
+        session_id=session.id,
+        user_text="把这张照片发我",
+        source_message_id=source_message.id,
+        raw_text="把这张照片发我",
+        upload=None,
+        context_snapshot=container.clawbot_service.load_context_snapshot(session_id=session.id),
+    ).runtime
+    result = asyncio.run(
+        container.tool_executor.execute_tool_call(
+            session_id=session.id,
+            tool_call=ToolCall(
+                tool_name="skill_run",
+                arguments={
+                    "name": "archive-core",
+                    "script_path": "scripts/archive_dispatch.py",
+                    "input": {"query": item.title},
+                },
+            ),
+            runtime=runtime,
+        )
+    )
+
+    assert result.action == "retrieve"
+    assert gateway.calls
+    assert gateway.calls[0]["file_name"] == item.title
 
 
 def test_send_file_tool_can_resolve_title_hint_and_deliver(tmp_path):
@@ -1747,7 +1946,7 @@ def test_send_file_failure_reply_is_not_overridden_by_model_text(tmp_path):
     assert result.reply != "已经发送，请查收。"
 
 
-def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
+def test_toolless_delivery_request_forces_tool_enforcement(tmp_path):
     class _Gateway:
         def __init__(self) -> None:
             self.calls = []
@@ -1792,7 +1991,7 @@ def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
     )
 
     assert item is not None
-    assert retry_model.calls >= 2
+    assert retry_model.calls == 1
     assert result.primary_tool is not None
     assert result.primary_tool.tool_name == "skill_run"
     assert result.primary_tool.action == "retrieve"
@@ -1800,7 +1999,125 @@ def test_toolless_delivery_request_retries_with_tool_enforcement(tmp_path):
     assert gateway.calls[0]["user_id"] == "wx-user-1"
 
 
-def test_send_file_tool_requires_real_file_item_without_archive_fallback(tmp_path):
+def test_toolless_delivery_request_forces_archive_skill_run(tmp_path):
+    class _Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_file_to_user(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"ret": 0, "errcode": 0}
+
+    class _AlwaysChatModel(ModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            return ModelResponse(assistant_text="我先帮你看看。")
+
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = _AlwaysChatModel()
+    session = container.session_repository.create()
+    source_message = container.message_repository.add_user_message(session_id=session.id, content="upload photo")
+    saved = asyncio.run(
+        container.ingestion_service.ingest(
+            session_id=session.id,
+            source_message_id=source_message.id,
+            source_event_id=None,
+            text=None,
+            upload=UploadFile(filename="wechat_image.jpg", file=BytesIO(b"fake image bytes")),
+        )
+    )
+    item = container.item_repository.get_any(item_id=saved.item_id)
+
+    gateway = _Gateway()
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=session.id)
+    container.configure_gateway(gateway, session_map_repository)
+
+    request_text = f"把 {item.title} 发给我"
+    user_message = container.message_repository.add_user_message(session_id=session.id, content=request_text)
+    context_snapshot = container.clawbot_service.load_context_snapshot(session_id=session.id)
+    result = asyncio.run(
+        container.clawbot_service.run_agent_loop(
+            session_id=session.id,
+            source_message_id=user_message.id,
+            user_text=request_text,
+            raw_text=request_text,
+            upload=None,
+            context_snapshot=context_snapshot,
+        )
+    )
+
+    assert result.primary_tool is not None
+    assert result.primary_tool.tool_name == "skill_run"
+    assert result.primary_tool.arguments["name"] == "archive-core"
+    assert result.primary_tool.arguments["script_path"] == "scripts/archive_dispatch.py"
+    assert result.primary_tool.action == "retrieve"
+    assert gateway.calls
+
+
+def test_record_inbound_turn_persists_upload_reference(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    upload = UploadFile(filename="wechat_image.jpg", file=BytesIO(b"fake image bytes"))
+
+    recorded = asyncio.run(
+        container.clawbot_service._session_shell.record_inbound_turn(
+            session_id=session.id,
+            text=None,
+            upload=upload,
+            source_metadata={"channel": "wechat", "external_user_id": "wx-user-1"},
+        )
+    )
+
+    event = container.source_event_repository.get_any(event_id=recorded.source_event_id)
+    assert event.stored_file_path
+    assert Path(event.stored_file_path).exists()
+    assert event.original_file_name == "wechat_image.jpg"
+
+
+def test_archive_save_text_after_recent_upload_saves_asset_with_note(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+    upload = UploadFile(filename="wechat_image.jpg", file=BytesIO(b"fake image bytes"))
+
+    recorded_upload = asyncio.run(
+        container.clawbot_service._session_shell.record_inbound_turn(
+            session_id=session.id,
+            text=None,
+            upload=upload,
+            source_metadata={"channel": "wechat", "external_user_id": "wx-user-1"},
+        )
+    )
+    source_event = container.source_event_repository.get_any(event_id=recorded_upload.source_event_id)
+    assert source_event.stored_file_path
+
+    note_text = "这是我和女朋友一起去玩密室逃脱拍的照片，请你保存"
+    note_message = container.message_repository.add_user_message(session_id=session.id, content=note_text)
+    runtime = container.clawbot_service._agent_turn_runner.prepare_turn(
+        session_id=session.id,
+        user_text=note_text,
+        source_message_id=note_message.id,
+        raw_text=note_text,
+        upload=None,
+        context_snapshot=container.clawbot_service.load_context_snapshot(session_id=session.id),
+    ).runtime
+    result = asyncio.run(
+        container.tool_executor.execute_tool_call(
+            session_id=session.id,
+            tool_call=archive_skill_call("save", text=note_text),
+            runtime=runtime,
+        )
+    )
+
+    assert result.action == "capture"
+    items = container.item_repository.list_by_session(session_id=session.id, current_only=True)
+    assert len(items) == 1
+    saved_item = items[0]
+    assert saved_item.item_type == "image"
+    assert saved_item.metadata_json.get("user_note") == note_text
+    assert saved_item.metadata_json.get("stored_file_path")
+
+
+def test_send_file_tool_clarifies_when_descriptor_matches_multiple_files(tmp_path):
     class _Gateway:
         def __init__(self) -> None:
             self.calls = []
@@ -1875,6 +2192,6 @@ def test_send_file_tool_requires_real_file_item_without_archive_fallback(tmp_pat
         )
     )
 
-    assert result.action == "chat"
-    assert "没有可发送的原始文件路径" in result.content
+    assert result.action == "clarify"
+    assert result.disposition == "clarify"
     assert gateway.calls == []

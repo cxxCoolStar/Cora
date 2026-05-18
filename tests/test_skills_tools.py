@@ -132,3 +132,19 @@ def test_skill_tool_handler_blocks_path_traversal(tmp_path: Path) -> None:
     )
 
     assert "must stay within the skill directory" in viewed.reply
+
+
+def test_real_archive_core_skill_exposes_runtime_contract_reference() -> None:
+    loader = SkillLoader()
+    skill = loader.find_skill("archive-core")
+
+    assert skill is not None
+    assert "references/runtime-contract.md" in skill.linked_files["references"]
+    assert skill.runtime_metadata["entrypoint"] == "scripts/archive_dispatch.py"
+    assert skill.runtime_metadata["required_input_fields"] == ["intent"]
+
+    viewed = loader.view_skill(name="archive-core", file_path="references/runtime-contract.md")
+
+    assert viewed is not None
+    assert "Archive Core Runtime Contract" in viewed.content
+    assert "sqlite:///C:/full/path/to/.cora/clawbot.db" in viewed.content

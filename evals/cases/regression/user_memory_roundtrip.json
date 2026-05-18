@@ -1,0 +1,30 @@
+{
+  "id": "user_memory_roundtrip",
+  "type": "regression",
+  "description": "The agent should persist and recall durable user memory.",
+  "tags": ["memory", "regression"],
+  "steps": [
+    {
+      "label": "remember preference",
+      "input": {
+        "text": "记住：我常买的布洛芬品牌是芬必得。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["user_memory"]
+      }
+    },
+    {
+      "label": "recall preference",
+      "input": {
+        "text": "我常买的布洛芬是什么牌子？"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_any": ["芬必得"]
+      }
+    }
+  ]
+}

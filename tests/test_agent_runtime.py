@@ -125,6 +125,8 @@ def test_prompt_builder_includes_runtime_and_skill_summary() -> None:
     assert "Shared skills summary:" in messages[0].content
     assert "must load it with skill_view(name)" in messages[0].content
     assert "archive-core" in messages[0].content
+    assert 'skill_run(name="archive-core", script_path="scripts/archive_dispatch.py", input={...})' in messages[0].content
+    assert "do not leave them blank" in messages[0].content
     assert messages[-1].content == "save this photo"
 
 
@@ -172,6 +174,10 @@ def test_prompt_builder_uses_explicit_hermes_lite_section_order(tmp_path: Path) 
     assert positions == sorted(positions)
     assert "Conversation state:\n" in content
     assert '"pending_state": {}' in content
+    assert 'Do not invent script names, file paths, or alternate entrypoints' in content
+    assert "When a loaded skill defines required input fields or an intent-like action selector" in content
+    assert "If the loaded skill defines required input fields, pass them explicitly and do not leave intent-like fields blank." in content
+    assert 'archive-core runtime turns must use skill_run(name="archive-core", script_path="scripts/archive_dispatch.py", input={...}).' in content
 
 
 def test_prompt_builder_includes_wechat_platform_hint_when_delivery_available() -> None:

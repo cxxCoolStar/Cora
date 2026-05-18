@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import typer
 import uvicorn
 
@@ -11,6 +12,7 @@ from core.channels.wechat.poller import WechatPoller
 from core.channels.wechat.service import WechatGatewayService
 from core.clawbot.dependencies import get_clawbot_container
 from core.config import CoreSettings
+from core.evals import EvalRunner
 from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository
 
 app = typer.Typer(help="CLI for ClawBot.")
@@ -127,6 +129,25 @@ def wechat_login(
             asyncio.run(client.aclose())
         except RuntimeError:
             pass
+
+
+@app.command("eval-run")
+def eval_run(
+    cases_dir: Path = Path("evals/cases"),
+    report_path: Path = Path(".cora/evals/latest.json"),
+    case_type: str | None = None,
+) -> None:
+    """Run the local eval suite against the current Cora runtime."""
+    runner = EvalRunner(
+        project_root=Path.cwd(),
+        cases_dir=cases_dir,
+        report_path=report_path,
+        case_type=case_type,
+    )
+    result = runner.run()
+    typer.echo(result.to_text())
+    if result.failed_cases:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

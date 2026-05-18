@@ -1,0 +1,53 @@
+{
+  "id": "user_memory_update_remove",
+  "type": "regression",
+  "description": "The agent should update and remove durable user memory via the user_memory tool.",
+  "tags": ["memory", "regression"],
+  "steps": [
+    {
+      "label": "remember initial preference",
+      "input": {
+        "text": "记住：我现在常买的布洛芬品牌是芬必得。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["user_memory"],
+        "state": {
+          "user_memory_contains_all": ["用户常买的布洛芬品牌是芬必得。"]
+        }
+      }
+    },
+    {
+      "label": "update preference",
+      "input": {
+        "text": "把刚才那条关于布洛芬品牌的记忆改成：我现在常买的布洛芬品牌是美林。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["user_memory"],
+        "reply_contains_any": ["美林"],
+        "state": {
+          "user_memory_contains_all": ["用户常买的布洛芬品牌是美林。"],
+          "user_memory_not_contains": ["用户常买的布洛芬品牌是芬必得。"]
+        }
+      }
+    },
+    {
+      "label": "remove preference",
+      "input": {
+        "text": "删除刚才那条关于布洛芬品牌的记忆。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["user_memory"],
+        "reply_contains_any": ["删除", "移除"],
+        "state": {
+          "user_memory_not_contains": ["用户常买的布洛芬品牌是美林。"]
+        }
+      }
+    }
+  ]
+}

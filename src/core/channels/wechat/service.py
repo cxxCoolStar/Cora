@@ -33,12 +33,20 @@ class WechatGatewayService:
 
     async def handle_inbound_event(self, *, event: WechatInboundEvent) -> WechatHandleResult:
         logger.info(
-            "wechat gateway inbound event_id=%s user_id=%s has_text=%s has_file=%s",
+            "wechat gateway inbound event_id=%s user_id=%s has_text=%s has_file=%s media_failed=%s",
             event.event_id,
             event.user_id,
             bool(event.text),
             bool(event.file_path),
+            event.media_download_failed,
         )
+        if event.media_download_failed and not event.file_path:
+            logger.warning(
+                "wechat gateway media_missing event_id=%s user_id=%s error=%s",
+                event.event_id,
+                event.user_id,
+                event.media_download_error,
+            )
         existing = self.event_repository.get(channel=self.CHANNEL_NAME, external_event_id=event.event_id)
         if existing is not None:
             logger.info("wechat gateway deduplicated event_id=%s session_id=%s", event.event_id, existing.session_id)
@@ -85,8 +93,13 @@ class WechatGatewayService:
                     "external_user_id": event.user_id,
                     "file_name": event.file_name,
                     "file_mime": event.file_mime,
+                    "media_download_failed": event.media_download_failed,
+                    "media_download_error": event.media_download_error,
                 },
             )
+            if event.media_download_failed and not event.file_path:
+                if response.reply.strip() == "I do not have a final answer yet.":
+                    response.reply = "我收到了你发的文字，但这条消息里的图片下载失败了，所以这次还没有成功保存图片。你可以把图片再发一次，或者等我把这条微信图文接收链路修好后再试。"
             logger.info("wechat gateway clawbot_done session_id=%s action=%s", session_id, response.action)
         finally:
             if upload is not None:

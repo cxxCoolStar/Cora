@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import tempfile
+from urllib.parse import unquote
 from typing import Any
 
 from fastapi import UploadFile
@@ -23,6 +25,8 @@ from core.storage.repositories import (
     PendingStateRepository,
 )
 from core.tools import ToolInvocation, register_builtin_tools, registry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -106,6 +110,11 @@ class RuntimeToolExecutor:
             ingest_upload=self._ingest_upload,
         )
         register_builtin_tools()
+        logger.info(
+            "runtime_tool_executor initialized delivery_available=%s registered_tools=%s",
+            self.can_send_files_to_user(),
+            registry.names(),
+        )
 
     def can_send_files_to_user(self) -> bool:
         return self.gateway_service is not None and self.session_map_repository is not None
@@ -175,9 +184,38 @@ class RuntimeToolExecutor:
         )
 
     async def _dispatch_invocation(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        tool_name = str(invocation.plan.tool or "").strip()
+        logger.info(
+            "tool dispatch start session_id=%s tool=%s available_tools=%s",
+            invocation.session_id,
+            tool_name,
+            registry.names(),
+        )
         try:
-            return await registry.dispatch(self, name=invocation.plan.tool, invocation=invocation)
+            normalized_invocation = invocation
+            if tool_name != invocation.plan.tool:
+                normalized_invocation = ToolInvocation(
+                    session_id=invocation.session_id,
+                    source_message_id=invocation.source_message_id,
+                    plan=ToolPlan(
+                        tool=tool_name,
+                        arguments=dict(invocation.plan.arguments),
+                        reason=invocation.plan.reason,
+                        source=invocation.plan.source,
+                    ),
+                    text=invocation.text,
+                    upload=invocation.upload,
+                    context=dict(invocation.context),
+                )
+            return await registry.dispatch(self, name=tool_name, invocation=normalized_invocation)
         except KeyError:
+            logger.exception(
+                "tool dispatch unknown_tool session_id=%s tool=%s available_tools=%s arguments=%s",
+                invocation.session_id,
+                tool_name,
+                registry.names(),
+                dict(invocation.plan.arguments or {}),
+            )
             return ToolExecutionResult(reply="我暂时还不能处理这个请求。", action="chat")
 
     def _apply_runtime_update(
@@ -229,6 +267,19 @@ class RuntimeToolExecutor:
         skill_name = str(arguments.get("name") or "").strip()
         script_path = str(arguments.get("script_path") or "").strip()
         input_payload = dict(arguments.get("input") or {})
+        input_payload = self._normalize_skill_input(
+            skill_name=skill_name,
+            script_path=script_path,
+            input_payload=input_payload,
+            invocation=invocation,
+        )
+        logger.info(
+            "skill_run start session_id=%s skill=%s script=%s intent=%s",
+            invocation.session_id,
+            skill_name,
+            script_path,
+            str(input_payload.get("intent") or "").strip(),
+        )
         if not skill_name:
             return ToolExecutionResult(reply="skill_run 需要提供 skill 名称。", action="skill", status="failed", disposition="respond")
         if not script_path:
@@ -243,6 +294,12 @@ class RuntimeToolExecutor:
                 )
             )
         except ValueError as exc:
+            logger.exception(
+                "skill_run failed session_id=%s skill=%s script=%s",
+                invocation.session_id,
+                skill_name,
+                script_path,
+            )
             return ToolExecutionResult(reply=str(exc), action="skill", status="failed", disposition="respond")
 
         execution = ToolExecutionResult(
@@ -265,7 +322,24 @@ class RuntimeToolExecutor:
         try:
             await self.effect_dispatcher.apply(invocation=invocation, execution=execution, effects=skill_result.effects)
         except ValueError as exc:
+            logger.exception(
+                "skill_run effect_apply_failed session_id=%s skill=%s script=%s action=%s",
+                invocation.session_id,
+                skill_name,
+                script_path,
+                skill_result.action,
+            )
             return ToolExecutionResult(reply=str(exc), action="skill", status="failed", disposition="respond")
+        logger.info(
+            "skill_run done session_id=%s skill=%s script=%s action=%s status=%s disposition=%s effects=%s",
+            invocation.session_id,
+            skill_name,
+            script_path,
+            execution.action,
+            execution.status,
+            execution.disposition,
+            [effect.kind for effect in skill_result.effects],
+        )
         self._apply_pending_result(invocation=invocation, skill_name=skill_name, skill_result=skill_result, execution=execution)
         if execution.status == "failed" and execution.action in {"capture", "retrieve", "delete", "organize"}:
             execution.action = "chat"
@@ -314,6 +388,7 @@ class RuntimeToolExecutor:
     def _build_skill_payload(self, *, invocation: ToolInvocation, input_payload: dict[str, Any]) -> dict[str, Any]:
         skill_arguments = dict(input_payload)
         intent = str(skill_arguments.pop("intent", "") or "").strip()
+        database_engine_url = self.ingestion_service.item_repository.database.engine.url
         payload = {
             "session_id": invocation.session_id,
             "source_message_id": invocation.source_message_id,
@@ -323,7 +398,7 @@ class RuntimeToolExecutor:
             "arguments": skill_arguments,
             "runtime_state": invocation.context,
             "storage_dir": str(self.ingestion_service.storage_dir),
-            "database_url": self.ingestion_service.item_repository.database.engine.url.render_as_string(hide_password=False),
+            "database_url": self._normalize_database_url(database_engine_url),
         }
         upload = invocation.upload
         if upload is not None and (upload.filename or "").strip():
@@ -331,6 +406,89 @@ class RuntimeToolExecutor:
             payload["upload_path"] = upload_path
             payload["upload_name"] = upload.filename
         return payload
+
+    def _normalize_skill_input(
+        self,
+        *,
+        skill_name: str,
+        script_path: str,
+        input_payload: dict[str, Any],
+        invocation: ToolInvocation,
+    ) -> dict[str, Any]:
+        normalized = dict(input_payload)
+        if str(normalized.get("intent") or "").strip():
+            return normalized
+        skill = self.skill_loader.find_skill(skill_name)
+        if skill is None:
+            return normalized
+        runtime_metadata = skill.runtime_metadata or {}
+        entrypoint = str(runtime_metadata.get("entrypoint") or "").strip()
+        if entrypoint and entrypoint != script_path:
+            return normalized
+        required_fields = runtime_metadata.get("required_input_fields") or []
+        if "intent" not in required_fields:
+            return normalized
+        inferred_intent = self._infer_skill_intent(
+            skill_name=skill_name,
+            input_payload=normalized,
+            invocation=invocation,
+            runtime_metadata=runtime_metadata,
+        )
+        if inferred_intent:
+            normalized["intent"] = inferred_intent
+        return normalized
+
+    def _infer_skill_intent(
+        self,
+        *,
+        skill_name: str,
+        input_payload: dict[str, Any],
+        invocation: ToolInvocation,
+        runtime_metadata: dict[str, Any],
+    ) -> str | None:
+        if skill_name != "archive-core":
+            return None
+        if "question" in input_payload:
+            return "clarify"
+        if "resolution" in input_payload:
+            return "resolve_pending"
+        if invocation.upload is not None or str(input_payload.get("text") or "").strip():
+            return "save"
+        item_id = str(input_payload.get("item_id") or "").strip()
+        query = str(input_payload.get("query") or "").strip()
+        lowered_text = str(invocation.text or "").strip().lower()
+        if item_id and any(token in lowered_text for token in ("删除", "删掉", "移除", "delete", "remove")):
+            return "delete"
+        if item_id and any(token in lowered_text for token in ("打开", "读取", "看看", "全文", "read", "open", "show")):
+            return "read"
+        phrases = runtime_metadata.get("intent_phrases") or {}
+        if isinstance(phrases, dict) and lowered_text:
+            for intent_name, candidates in phrases.items():
+                if not isinstance(candidates, list):
+                    continue
+                for candidate in candidates:
+                    token = str(candidate or "").strip().lower()
+                    if token and token in lowered_text:
+                        return intent_name
+        if query:
+            return "search"
+        return None
+
+    @staticmethod
+    def _normalize_database_url(database_url: Any) -> str:
+        rendered = (
+            database_url.render_as_string(hide_password=False)
+            if hasattr(database_url, "render_as_string")
+            else str(database_url)
+        )
+        if getattr(database_url, "drivername", "") != "sqlite":
+            return rendered
+        raw_database = getattr(database_url, "database", None)
+        if raw_database in {None, "", ":memory:"}:
+            return rendered
+        db_path = Path(unquote(str(raw_database)))
+        absolute_path = db_path if db_path.is_absolute() else db_path.resolve()
+        return f"sqlite:///{absolute_path.as_posix()}"
 
     @staticmethod
     def _persist_temp_upload(upload: UploadFile) -> str:

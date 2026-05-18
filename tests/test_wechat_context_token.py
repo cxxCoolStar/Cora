@@ -95,10 +95,53 @@ def test_ilink_client_download_file_decrypts_media_payload(tmp_path: Path):
         }
     }
 
-    downloaded = asyncio.run(client._download_file(item))
+    downloaded, error = asyncio.run(client._download_file(item))
 
     assert downloaded is not None
+    assert error is None
     assert Path(downloaded).read_bytes() == plaintext
     assert fake_http.urls == ["https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=enc-token"]
+    asyncio.run(client.aclose())
+
+
+def test_ilink_client_parse_update_returns_media_failure_companion(tmp_path: Path):
+    client = WechatIlinkClient(
+        WechatIlinkConfig(
+            token="dummy",
+            download_dir=tmp_path / "wechat_downloads",
+        )
+    )
+
+    async def _fail_download(item: dict):
+        return None, "ConnectError('boom')"
+
+    client._download_image = _fail_download  # type: ignore[method-assign]
+    update = {
+        "message_id": "msg-1",
+        "from_user_id": "wx-user-1",
+        "session_id": "conv-1",
+        "create_time_ms": 123456789,
+        "item_list": [
+            {
+                "type": 2,
+                "image_item": {
+                    "media": {
+                        "full_url": "https://example.com/full.jpg",
+                        "encrypt_query_param": "enc-token",
+                        "aes_key": "dummy",
+                    }
+                },
+            }
+        ],
+    }
+
+    event = asyncio.run(client._parse_update(update))
+
+    assert event is not None
+    assert event.text is None
+    assert event.file_path is None
+    assert event.media_download_failed is True
+    assert event.media_download_error == "ConnectError('boom')"
+    assert event.conversation_id == "conv-1"
     asyncio.run(client.aclose())
 

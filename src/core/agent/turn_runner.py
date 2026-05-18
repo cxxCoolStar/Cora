@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 from fastapi import UploadFile
@@ -12,6 +13,7 @@ from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSna
 from core.agent.skill_loader import SkillLoader
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.schemas.tool import ToolCall, ToolResult
 
 
 @dataclass(slots=True)
@@ -126,25 +128,34 @@ class AgentTurnRunner:
             loop_result=loop_result,
         )
         if retry_category is not None:
-            retry_instruction = self.tool_retry_instruction(retry_category)
-            retry_messages = self.orchestrator.prompt_builder.build_messages(
+            forced_result = await self._forced_tool_loop_result(
+                category=retry_category,
                 session_id=session_id,
                 user_text=user_text,
-                runtime=prepared_turn.runtime,
-                skills=self.skill_loader.list_skills(),
-                history=prepared_turn.history,
-                upload_name=upload.filename if upload is not None else None,
-                delivery_available=self.delivery_available(),
+                prepared_turn=prepared_turn,
             )
-            retry_messages.insert(
-                1,
-                Message.system(session_id=session_id, content=retry_instruction),
-            )
-            loop_result = await self.loop.run(
-                session_id=session_id,
-                initial_messages=retry_messages,
-                runtime=prepared_turn.runtime,
-            )
+            if forced_result is not None:
+                loop_result = forced_result
+            else:
+                retry_instruction = self.tool_retry_instruction(retry_category)
+                retry_messages = self.orchestrator.prompt_builder.build_messages(
+                    session_id=session_id,
+                    user_text=user_text,
+                    runtime=prepared_turn.runtime,
+                    skills=self.skill_loader.list_skills(),
+                    history=prepared_turn.history,
+                    upload_name=upload.filename if upload is not None else None,
+                    delivery_available=self.delivery_available(),
+                )
+                retry_messages.insert(
+                    1,
+                    Message.system(session_id=session_id, content=retry_instruction),
+                )
+                loop_result = await self.loop.run(
+                    session_id=session_id,
+                    initial_messages=retry_messages,
+                    runtime=prepared_turn.runtime,
+                )
         return self.loop_result_to_turn_result(loop_result)
 
     def prepare_turn(
@@ -167,6 +178,93 @@ class AgentTurnRunner:
                 upload=upload,
             ),
             history=self.history_loader(session_id=session_id, user_text=user_text),
+        )
+
+    async def _forced_tool_loop_result(
+        self,
+        *,
+        category: str,
+        session_id: str,
+        user_text: str,
+        prepared_turn: PreparedTurn,
+    ) -> LoopResult | None:
+        if category != "deliver":
+            return None
+        tool_call = ToolCall(
+            tool_name="skill_run",
+            arguments={
+                "name": "archive-core",
+                "script_path": "scripts/archive_dispatch.py",
+                "input": {
+                    "query": user_text,
+                },
+            },
+        )
+        result = await self.loop.tool_executor.execute_tool_call(
+            session_id=session_id,
+            tool_call=tool_call,
+            runtime=prepared_turn.runtime,
+        )
+        return self._loop_result_from_forced_tool(
+            session_id=session_id,
+            runtime=prepared_turn.runtime,
+            tool_call=tool_call,
+            result=result,
+        )
+
+    @staticmethod
+    def _loop_result_from_forced_tool(
+        *,
+        session_id: str,
+        runtime: ConversationRuntimeState,
+        tool_call: ToolCall,
+        result: ToolResult,
+    ) -> LoopResult:
+        next_runtime = result.metadata.get("runtime_state")
+        final_runtime = next_runtime if isinstance(next_runtime, ConversationRuntimeState) else runtime
+        assistant_message = Message.assistant_tool_calls(
+            session_id=session_id,
+            content="",
+            tool_calls=[
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.tool_name,
+                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                    },
+                }
+            ],
+            metadata={"turn_type": "forced_tool_call", "category": "deliver"},
+        )
+        tool_message = Message.tool(
+            session_id=session_id,
+            name=tool_call.tool_name,
+            tool_call_id=tool_call.id,
+            content=AgentLoop._tool_result_content(result=result),
+            metadata=result.metadata,
+        )
+        execution = ToolExecutionTrace(
+            tool_name=tool_call.tool_name,
+            arguments=dict(tool_call.arguments),
+            action=str(result.action or result.metadata.get("action") or "chat"),
+            status=result.status,
+            disposition=result.disposition,
+            content=result.content,
+            artifacts=list(result.artifacts),
+            metadata=dict(result.metadata),
+        )
+        return LoopResult(
+            final_response=result.content,
+            trace=[assistant_message, tool_message],
+            runtime=final_runtime,
+            exit_reason="forced_tool_call",
+            steps=1,
+            status=result.status if result.success else "failed",
+            disposition="clarify" if result.disposition == "clarify" else "respond",
+            tool_trace=[execution],
+            assistant_response=None,
+            artifacts=list(result.artifacts),
         )
 
     def tool_retry_category(
@@ -279,6 +377,8 @@ class AgentTurnRunner:
         final_reply = (assistant_text or "").strip()
         if not final_reply:
             return last_execution.content
+        if AgentTurnRunner._should_prefer_tool_reply(last_execution=last_execution):
+            return last_execution.content
         tool_name = last_execution.tool_name
         tool_arguments = last_execution.arguments
         if tool_name == "skill_run":
@@ -286,6 +386,22 @@ class AgentTurnRunner:
             if str(skill_input.get("intent") or "").strip() == "deliver" and last_execution.action != "retrieve":
                 return last_execution.content
         return final_reply
+
+    @staticmethod
+    def _should_prefer_tool_reply(*, last_execution: ToolExecutionTrace) -> bool:
+        if last_execution.tool_name != "skill_run":
+            return False
+        metadata = last_execution.metadata
+        if str(metadata.get("skill_name") or "").strip() != "archive-core":
+            return False
+        content = (last_execution.content or "").strip()
+        if not content:
+            return False
+        # When archive-core already returned a concrete "not found" retrieval result,
+        # keep that tool-authored reply instead of letting the model embellish it.
+        if "没有找到" in content and not last_execution.artifacts:
+            return True
+        return False
 
     @staticmethod
     def _looks_like_delivery_request(*, text: str, lowered: str) -> bool:

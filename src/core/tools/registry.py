@@ -56,6 +56,9 @@ class ToolRegistry:
     def names_by_toolsets(self, toolsets: list[str]) -> list[str]:
         return [spec.name for spec in self.get_by_toolsets(toolsets)]
 
+    def names(self) -> list[str]:
+        return list(self._tools.keys())
+
     async def dispatch(self, executor: Any, *, name: str, invocation: ToolInvocation) -> "ToolExecutionResult":
         spec = self.get(name)
         if spec is None:

@@ -22,6 +22,8 @@ EXECUTION_GUIDANCE = (
     "If the user asks about local files or repository code, prefer using list_files, search_files, and read_file before answering implementation details. "
     "When a project-specific workflow may exist, inspect relevant skills with skills_list or skill_view before improvising. "
     "If a loaded skill points you to an executable helper script, use skill_run with the exact script path and structured input instead of free-chatting the workflow. "
+    "Do not invent script names, file paths, or alternate entrypoints that are not explicitly listed by the loaded skill. "
+    "When a loaded skill defines required input fields or an intent-like action selector, include those fields explicitly and do not leave them blank. "
     "Requests to delete saved content or manage long-term user memory must go through tools rather than plain chat replies."
 )
 
@@ -34,7 +36,8 @@ MEMORY_GUIDANCE = (
 SKILLS_GUIDANCE = (
     "Skills are reusable workflow documents. If a skill matches or is even partially relevant, load it with skill_view and follow its instructions. "
     "Skills may also include supporting files under references, templates, assets, or scripts, which can be loaded with skill_view(name, file_path). "
-    "When a skill provides an executable helper under scripts, run it through skill_run rather than inventing your own protocol."
+    "When a skill provides an executable helper under scripts, run it through skill_run rather than inventing your own protocol. "
+    "For archive-core specifically, use only skill_run(name=\"archive-core\", script_path=\"scripts/archive_dispatch.py\", input={...}) for runtime archive actions such as save, search, read, delete, deliver, overview, list_topics, clarify, or resolve_pending."
 )
 
 PLATFORM_HINTS = {
@@ -155,7 +158,9 @@ class AgentPromptBuilder:
         lines = [
             "Before replying, scan the skills below. If a skill is relevant, you must load it with skill_view(name) before relying on memory or ad-hoc reasoning.",
             "Use skills_list if you need to re-check the available skills from a tool call. Use skill_view(name, file_path) to load supporting files when a skill points you there.",
-            "When a skill includes an executable helper script, run it with skill_run(name, script_path, input).",
+            "When a skill includes an executable helper script, run it with skill_run(name, script_path, input). Do not invent script paths.",
+            "If the loaded skill defines required input fields, pass them explicitly and do not leave intent-like fields blank.",
+            "archive-core runtime turns must use skill_run(name=\"archive-core\", script_path=\"scripts/archive_dispatch.py\", input={...}).",
             "<available_skills>",
         ]
         for category in sorted(grouped):

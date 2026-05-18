@@ -24,6 +24,7 @@ class SkillDefinition:
     category: str | None = None
     linked_files: dict[str, list[str]] = field(default_factory=dict)
     frontmatter: dict[str, Any] = field(default_factory=dict)
+    runtime_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -135,6 +136,7 @@ class SkillLoader:
                         category=category,
                         linked_files=self._collect_linked_files(skill_md.parent),
                         frontmatter=frontmatter,
+                        runtime_metadata=self._runtime_metadata(frontmatter),
                     )
                 )
         return loaded
@@ -219,3 +221,14 @@ class SkillLoader:
             if files:
                 linked[section] = files
         return linked
+
+    @staticmethod
+    def _runtime_metadata(frontmatter: dict[str, Any]) -> dict[str, Any]:
+        metadata = frontmatter.get("metadata")
+        if not isinstance(metadata, dict):
+            return {}
+        cora = metadata.get("cora")
+        if not isinstance(cora, dict):
+            return {}
+        runtime = cora.get("runtime")
+        return runtime if isinstance(runtime, dict) else {}

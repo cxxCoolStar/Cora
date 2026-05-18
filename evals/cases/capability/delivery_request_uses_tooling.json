@@ -1,0 +1,18 @@
+{
+  "id": "delivery_request_uses_tooling",
+  "type": "capability",
+  "description": "Delivery requests should trigger tool-backed handling instead of plain chat.",
+  "tags": ["delivery", "tooling"],
+  "steps": [
+    {
+      "label": "delivery retry path",
+      "input": {
+        "text": "把之前那份简历文件发给我"
+      },
+      "expect": {
+        "tool_names_any": ["skill_run"],
+        "reply_not_contains": ["不支持", "不能发送"]
+      }
+    }
+  ]
+}

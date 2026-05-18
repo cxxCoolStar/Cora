@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 import logging
 import uuid
+import asyncio
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import base64
@@ -231,6 +232,8 @@ class WechatIlinkClient:
         file_name: str | None = None
         file_path: str | None = None
         file_mime: str | None = None
+        media_download_failed = False
+        media_download_error: str | None = None
         if isinstance(item_list, list):
             for item in item_list:
                 if not isinstance(item, dict):
@@ -238,23 +241,28 @@ class WechatIlinkClient:
                 item_type = int(item.get("type") or 0)
                 # Handle image (type=2)
                 if item_type == ITEM_IMAGE:
-                    image_path = await self._download_image(item)
+                    image_path, image_error = await self._download_image(item)
                     if image_path:
                         file_path = image_path
                         file_name = "wechat_image.jpg"
                         file_mime = "image/jpeg"
                         break
+                    media_download_failed = True
+                    media_download_error = image_error or "unknown image download failure"
                 # Handle file (type=4)
                 elif item_type == ITEM_FILE:
                     file_item = item.get("file_item") or {}
                     file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
-                    downloaded = await self._download_file(item)
+                    downloaded, file_error = await self._download_file(item)
                     if downloaded is not None:
                         file_path = downloaded
                         file_mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+                    else:
+                        media_download_failed = True
+                        media_download_error = file_error or "unknown file download failure"
                     break
 
-        if not text.strip() and not file_path:
+        if not text.strip() and not file_path and not media_download_failed:
             return None
 
         return WechatInboundEvent(
@@ -265,10 +273,14 @@ class WechatIlinkClient:
             file_name=file_name,
             file_path=file_path,
             file_mime=file_mime,
+            media_download_failed=media_download_failed,
+            media_download_error=media_download_error,
+            create_time_ms=int(update.get("create_time_ms") or 0) or None,
+            conversation_id=str(update.get("group_id") or update.get("session_id") or "").strip() or None,
             raw_payload=update,
         )
 
-    async def _download_file(self, item: dict[str, Any]) -> str | None:
+    async def _download_file(self, item: dict[str, Any]) -> tuple[str | None, str | None]:
         """Download WeChat file, handling AES decryption if needed."""
         file_item = item.get("file_item") or {}
         file_name = str(file_item.get("file_name") or "").strip() or "wechat_upload.bin"
@@ -294,8 +306,9 @@ class WechatIlinkClient:
                 encrypt_query_param=encrypt_query_param or None,
             )
             if data is None:
-                logger.warning("wechat file has no download URL")
-                return None
+                detail = self._media_debug_payload(item=item, media=media)
+                logger.warning("wechat file has no download URL detail=%s", detail)
+                return None, "file has no download URL"
 
             if aes_key_b64 and _CRYPTO_AVAILABLE:
                 try:
@@ -306,12 +319,13 @@ class WechatIlinkClient:
             elif aes_key_b64 and not _CRYPTO_AVAILABLE:
                 logger.warning("wechat file encrypted but cryptography library not available")
 
-            return self._write_downloaded_bytes(data=data, file_name=file_name)
+            return self._write_downloaded_bytes(data=data, file_name=file_name), None
         except Exception as exc:
-            logger.warning("wechat file download failed: %s", exc)
-            return None
+            detail = self._media_debug_payload(item=item, media=media)
+            logger.warning("wechat file download failed: %r detail=%s", exc, detail, exc_info=True)
+            return None, repr(exc)
 
-    async def _download_image(self, item: dict[str, Any]) -> str | None:
+    async def _download_image(self, item: dict[str, Any]) -> tuple[str | None, str | None]:
         """Download WeChat image, handling AES decryption if needed."""
         image_item = item.get("image_item") or {}
         media = image_item.get("media") or {}
@@ -337,8 +351,9 @@ class WechatIlinkClient:
                 encrypt_query_param=str(encrypt_query_param or "").strip() or None,
             )
             if data is None:
-                logger.warning("wechat image has no download URL")
-                return None
+                detail = self._media_debug_payload(item=item, media=media)
+                logger.warning("wechat image has no download URL detail=%s", detail)
+                return None, "image has no download URL"
 
             # Decrypt if AES key is provided
             if aes_key_b64 and _CRYPTO_AVAILABLE:
@@ -352,11 +367,12 @@ class WechatIlinkClient:
                 logger.warning("wechat image encrypted but cryptography library not available")
 
             # Save to file
-            return self._write_downloaded_bytes(data=data, file_name="wechat_image.jpg")
+            return self._write_downloaded_bytes(data=data, file_name="wechat_image.jpg"), None
 
         except Exception as exc:
-            logger.warning("wechat image download failed: %s", exc)
-            return None
+            detail = self._media_debug_payload(item=item, media=media)
+            logger.warning("wechat image download failed: %r detail=%s", exc, detail, exc_info=True)
+            return None, repr(exc)
 
     async def _download_media_bytes(
         self,
@@ -364,15 +380,27 @@ class WechatIlinkClient:
         full_url: str,
         encrypt_query_param: str | None,
     ) -> bytes | None:
+        attempts: list[str] = []
         if encrypt_query_param:
-            cdn_url = f"{self.config.cdn_base_url.rstrip('/')}/download?encrypted_query_param={encrypt_query_param}"
-            resp = await self._http.get(cdn_url)
-            resp.raise_for_status()
-            return resp.content
+            attempts.append(f"{self.config.cdn_base_url.rstrip('/')}/download?encrypted_query_param={quote(encrypt_query_param, safe='')}")
         if full_url:
-            resp = await self._http.get(full_url)
-            resp.raise_for_status()
-            return resp.content
+            attempts.append(full_url)
+        last_error: Exception | None = None
+        for url in attempts:
+            for retry_index in range(3):
+                try:
+                    resp = await self._http.get(url)
+                    resp.raise_for_status()
+                    return resp.content
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                    last_error = exc
+                    if retry_index >= 2:
+                        break
+                    await asyncio.sleep(0.6 * (retry_index + 1))
+                except Exception:
+                    raise
+        if last_error is not None:
+            raise last_error
         return None
 
     def _write_downloaded_bytes(self, *, data: bytes, file_name: str) -> str:
@@ -384,6 +412,17 @@ class WechatIlinkClient:
         with NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
             tmp.write(data)
             return tmp.name
+
+    @staticmethod
+    def _media_debug_payload(*, item: dict[str, Any], media: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "item_keys": sorted(str(key) for key in item.keys()),
+            "media_keys": sorted(str(key) for key in media.keys()),
+            "has_full_url": bool(str(media.get("full_url") or "").strip()),
+            "has_encrypt_query_param": bool(str(media.get("encrypt_query_param") or "").strip()),
+            "has_aes_key": bool(str(media.get("aes_key") or "").strip()),
+            "has_aeskey_hex": bool(str(item.get("aeskey") or "").strip()),
+        }
 
     # ===== File Sending Methods =====
 

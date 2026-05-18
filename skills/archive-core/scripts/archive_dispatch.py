@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from _content_common import build_database, candidate_match_score, item_to_summary
-from core.storage.repositories import ItemRepository
+from core.storage.repositories import ItemRepository, SourceEventRepository
 
 FULL_TEXT_REPLY_THRESHOLD = 420
 ACTION_CAPTURE = "capture"
@@ -84,9 +84,30 @@ def _resolve_query(arguments: dict[str, Any]) -> str:
         "这个",
         "那份",
         "那个",
+        "那条资料",
+        "这条资料",
+        "那条",
+        "这条",
+        "资料",
     ]:
         cleaned = cleaned.replace(phrase, " ")
     return " ".join(cleaned.strip(" ，。！？,.").split())
+
+
+def _looks_like_direct_open_request(*, payload: dict[str, Any]) -> bool:
+    arguments = _arguments(payload)
+    raw_text = " ".join(
+        part
+        for part in [
+            str(payload.get("text") or "").strip(),
+            str(arguments.get("text") or "").strip(),
+            str(arguments.get("query") or "").strip(),
+        ]
+        if part
+    )
+    if not raw_text:
+        return False
+    return any(token in raw_text for token in ("打开", "查看", "看看", "读取", "读一下", "显示", "给我看"))
 
 
 def _score_records(*, item_repository: ItemRepository, session_id: str, query: str) -> list[tuple[Any, int]]:
@@ -184,6 +205,14 @@ def _save_content(*, payload: dict[str, Any], text: str | None = None, user_note
     resolved_text = str(text if text is not None else arguments.get("text") or payload.get("text") or "").strip()
     if not resolved_text:
         raise ValueError("archive save requires text when no upload_path is provided.")
+    recent_upload = _find_recent_unsaved_upload(payload=payload)
+    if recent_upload is not None and _looks_like_asset_description(text=resolved_text):
+        return _save_upload(
+            payload=payload,
+            upload_path=str(recent_upload.stored_file_path or "").strip(),
+            upload_name=str(recent_upload.original_file_name or "").strip() or "upload.bin",
+            user_note=user_note or resolved_text,
+        )
     return {
         "message": "",
         "status": "completed",
@@ -200,6 +229,80 @@ def _save_content(*, payload: dict[str, Any], text: str | None = None, user_note
         "state_delta": {"last_action": ACTION_CAPTURE},
         "pending_state_delta": {"status": "resolved"},
     }
+
+
+def _stored_file_path(record: Any) -> str:
+    return str((record.metadata_json or {}).get("stored_file_path") or "").strip()
+
+
+def _is_deliverable_record(record: Any) -> bool:
+    return bool(_stored_file_path(record))
+
+
+def _looks_like_asset_description(*, text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    if any(token in lowered for token in ("照片", "图片", "截图", "图", "文件", "简历", "文档", "photo", "image", "file")):
+        return True
+    if any(token in lowered for token in ("这个是", "这是", "这张", "这个文件", "这份")) and any(
+        token in lowered for token in ("保存", "存", "save", "记住")
+    ):
+        return True
+    return False
+
+
+def _find_recent_unsaved_upload(*, payload: dict[str, Any]) -> Any | None:
+    database = build_database(payload.get("database_url"))
+    source_event_repository = SourceEventRepository(database)
+    item_repository = ItemRepository(database)
+    session_id = str(payload["session_id"])
+    items = item_repository.list_by_session(session_id=session_id, current_only=True)
+    consumed_source_event_ids = {
+        str(item.source_event_id or "").strip()
+        for item in items
+        if str(item.source_event_id or "").strip()
+    }
+    for event in source_event_repository.list_by_session(session_id=session_id, limit=12):
+        if event.event_type not in {"image", "file"}:
+            continue
+        if str(event.id or "").strip() in consumed_source_event_ids:
+            continue
+        if not str(event.stored_file_path or "").strip():
+            continue
+        return event
+    return None
+
+
+def _resolve_deliverable_match(*, payload: dict[str, Any], descriptor: Any) -> list[tuple[Any, int]]:
+    database = build_database(payload.get("database_url"))
+    item_repository = ItemRepository(database)
+    session_id = str(payload["session_id"])
+    topic_name = str((descriptor.metadata_json or {}).get("topic_name") or "").strip()
+    query_parts = [
+        str(descriptor.title or "").strip(),
+        str(descriptor.summary or "").strip(),
+        str((descriptor.metadata_json or {}).get("user_note") or "").strip(),
+    ]
+    candidates: list[tuple[Any, int]] = []
+    for record in item_repository.list_by_session(session_id=session_id, current_only=True):
+        if record.id == descriptor.id or not _is_deliverable_record(record):
+            continue
+        score = 0
+        for part in query_parts:
+            if part:
+                score += candidate_match_score(record=record, query=part)
+        if topic_name and str((record.metadata_json or {}).get("topic_name") or "").strip() == topic_name:
+            score += 30
+        delta_seconds = abs((descriptor.created_at - record.created_at).total_seconds())
+        if delta_seconds <= 1800:
+            score += 20
+        elif delta_seconds <= 86400:
+            score += 10
+        if score > 0:
+            candidates.append((record, score))
+    candidates.sort(key=lambda pair: pair[1], reverse=True)
+    return candidates
 
 
 def _save_upload(
@@ -270,6 +373,9 @@ def _search(*, payload: dict[str, Any]) -> dict[str, Any]:
             "effects": [],
             "state_delta": {"last_action": ACTION_RETRIEVE},
         }
+    if len(scored) > 1 and _looks_like_direct_open_request(payload=payload):
+        if scored[1][1] >= max(30, scored[0][1] - 10):
+            return _reference_clarification(query=query, scored=scored, requested_intent="read", mode="summary")
     if len(scored) == 1:
         record = scored[0][0]
         summary = item_to_summary(record, score=scored[0][1])
@@ -403,7 +509,15 @@ def _deliver(*, payload: dict[str, Any], item_id: str | None = None) -> dict[str
         if len(scored) > 1 and scored[1][1] >= max(30, scored[0][1] - 10):
             return _reference_clarification(query=query, scored=scored, requested_intent="deliver")
         record = scored[0][0]
-    stored_path = str((record.metadata_json or {}).get("stored_file_path") or "").strip()
+    stored_path = _stored_file_path(record)
+    if not stored_path:
+        deliverable_matches = _resolve_deliverable_match(payload=payload, descriptor=record)
+        if deliverable_matches:
+            if len(deliverable_matches) > 1 and deliverable_matches[1][1] >= max(30, deliverable_matches[0][1] - 10):
+                query = _resolve_query(arguments) or str(record.title or "").strip()
+                return _reference_clarification(query=query, scored=deliverable_matches, requested_intent="deliver")
+            record = deliverable_matches[0][0]
+            stored_path = _stored_file_path(record)
     if not stored_path:
         return {
             "message": f"资料 `{record.title}` 没有可发送的原始文件路径。",

@@ -198,6 +198,75 @@ python -m core.cli.main wechat-poll
 - 把微信文本/文件转成统一的 `ingest` 流程
 - 在能力可用时支持把原始文件再发回微信用户
 
+## 评测
+
+为了避免每次改完都只能“凭感觉”，项目现在支持一个最小可用的本地 eval runner。
+
+### 测试集目录
+
+```text
+evals/cases/<type>/*.json
+```
+
+每个 case 可以定义多步对话，runner 会为每个 case 创建独立的临时 `.cora` 工作区，避免污染你平时使用的数据库和归档目录。
+
+推荐的一级类型目录是：
+
+- `regression`
+- `capability`
+- `safety`
+
+### 运行方式
+
+```powershell
+python -m core.cli.main eval-run
+```
+
+只跑某一类 case 时可以用：
+
+```powershell
+python -m core.cli.main eval-run --case-type regression
+```
+
+默认会：
+
+- 递归读取 `evals/cases/` 下的全部 `.json` case
+- 逐个创建独立 session 执行
+- 输出通过/失败摘要
+- 将详细报告写入 `.cora/evals/latest.json`
+
+### Case 示例
+
+```json
+{
+  "id": "user_memory_roundtrip",
+  "description": "The agent should persist and recall durable user memory.",
+  "steps": [
+    {
+      "input": {"text": "记住：我常买的布洛芬品牌是芬必得。"},
+      "expect": {"tool_names_any": ["user_memory"]}
+    },
+    {
+      "input": {"text": "我常买的布洛芬是什么牌子？"},
+      "expect": {"reply_contains_any": ["芬必得"]}
+    }
+  ]
+}
+```
+
+当前支持的断言重点偏行为而不是文案，包括：
+
+- `status`
+- `disposition`
+- `action`
+- `tool_names_any`
+- `tool_names_all`
+- `reply_contains_all`
+- `reply_contains_any`
+- `reply_not_contains`
+- `artifact_ref_contains_any`
+- `max_trace_messages`
+
 ## 本地存储
 
 默认会生成以下目录：

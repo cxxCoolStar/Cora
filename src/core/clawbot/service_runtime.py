@@ -79,6 +79,26 @@ class ClawBotSessionShell:
             upload=upload,
             metadata=source_metadata,
         )
+        if upload is not None and (upload.filename or "").strip():
+            buffered_upload = UploadFile(
+                filename=upload.filename,
+                file=BytesIO(await upload.read()),
+                headers=getattr(upload, "headers", None),
+            )
+            try:
+                entry = await self.tool_executor.persist_pending_upload_entry(
+                    upload=buffered_upload,
+                    source_event_id=source_event.id,
+                )
+            finally:
+                await buffered_upload.close()
+            await upload.seek(0)
+            self.source_event_manager.source_event_repository.update_upload_reference(
+                event_id=source_event.id,
+                stored_file_path=str(entry.get("upload_path") or ""),
+                original_file_name=upload.filename,
+                mime_type=getattr(upload, "content_type", None),
+            )
         buffered = None
         if (
             upload is not None

@@ -338,6 +338,27 @@ class SourceEventRepository:
                 raise KeyError(f"Source event not found: {event_id}")
             return record
 
+    def update_upload_reference(
+        self,
+        *,
+        event_id: str,
+        stored_file_path: str,
+        original_file_name: str | None = None,
+        mime_type: str | None = None,
+    ) -> SourceEventRecord:
+        with self.database.session() as session:
+            record = session.get(SourceEventRecord, event_id)
+            if record is None:
+                raise KeyError(f"Source event not found: {event_id}")
+            record.stored_file_path = stored_file_path
+            if original_file_name:
+                record.original_file_name = original_file_name
+            if mime_type:
+                record.mime_type = mime_type
+            session.commit()
+            session.refresh(record)
+            return record
+
 class TopicRepository:
     def __init__(self, database: DatabaseManager) -> None:
         self.database = database

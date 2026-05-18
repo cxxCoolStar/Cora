@@ -1,0 +1,58 @@
+{
+  "id": "clarify_when_multiple_read_candidates",
+  "type": "capability",
+  "description": "The agent should ask for clarification when multiple saved notes are strong read candidates.",
+  "tags": ["clarify", "read", "multiple-candidates"],
+  "steps": [
+    {
+      "label": "save project a note",
+      "input": {
+        "text": "帮我保存：项目A上线时间是周三晚上八点。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["skill_run"],
+        "state": {
+          "item_count": 1,
+          "deleted_item_count": 0,
+          "pending_exists": false
+        }
+      }
+    },
+    {
+      "label": "save project b note",
+      "input": {
+        "text": "帮我保存：项目B上线时间是周五上午十点。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["skill_run"],
+        "state": {
+          "item_count": 2,
+          "deleted_item_count": 0,
+          "pending_exists": false
+        }
+      }
+    },
+    {
+      "label": "ask ambiguous read request",
+      "input": {
+        "text": "打开上线时间那条资料。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "clarify",
+        "tool_names_any": ["skill_run"],
+        "reply_contains_any": ["确认", "哪一条", "多条"],
+        "state": {
+          "item_count": 2,
+          "deleted_item_count": 0,
+          "pending_exists": true,
+          "pending_kind": "item_selection"
+        }
+      }
+    }
+  ]
+}

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from core.clawbot import RuntimeToolExecutor
 from core.clawbot.planner import ToolPlan
 from core.clawbot.service import ClawBotService
 from core.clawbot.tools import ToolInvocation
+from core.agent.runtime_manager import AgentRuntimeManager
+from core.agent.runtime_state import RuntimeContextSnapshot
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.schemas.tool import ToolCall
 from core.schemas.model import ModelResponse
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
@@ -150,3 +154,51 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     specs = {spec.name for spec in service._build_tool_specs()}
 
     assert {"list_files", "search_files", "read_file"}.issubset(specs)
+
+
+def test_runtime_tool_executor_strips_tool_name_whitespace(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    item_repository = ItemRepository(database)
+    message_repository = MessageRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    pending_state_repository = PendingStateRepository(database)
+    workspace = tmp_path / "workspace"
+    source_dir = workspace / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "memory.py").write_text("USER_MEMORY = 'enabled'\n", encoding="utf-8")
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=tmp_path / "files",
+    )
+    runtime_manager = AgentRuntimeManager(pending_state_repository=pending_state_repository)
+    executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        pending_state_repository=pending_state_repository,
+        file_tool_root=workspace,
+        runtime_manager=runtime_manager,
+    )
+    runtime = runtime_manager.build_runtime_state(
+        session_id="session-1",
+        context_snapshot=RuntimeContextSnapshot(),
+        source_message_id="msg-1",
+        raw_text="find the memory constant",
+        upload=None,
+    )
+
+    result = asyncio.run(
+        executor.execute_tool_call(
+            session_id="session-1",
+            tool_call=ToolCall(
+                tool_name=" search_files ",
+                arguments={"query": "USER_MEMORY", "path": "src"},
+            ),
+            runtime=runtime,
+        ),
+    )
+
+    assert result.success
+    assert "src/memory.py:1" in result.content
