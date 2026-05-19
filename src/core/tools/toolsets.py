@@ -17,6 +17,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Execute helper scripts that belong to a local skill after inspecting that skill's instructions.",
         "tools": ["skill_run"],
     },
+    "automation": {
+        "description": "Create and manage scheduled background tasks, reminders, and recurring checks.",
+        "tools": ["scheduled_tasks"],
+    },
     "terminal": {
         "description": "Run terminal commands and manage shell-oriented task execution.",
         "tools": ["shell_exec"],
@@ -45,15 +49,15 @@ TOOLSET_ALIASES: dict[str, str] = {
 TOOLSET_PRESETS: dict[str, dict[str, object]] = {
     "cora-wechat": {
         "description": "Compact tool surface for messaging shells.",
-        "toolsets": ["user_memory", "file", "skills", "skills_execute"],
+        "toolsets": ["user_memory", "file", "web", "skills", "skills_execute", "session_search", "automation"],
     },
     "cora-cli": {
         "description": "Coding-focused tool surface for the local CLI shell.",
-        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search"],
+        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation"],
     },
     "cora-api": {
         "description": "General programmable tool surface for the HTTP/API shell.",
-        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search"],
+        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation"],
     },
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from io import BytesIO
 import logging
 from pathlib import Path
@@ -98,6 +99,7 @@ class WechatGatewayService:
 
         upload = None
         try:
+            source_created_at = self._source_created_at(event)
             if event.file_path and event.file_name:
                 logger.info("wechat gateway loading_file session_id=%s file=%s path=%s", session_id, event.file_name, event.file_path)
                 file_bytes = Path(event.file_path).read_bytes()
@@ -120,6 +122,8 @@ class WechatGatewayService:
                     "media_download_error": event.media_download_error,
                     "session_reset_reason": resolution.reason,
                     "session_is_new": resolution.is_new_session,
+                    "source_create_time_ms": event.create_time_ms,
+                    "source_created_at": source_created_at.isoformat() if source_created_at is not None else None,
                 },
             )
             if event.media_download_failed and not event.file_path:
@@ -144,6 +148,36 @@ class WechatGatewayService:
             reply=response.reply,
             action=response.action,
         )
+
+    @staticmethod
+    def _source_created_at(event: WechatInboundEvent) -> datetime | None:
+        if event.create_time_ms is None:
+            return None
+        return datetime.fromtimestamp(max(0, event.create_time_ms) / 1000, tz=UTC)
+
+    async def send_text_to_user(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send plain text to a WeChat user."""
+        if self._ilink_client is None:
+            raise RuntimeError("ilink_client not configured")
+
+        logger.info(
+            "wechat gateway sending text user_id=%s has_text=%s",
+            user_id,
+            bool(str(text or "").strip()),
+        )
+        result = await self._ilink_client.send_text(
+            peer_user_id=user_id,
+            text=text,
+            context_token=context_token,
+        )
+        logger.info("wechat gateway text sent user_id=%s result=%s", user_id, result.get("ret"))
+        return result
 
     async def send_file_to_user(
         self,

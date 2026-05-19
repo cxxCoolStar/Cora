@@ -22,6 +22,22 @@ def test_eval_runner_loads_cases(tmp_path: Path) -> None:
           "setup": {
             "workspace_files": {
               "src/example.py": "print('hello')\\n"
+            },
+            "web_search_results": {
+              "latest OpenAI releases": [
+                {
+                  "title": "Release Roundup",
+                  "url": "https://example.com/releases",
+                  "snippet": "Recent launches."
+                }
+              ]
+            },
+            "web_pages": {
+              "https://example.com/releases": {
+                "title": "Release Roundup",
+                "content": "Recent launches.",
+                "provider": "direct"
+              }
             }
           },
           "steps": [
@@ -42,6 +58,8 @@ def test_eval_runner_loads_cases(tmp_path: Path) -> None:
     assert cases[0].id == "sample_case"
     assert cases[0].case_type == "regression"
     assert cases[0].setup.workspace_files == {"src/example.py": "print('hello')\n"}
+    assert cases[0].setup.web_search_results["latest OpenAI releases"][0].url == "https://example.com/releases"
+    assert cases[0].setup.web_pages["https://example.com/releases"].provider == "direct"
     assert cases[0].steps[0].input.text == "hello"
 
 
@@ -301,6 +319,107 @@ def test_eval_runner_writes_html_report(tmp_path: Path) -> None:
     assert html_path.exists()
     assert "Cora Eval Report" in html_text
     assert "sample_case" in html_text
+
+
+def test_eval_runtime_runs_mock_web_search_case(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "research"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "web_search_case.json").write_text(
+        """
+        {
+          "id": "mock_web_search_case",
+          "type": "research",
+          "description": "Research queries should use web search fixtures in eval mode.",
+          "setup": {
+            "web_search_results": {
+              "search the latest OpenAI releases and include source links.": [
+                {
+                  "title": "OpenAI Release Roundup",
+                  "url": "https://example.com/openai/releases",
+                  "snippet": "Recent launches and updates."
+                }
+              ]
+            }
+          },
+          "steps": [
+            {
+              "label": "research search",
+              "input": {
+                "text": "Please search the latest OpenAI releases and include source links."
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "tool_names_any": ["web_search"],
+                "reply_contains_all": [
+                  "Web search results for `search the latest OpenAI releases and include source links.`",
+                  "https://example.com/openai/releases"
+                ]
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="research")
+
+    result = runner.run()
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert result.case_results[0].step_results[0].tool_names == ["web_search"]
+
+
+def test_eval_runtime_runs_mock_web_fetch_fallback_case(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "research"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "web_fetch_case.json").write_text(
+        """
+        {
+          "id": "mock_web_fetch_case",
+          "type": "research",
+          "description": "Shared URLs should fetch through Tavily extract fallback in eval mode.",
+          "setup": {
+            "web_pages": {
+              "https://example.com/protected": {
+                "content": "Recovered content from Tavily extract for a blocked page.",
+                "provider": "tavily_extract",
+                "content_type": "text/plain; charset=utf-8"
+              }
+            }
+          },
+          "steps": [
+            {
+              "label": "research fetch",
+              "input": {
+                "text": "Open and summarize https://example.com/protected for me."
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "tool_names_any": ["web_fetch"],
+                "reply_contains_all": [
+                  "Fetched `https://example.com/protected`.",
+                  "Provider: tavily_extract",
+                  "Recovered content from Tavily extract for a blocked page."
+                ]
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="research")
+
+    result = runner.run()
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert result.case_results[0].step_results[0].tool_names == ["web_fetch"]
 
 
 def test_run_result_to_html_includes_failure_details() -> None:

@@ -1,0 +1,33 @@
+{
+  "id": "web_fetch_shared_url",
+  "type": "research",
+  "description": "Shared URLs should route to web fetch and expose readable page content in eval mode.",
+  "tags": ["research", "web", "fetch", "url"],
+  "setup": {
+    "web_pages": {
+      "https://example.com/openai/releases": {
+        "title": "OpenAI Release Roundup",
+        "content": "Recent OpenAI launches and updates, including platform and model changes.",
+        "provider": "direct"
+      }
+    }
+  },
+  "steps": [
+    {
+      "label": "fetch shared url",
+      "input": {
+        "text": "Open and summarize https://example.com/openai/releases for me."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["web_fetch"],
+        "reply_contains_all": [
+          "Fetched `https://example.com/openai/releases`.",
+          "Title: OpenAI Release Roundup",
+          "Recent OpenAI launches and updates"
+        ]
+      }
+    }
+  ]
+}

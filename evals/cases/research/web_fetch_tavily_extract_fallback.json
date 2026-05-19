@@ -1,0 +1,33 @@
+{
+  "id": "web_fetch_tavily_extract_fallback",
+  "type": "research",
+  "description": "When a page cannot be fetched directly, the research runtime should recover with Tavily extract fixtures.",
+  "tags": ["research", "web", "fetch", "fallback", "tavily"],
+  "setup": {
+    "web_pages": {
+      "https://example.com/protected": {
+        "content": "Recovered content from Tavily extract for a blocked page.",
+        "provider": "tavily_extract",
+        "content_type": "text/plain; charset=utf-8"
+      }
+    }
+  },
+  "steps": [
+    {
+      "label": "fetch protected url",
+      "input": {
+        "text": "Open and summarize https://example.com/protected for me."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["web_fetch"],
+        "reply_contains_all": [
+          "Fetched `https://example.com/protected`.",
+          "Provider: tavily_extract",
+          "Recovered content from Tavily extract for a blocked page."
+        ]
+      }
+    }
+  ]
+}

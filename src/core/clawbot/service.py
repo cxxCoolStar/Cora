@@ -28,6 +28,7 @@ from core.clawbot.service_runtime import (
 )
 from core.agent.skill_loader import SkillLoader
 from core.agent.turn_runner import AgentTurnRunner
+from core.clawbot.planner import ToolPlan
 from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import RuntimeToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
@@ -97,6 +98,9 @@ class ClawBotService:
             ingestion_service=ingestion_service,
             item_repository=item_repository,
             pending_state_repository=pending_state_repository,
+            message_repository=message_repository,
+            session_summary_repository=session_summary_repository,
+            source_event_repository=source_event_repository,
             user_memory_path=self.user_memory_path,
             file_tool_root=self.file_tool_root,
             skill_roots=self.skill_loader.skill_roots,
@@ -254,17 +258,29 @@ class ClawBotService:
         )
         return self._session_shell.to_turn_response(outcome=outcome)
 
-    async def reply(self, *, session_id: str, text: str) -> TurnResponse:
-        outcome = await self.reply_outcome(session_id=session_id, text=text)
+    async def reply(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> TurnResponse:
+        outcome = await self.reply_outcome(session_id=session_id, text=text, source_metadata=source_metadata)
         return self._session_shell.to_turn_response(outcome=outcome)
 
-    async def reply_outcome(self, *, session_id: str, text: str) -> AssistantTurnOutcome:
+    async def reply_outcome(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> AssistantTurnOutcome:
         self.session_repository.get(session_id)
         inbound_turn = await self._session_shell.record_inbound_turn(
             session_id=session_id,
             text=text,
             upload=None,
-            source_metadata=None,
+            source_metadata=source_metadata,
         )
         context_snapshot = self.load_context_snapshot(session_id=session_id)
         context_snapshot.current_source_event_id = inbound_turn.source_event_id
@@ -287,6 +303,81 @@ class ClawBotService:
             outcome.action,
             outcome.disposition,
             outcome.tool_name,
+        )
+        return outcome
+
+    async def execute_tool_plan_outcome(
+        self,
+        *,
+        session_id: str,
+        plan: ToolPlan,
+        text: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> AssistantTurnOutcome:
+        self.session_repository.get(session_id)
+        inbound_text = str(text or "").strip() or f"[scheduled tool execution: {plan.tool}]"
+        inbound_turn = await self._session_shell.record_inbound_turn(
+            session_id=session_id,
+            text=inbound_text,
+            upload=None,
+            source_metadata=source_metadata,
+        )
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        context_snapshot.current_source_event_id = inbound_turn.source_event_id
+        runtime = self.runtime_manager.build_runtime_state(
+            session_id=session_id,
+            context_snapshot=context_snapshot,
+            source_message_id=inbound_turn.source_message_id,
+            raw_text=inbound_text,
+            upload=None,
+        )
+        execution = await self.tool_executor.execute(
+            session_id=session_id,
+            source_message_id=inbound_turn.source_message_id,
+            plan=plan,
+            text=inbound_text,
+            upload=None,
+            context=self.runtime_manager.runtime_to_context(runtime),
+        )
+        next_runtime = self.tool_executor._apply_runtime_update(
+            runtime=runtime,
+            execution=execution,
+        )
+        outcome = AssistantTurnOutcome(
+            reply=execution.reply,
+            action=execution.action,
+            disposition="clarify" if execution.needs_clarification else execution.disposition,
+            status=execution.status,
+            tool_name=plan.tool,
+            tool_arguments=dict(plan.arguments or {}),
+            context=self.runtime_manager.runtime_to_context(next_runtime),
+            confidence="system",
+            reason=plan.reason or "Scheduled task executed a concrete tool plan.",
+            artifacts=list(execution.artifacts or []),
+            trace=[],
+            tool_trace=[
+                {
+                    "tool_name": plan.tool,
+                    "arguments": dict(plan.arguments or {}),
+                    "action": execution.action,
+                    "status": execution.status,
+                    "disposition": execution.disposition,
+                    "artifacts": list(execution.artifacts or []),
+                    "metadata": dict(execution.metadata or {}),
+                }
+            ],
+            item_id=execution.item_id,
+        )
+        self._session_shell.persist_assistant_turn(
+            session_id=session_id,
+            outcome=outcome,
+        )
+        logger.info(
+            "clawbot execute_tool_plan_done session_id=%s tool=%s action=%s disposition=%s",
+            session_id,
+            plan.tool,
+            outcome.action,
+            outcome.disposition,
         )
         return outcome
 

@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+from time import perf_counter
 import tempfile
 from urllib.parse import unquote
 from typing import Any
 
 from fastapi import UploadFile
+import httpx
 
 from core.agent.skill_effects import HostEffectDispatcher
 from core.agent.runtime_manager import AgentRuntimeManager
@@ -16,13 +18,24 @@ from core.agent.skill_protocol import SkillExecutionResult, SkillStateDelta, UNS
 from core.agent.skill_executor import SkillScriptExecutor, SkillScriptRequest
 from core.agent.skill_loader import SkillLoader
 from core.clawbot.planner import ToolPlan
-from core.clawbot.tool_domains import FileToolHandler, SkillToolHandler, TerminalToolHandler, UserMemoryToolHandler
+from core.clawbot.tool_domains import (
+    FileToolHandler,
+    ScheduledTaskToolHandler,
+    SessionSearchToolHandler,
+    SkillToolHandler,
+    TerminalToolHandler,
+    UserMemoryToolHandler,
+    WebToolHandler,
+)
 from core.ingestion.service import IngestionService
 from core.schemas.tool import ToolCall, ToolResult
 from core.storage.repositories import (
     ChannelSessionMapRepository,
     ItemRepository,
+    MessageRepository,
     PendingStateRepository,
+    ScheduledTaskRepository,
+    SessionSummaryRepository,
 )
 from core.tools import ToolInvocation, register_builtin_tools, registry
 
@@ -77,6 +90,10 @@ class RuntimeToolExecutor:
         ingestion_service: IngestionService,
         item_repository: ItemRepository,
         pending_state_repository: PendingStateRepository,
+        message_repository: MessageRepository | None = None,
+        session_summary_repository: SessionSummaryRepository | None = None,
+        scheduled_task_repository: ScheduledTaskRepository | None = None,
+        source_event_repository: Any | None = None,
         gateway_service: Any | None = None,
         session_map_repository: ChannelSessionMapRepository | None = None,
         channel_name: str = "wechat",
@@ -84,10 +101,16 @@ class RuntimeToolExecutor:
         file_tool_root: Path | None = None,
         skill_roots: list[Path] | None = None,
         runtime_manager: AgentRuntimeManager | None = None,
+        web_http_client: httpx.Client | None = None,
+        web_tavily_api_key: str | None = None,
+        web_tavily_base_url: str | None = None,
+        scheduled_task_default_timezone: str | None = None,
     ) -> None:
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
         self.pending_state_repository = pending_state_repository
+        self.message_repository = message_repository
+        self.session_summary_repository = session_summary_repository
         self.gateway_service = gateway_service
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
@@ -97,7 +120,31 @@ class RuntimeToolExecutor:
         self.user_memory_tools = UserMemoryToolHandler.from_path(user_memory_path or Path("user-memory/USER.md"))
         self.file_tools = FileToolHandler.from_root(file_tool_root or Path("."))
         self.terminal_tools = TerminalToolHandler.from_root(file_tool_root or Path("."))
+        self.web_tools = WebToolHandler.from_client(
+            http_client=web_http_client,
+            tavily_api_key=web_tavily_api_key,
+            tavily_base_url=web_tavily_base_url,
+        )
         self.skill_tools = SkillToolHandler.from_roots(skill_roots)
+        self.session_search_tools = (
+            SessionSearchToolHandler.from_repositories(
+                message_repository=message_repository,
+                summary_repository=session_summary_repository,
+                session_map_repository=session_map_repository,
+                channel_name=channel_name,
+            )
+            if message_repository is not None and session_summary_repository is not None
+            else None
+        )
+        self.scheduled_task_tools = (
+            ScheduledTaskToolHandler(
+                repository=scheduled_task_repository,
+                default_timezone=scheduled_task_default_timezone,
+                source_event_repository=source_event_repository,
+            )
+            if scheduled_task_repository is not None
+            else None
+        )
         self.skill_loader = SkillLoader(skill_roots=skill_roots)
         self.skill_script_executor = SkillScriptExecutor(skill_loader=self.skill_loader)
         self.effect_dispatcher = HostEffectDispatcher(
@@ -186,10 +233,12 @@ class RuntimeToolExecutor:
 
     async def _dispatch_invocation(self, invocation: ToolInvocation) -> ToolExecutionResult:
         tool_name = str(invocation.plan.tool or "").strip()
+        started_at = perf_counter()
         logger.info(
-            "tool dispatch start session_id=%s tool=%s available_tools=%s",
+            "tool dispatch start session_id=%s tool=%s arguments=%s available_tools=%s",
             invocation.session_id,
             tool_name,
+            dict(invocation.plan.arguments or {}),
             registry.names(),
         )
         try:
@@ -208,7 +257,29 @@ class RuntimeToolExecutor:
                     upload=invocation.upload,
                     context=dict(invocation.context),
                 )
-            return await registry.dispatch(self, name=tool_name, invocation=normalized_invocation)
+            result = await registry.dispatch(self, name=tool_name, invocation=normalized_invocation)
+            duration_ms = int((perf_counter() - started_at) * 1000)
+            if result.status == "failed":
+                logger.warning(
+                    "tool dispatch done session_id=%s tool=%s status=%s action=%s duration_ms=%s reply=%s metadata=%s",
+                    invocation.session_id,
+                    tool_name,
+                    result.status,
+                    result.action,
+                    duration_ms,
+                    str(result.reply or "")[:500],
+                    dict(result.metadata or {}),
+                )
+            else:
+                logger.info(
+                    "tool dispatch done session_id=%s tool=%s status=%s action=%s duration_ms=%s",
+                    invocation.session_id,
+                    tool_name,
+                    result.status,
+                    result.action,
+                    duration_ms,
+                )
+            return result
         except KeyError:
             logger.exception(
                 "tool dispatch unknown_tool session_id=%s tool=%s available_tools=%s arguments=%s",
@@ -218,6 +289,15 @@ class RuntimeToolExecutor:
                 dict(invocation.plan.arguments or {}),
             )
             return ToolExecutionResult(reply="我暂时还不能处理这个请求。", action="chat")
+
+        except Exception:
+            logger.exception(
+                "tool dispatch failed session_id=%s tool=%s duration_ms=%s",
+                invocation.session_id,
+                tool_name,
+                int((perf_counter() - started_at) * 1000),
+            )
+            raise
 
     def _apply_runtime_update(
         self,
@@ -261,6 +341,59 @@ class RuntimeToolExecutor:
 
     def _tool_shell_exec(self, invocation: ToolInvocation) -> ToolExecutionResult:
         result = self.terminal_tools.execute(invocation)
+        return ToolExecutionResult(
+            reply=result.reply,
+            action=result.action,
+            status=result.status,
+            metadata=dict(result.metadata or {}),
+        )
+
+    def _tool_web_search(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.web_tools.search(invocation)
+        return ToolExecutionResult(
+            reply=result.reply,
+            action=result.action,
+            status=result.status,
+            metadata=dict(result.metadata or {}),
+        )
+
+    def _tool_web_fetch(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        result = self.web_tools.fetch(invocation)
+        return ToolExecutionResult(
+            reply=result.reply,
+            action=result.action,
+            status=result.status,
+            metadata=dict(result.metadata or {}),
+        )
+
+    def _tool_search_sessions(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if self.session_search_tools is None:
+            return ToolExecutionResult(
+                reply="search_sessions is not configured for this runtime.",
+                action="retrieve",
+                status="failed",
+            )
+        self.session_search_tools.store.channel_name = self.channel_name
+        self.session_search_tools.store.session_map_repository = self.session_map_repository
+        result = self.session_search_tools.search(invocation)
+        return ToolExecutionResult(
+            reply=result.reply,
+            action=result.action,
+            status=result.status,
+            metadata=dict(result.metadata or {}),
+        )
+
+    def _tool_scheduled_tasks(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if self.scheduled_task_tools is None:
+            return ToolExecutionResult(
+                reply="scheduled_tasks is not configured for this runtime.",
+                action="automation",
+                status="failed",
+            )
+        result = self.scheduled_task_tools.execute(
+            invocation,
+            owner_external_user_id=self._resolve_external_user_id(invocation.session_id),
+        )
         return ToolExecutionResult(
             reply=result.reply,
             action=result.action,

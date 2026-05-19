@@ -182,3 +182,29 @@ class ChannelEventRecord(Base):
     session_id: Mapped[str | None] = mapped_column(ForeignKey("clawbot_sessions.id"), nullable=True, index=True)
     reply_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class ScheduledTaskRecord(Base):
+    __tablename__ = "clawbot_scheduled_tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    owner_external_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    prompt_text: Mapped[str] = mapped_column(Text)
+    schedule_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    schedule_display: Mapped[str] = mapped_column(String(255), default="")
+    delivery_kind: Mapped[str] = mapped_column(String(32), default="session_channel")
+    enabled: Mapped[int] = mapped_column(default=1, index=True)
+    state: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_delivery_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_reply_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

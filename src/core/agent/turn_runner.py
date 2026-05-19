@@ -294,7 +294,10 @@ class AgentTurnRunner:
                 ),
                 category="deliver",
             )
-        return self._forced_file_tool_selection(text=text)
+        forced_file_selection = self._forced_file_tool_selection(text=text)
+        if forced_file_selection is not None:
+            return forced_file_selection
+        return self._forced_web_tool_selection(text=text, lowered=lowered)
 
     def tool_retry_category(
         self,
@@ -314,6 +317,8 @@ class AgentTurnRunner:
             return "delete"
         if self._looks_like_user_memory_request(text=text, lowered=lowered):
             return "user_memory"
+        if self._looks_like_scheduled_task_request(text=text, lowered=lowered):
+            return "scheduled_task"
         if upload is not None and self.media_kind_resolver(upload) == "image":
             return "save_file"
         return None
@@ -335,6 +340,12 @@ class AgentTurnRunner:
             return (
                 "Tool-use correction: the user is asking to remember, inspect, update, or forget durable personal information. "
                 "Use the user_memory tool instead of replying from chat."
+            )
+        if category == "scheduled_task":
+            return (
+                "Tool-use correction: the user is asking for a reminder, alarm, follow-up, or scheduled task. "
+                "Do not answer from plain chat. Use the scheduled_tasks tool to create, inspect, update, or manage the reminder, "
+                "and keep the scheduled time from the tool-backed result."
             )
         if category == "save_file":
             return (
@@ -416,6 +427,8 @@ class AgentTurnRunner:
 
     @staticmethod
     def _should_prefer_tool_reply(*, last_execution: ToolExecutionTrace) -> bool:
+        if last_execution.tool_name == "scheduled_tasks":
+            return bool((last_execution.content or "").strip())
         if last_execution.tool_name != "skill_run":
             return False
         metadata = last_execution.metadata
@@ -449,6 +462,24 @@ class AgentTurnRunner:
             "remember this", "forget this", "show my memory", "user memory",
         )
         return any(token in text or token in lowered for token in memory_markers)
+
+    @staticmethod
+    def _looks_like_scheduled_task_request(*, text: str, lowered: str) -> bool:
+        reminder_markers = (
+            "提醒我", "提醒一下", "提醒下", "叫我", "闹钟", "定时", "到时候叫我", "到点叫我",
+            "remind me", "set a reminder", "set reminder", "set an alarm", "alarm me", "ping me",
+        )
+        time_markers = (
+            "分钟后", "小时后", "天后", "待会", "一会", "稍后", "今晚", "明天", "后天", "早上", "上午", "中午", "下午", "晚上",
+            "每天", "每周", "每月", "周一", "周二", "周三", "周四", "周五", "周六", "周日", "星期", "点", "号",
+            " later", " tomorrow", " tonight", " next ", " every ", " daily", " weekly", " monthly", " at ", " in ",
+            "am", "pm",
+        )
+        if not any(token in text or token in lowered for token in reminder_markers):
+            return False
+        if any(token in text or token in lowered for token in time_markers):
+            return True
+        return bool(re.search(r"\b\d+\s*(?:m|min|mins|minute|minutes|h|hr|hour|hours|day|days)\b", lowered))
 
     @classmethod
     def _forced_file_tool_selection(cls, *, text: str) -> ForcedToolSelection | None:
@@ -511,6 +542,54 @@ class AgentTurnRunner:
         if not normalized.endswith("\n"):
             normalized += "\n"
         return normalized
+
+    @classmethod
+    def _forced_web_tool_selection(cls, *, text: str, lowered: str) -> ForcedToolSelection | None:
+        url_match = re.search(r"https?://[^\s`<>\"')\]]+", text, flags=re.IGNORECASE)
+        if url_match:
+            url = url_match.group(0).rstrip(".,!?;:")
+            return ForcedToolSelection(
+                tool_call=ToolCall(
+                    tool_name="web_fetch",
+                    arguments={"url": url},
+                ),
+                category="web_fetch",
+            )
+        if not cls._looks_like_current_info_request(text=text, lowered=lowered):
+            return None
+        query = cls._normalized_web_search_query(text)
+        if not query:
+            return None
+        return ForcedToolSelection(
+            tool_call=ToolCall(
+                tool_name="web_search",
+                arguments={"query": query},
+            ),
+            category="web_search",
+        )
+
+    @staticmethod
+    def _looks_like_current_info_request(*, text: str, lowered: str) -> bool:
+        local_file_markers = (
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".json", ".yaml", ".yml", ".toml", ".txt",
+            "src/", "tests/", "docs/", "scripts/", "core/",
+        )
+        if any(marker in lowered for marker in local_file_markers):
+            return False
+        current_markers = ("latest", "recent", "current", "today", "news", "what's new", "最近", "最新", "近期", "今天")
+        search_markers = ("search", "look up", "find out", "check", "查", "搜", "搜索", "查一下", "搜一下", "查查")
+        source_markers = ("source", "sources", "link", "links", "url", "urls", "来源", "链接", "网址")
+        has_current = any(marker in lowered or marker in text for marker in current_markers)
+        has_search = any(marker in lowered or marker in text for marker in search_markers)
+        has_sources = any(marker in lowered or marker in text for marker in source_markers)
+        return has_current and (has_search or has_sources)
+
+    @staticmethod
+    def _normalized_web_search_query(text: str) -> str:
+        normalized = " ".join(str(text or "").split())
+        normalized = re.sub(r"(?is)^(please|could you|can you|would you|help me)\s+", "", normalized)
+        normalized = re.sub(r"(?is)^(请|帮我|麻烦你)\s*", "", normalized)
+        return normalized.strip()
 
     @staticmethod
     def _sanitize_json(value: Any) -> Any:

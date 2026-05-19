@@ -20,6 +20,7 @@ from core.storage.repositories import (
     ItemRepository,
     MessageRepository,
     PendingStateRepository,
+    ScheduledTaskRepository,
     SessionRepository,
     SessionSummaryRepository,
     SourceEventRepository,
@@ -45,6 +46,7 @@ class ClawBotContainer:
     pending_state_repository: PendingStateRepository
     user_signal_repository: UserSignalRepository
     topic_repository: TopicRepository
+    scheduled_task_repository: ScheduledTaskRepository
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
     tool_executor: RuntimeToolExecutor
@@ -74,6 +76,8 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
     pending_state_repository = PendingStateRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
+    scheduled_task_repository = ScheduledTaskRepository(database)
+    session_map_repository = ChannelSessionMapRepository(database)
     topic_item_repository = TopicItemRepository(database)
     topic_activity_repository = TopicActivityRepository(database)
     image_parser = ImageFileParser(describer=None)
@@ -131,8 +135,20 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         pending_state_repository=pending_state_repository,
+        message_repository=message_repository,
+        session_summary_repository=session_summary_repository,
+        scheduled_task_repository=scheduled_task_repository,
+        source_event_repository=source_event_repository,
+        session_map_repository=session_map_repository,
         user_memory_path=active_settings.user_memory_path,
         file_tool_root=active_settings.file_tool_root,
+        web_tavily_api_key=active_settings.tavily_api_key,
+        web_tavily_base_url=active_settings.tavily_base_url,
+        scheduled_task_default_timezone=(
+            active_settings.scheduler_timezone
+            or active_settings.wechat_session_timezone
+            or "Asia/Shanghai"
+        ),
     )
     context_budget_manager = ContextBudgetManager(
         context_length=active_settings.context_length,
@@ -169,6 +185,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
+        scheduled_task_repository=scheduled_task_repository,
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,
         tool_executor=tool_executor,

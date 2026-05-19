@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from html import escape
+import json
 import os
 from pathlib import Path
 import shutil
 
 import core.clawbot.dependencies as clawbot_dependencies
+import httpx
 from core.clawbot.dependencies import get_clawbot_container
 from core.evals.judge import evaluate_step
-from core.evals.models import EvalAssertionFailure, EvalCase, EvalCaseResult, EvalObservedState, EvalStepResult
+from core.evals.models import EvalAssertionFailure, EvalCase, EvalCaseResult, EvalObservedState, EvalSetup, EvalStepResult
 from core.storage.repositories import ItemRepository, PendingStateRepository
 
 
@@ -23,6 +26,7 @@ class EvalRuntime:
         step_results: list[EvalStepResult] = []
         error_message: str | None = None
         failure_category: str | None = None
+        mock_web_client: httpx.Client | None = None
         try:
             sandbox_root = self.project_root / ".cora" / "eval-workspaces" / case.id
             if sandbox_root.exists():
@@ -47,6 +51,7 @@ class EvalRuntime:
                 clawbot_dependencies._container = None
                 container = get_clawbot_container()
                 container.initialize()
+                mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
                 for index, step in enumerate(case.steps, start=1):
                     response = asyncio.run(container.clawbot_service.reply(session_id=session.id, text=step.input.text))
@@ -83,6 +88,8 @@ class EvalRuntime:
                 )
             )
         finally:
+            if mock_web_client is not None:
+                mock_web_client.close()
             clawbot_dependencies._container = None
         duration_seconds = max(0.0, (datetime.now(UTC) - started).total_seconds())
         return EvalCaseResult(
@@ -103,6 +110,17 @@ class EvalRuntime:
             target = _resolve_within_root(root=workspace_root, relative_path=relative_path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _configure_mock_web_tools(*, container, setup: EvalSetup) -> httpx.Client | None:
+        if not setup.web_search_results and not setup.web_pages:
+            return None
+        mock_web_client = _build_mock_web_client(setup=setup)
+        web_store = container.tool_executor.web_tools.store
+        web_store.http_client = mock_web_client
+        if setup.web_search_results or any(page.provider == "tavily_extract" for page in setup.web_pages.values()):
+            web_store.tavily_api_key = "eval-tavily-key"
+        return mock_web_client
 
 
 @contextmanager
@@ -175,3 +193,99 @@ def _resolve_within_root(*, root: Path, relative_path: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"workspace file path escapes eval workspace: {relative_path}") from exc
     return candidate
+
+
+def _build_mock_web_client(*, setup: EvalSetup) -> httpx.Client:
+    search_results = {
+        _normalize_space(query): hits
+        for query, hits in setup.web_search_results.items()
+    }
+    web_pages = {
+        _normalize_mock_url(url): page
+        for url, page in setup.web_pages.items()
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.tavily.com" and request.url.path == "/search":
+            payload = json.loads(request.content.decode("utf-8") or "{}")
+            query = _normalize_space(str(payload.get("query") or ""))
+            hits = search_results.get(query)
+            if hits is None:
+                return httpx.Response(
+                    404,
+                    json={"error": f"no mock web search fixture for query: {query}"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"title": hit.title, "url": hit.url, "content": hit.snippet}
+                        for hit in hits
+                    ]
+                },
+                request=request,
+            )
+        if request.url.host == "api.tavily.com" and request.url.path == "/extract":
+            payload = json.loads(request.content.decode("utf-8") or "{}")
+            urls = payload.get("urls") or []
+            requested_url = _normalize_mock_url(str(urls[0] or "")) if urls else ""
+            page = web_pages.get(requested_url)
+            if page is None or page.provider != "tavily_extract":
+                return httpx.Response(
+                    404,
+                    json={
+                        "failed_results": [
+                            {"url": requested_url, "error": "no mock Tavily extract fixture"}
+                        ]
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "url": page.final_url or requested_url,
+                            "raw_content": page.content,
+                        }
+                    ]
+                },
+                request=request,
+            )
+        requested_url = _normalize_mock_url(str(request.url))
+        page = web_pages.get(requested_url)
+        if page is None:
+            return httpx.Response(404, text="no mock web fixture", request=request)
+        if page.provider == "tavily_extract":
+            raise httpx.ConnectError("mock blocked direct fetch", request=request)
+        content_type = page.content_type
+        body = _mock_response_body(page=page)
+        return httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": content_type},
+            request=request,
+        )
+
+    return httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+
+
+def _mock_response_body(*, page) -> str:
+    content_type = page.content_type.lower()
+    if "text/html" not in content_type or "<html" in page.content.lower():
+        return page.content
+    title = f"<title>{escape(page.title)}</title>" if page.title else ""
+    content = page.content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<html><head>{title}</head><body><main><p>{content}</p></main></body></html>"
+
+
+def _normalize_space(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _normalize_mock_url(url: str) -> str:
+    return str(url or "").strip()

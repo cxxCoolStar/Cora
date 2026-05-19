@@ -185,18 +185,27 @@ python -m core.cli.main wechat-login
 .cora/wechat/accounts/
 ```
 
-### 微信轮询
+然后启动统一 gateway：
 
 ```powershell
-python -m core.cli.main wechat-poll
+python -m core.cli.main gateway
 ```
 
-轮询链路会：
+### 统一 Gateway
 
+```powershell
+python -m core.cli.main gateway
+```
+
+统一 gateway 会：
+
+- 同时运行微信轮询和定时任务 worker
 - 复用同一微信用户的会话
 - 对重复事件做去重
 - 把微信文本/文件转成统一的 `ingest` 流程
 - 在能力可用时支持把原始文件再发回微信用户
+
+`python -m core.cli.main wechat-poll` 仍然可用，但现在只是兼容别名，会启动同一个 gateway 运行时。
 
 ## 评测
 
@@ -452,7 +461,7 @@ pytest
 1. 创建虚拟环境并安装依赖
 2. 配置 `.env`
 3. 执行 `python -m core.cli.main wechat-login`
-4. 执行 `python -m core.cli.main wechat-poll`
+4. 执行 `python -m core.cli.main gateway`
 5. 用微信把文件、文本或图片发给 `Cora`
 6. 继续通过对话测试“帮我找一下”“把那个文件发给我”“总结一下这份资料”
 

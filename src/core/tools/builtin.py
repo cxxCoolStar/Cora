@@ -130,6 +130,63 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 handler=lambda executor, invocation: executor._tool_shell_exec(invocation),
             )
         )
+    if active_registry.get("web_search") is None:
+        active_registry.register(
+            ToolSpec(
+                name="web_search",
+                toolset="web",
+                description="Search the public web for current external information and return a compact list of relevant results.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_web_search(invocation),
+                read_only=True,
+            )
+        )
+    if active_registry.get("web_fetch") is None:
+        active_registry.register(
+            ToolSpec(
+                name="web_fetch",
+                toolset="web",
+                description="Fetch a specific web page or URL and extract readable text content from it.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "max_chars": {"type": "integer", "minimum": 200, "maximum": 8000},
+                    },
+                    "required": ["url"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_web_fetch(invocation),
+                read_only=True,
+            )
+        )
+    if active_registry.get("search_sessions") is None:
+        active_registry.register(
+            ToolSpec(
+                name="search_sessions",
+                toolset="session_search",
+                description="Search the current and prior conversation sessions for earlier messages, summaries, and historical context.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_search_sessions(invocation),
+                read_only=True,
+            )
+        )
     if active_registry.get("skills_list") is None:
         active_registry.register(
             ToolSpec(
@@ -183,6 +240,81 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                     "additionalProperties": False,
                 },
                 handler=lambda executor, invocation: executor._tool_skill_run(invocation),
+                is_agent_stateful=True,
+            )
+        )
+    if active_registry.get("scheduled_tasks") is None:
+        active_registry.register(
+            ToolSpec(
+                name="scheduled_tasks",
+                toolset="automation",
+                description=(
+                    "Create, inspect, update, pause, resume, delete, and queue scheduled background tasks. "
+                    "Use this when the user asks for reminders, recurring checks, monitors, or periodic follow-ups."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "list", "get", "update", "pause", "resume", "delete", "run_now"],
+                        },
+                        "task_ref": {"type": "string"},
+                        "name": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "schedule_text": {"type": "string"},
+                        "execution": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["agent_prompt", "skill", "script"],
+                                },
+                                "skill_name": {"type": "string"},
+                                "script_path": {"type": "string"},
+                                "input": {"type": "object"},
+                                "skills": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                        "run_immediately": {"type": "boolean"},
+                        "enabled": {"type": "boolean"},
+                        "metadata": {"type": "object"},
+                        "schedule": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["once", "interval", "daily", "weekly", "cron"],
+                                },
+                                "at": {"type": "string"},
+                                "interval_seconds": {"type": "integer", "minimum": 1},
+                                "interval_minutes": {"type": "integer", "minimum": 1},
+                                "anchor_at": {"type": "string"},
+                                "hour": {"type": "integer", "minimum": 0, "maximum": 23},
+                                "minute": {"type": "integer", "minimum": 0, "maximum": 59},
+                                "timezone": {"type": "string"},
+                                "expr": {"type": "string"},
+                                "days_of_week": {
+                                    "type": "array",
+                                    "items": {
+                                        "oneOf": [
+                                            {"type": "integer", "minimum": 0, "maximum": 6},
+                                            {"type": "string"},
+                                        ]
+                                    },
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_scheduled_tasks(invocation),
                 is_agent_stateful=True,
             )
         )

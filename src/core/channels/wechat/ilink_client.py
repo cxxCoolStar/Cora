@@ -119,6 +119,7 @@ class WechatIlinkConfig:
     base_url: str = "https://ilinkai.weixin.qq.com"
     app_id: str = "bot"
     poll_timeout_seconds: int = 35
+    http_trust_env: bool = False
     context_tokens_path: Path | None = None
     download_dir: Path | None = None
     cdn_base_url: str = WEIXIN_CDN_BASE_URL
@@ -129,7 +130,7 @@ class WechatIlinkClient:
 
     def __init__(self, config: WechatIlinkConfig) -> None:
         self.config = config
-        self._http = httpx.AsyncClient(timeout=40.0)
+        self._http = httpx.AsyncClient(timeout=40.0, trust_env=config.http_trust_env)
         self._sync_buf = ""
         self._token_store = (
             WechatContextTokenStore(config.context_tokens_path)

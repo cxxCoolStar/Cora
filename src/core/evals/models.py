@@ -82,6 +82,50 @@ class EvalInput:
 
 
 @dataclass(slots=True)
+class EvalWebSearchHit:
+    title: str
+    url: str
+    snippet: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvalWebSearchHit":
+        title = _maybe_str(payload.get("title"))
+        url = _maybe_str(payload.get("url"))
+        if not title or not url:
+            raise ValueError("Eval web search hits require both `title` and `url`.")
+        return cls(
+            title=title,
+            url=url,
+            snippet=_maybe_str(payload.get("snippet")) or "",
+        )
+
+
+@dataclass(slots=True)
+class EvalWebPage:
+    content: str
+    title: str | None = None
+    final_url: str | None = None
+    content_type: str = "text/html; charset=utf-8"
+    provider: str = "direct"
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvalWebPage":
+        content = str(payload.get("content") or "")
+        if not content:
+            raise ValueError("Eval web pages require non-empty `content`.")
+        provider = (_maybe_str(payload.get("provider")) or "direct").strip().lower()
+        if provider not in {"direct", "tavily_extract"}:
+            raise ValueError("Eval web page `provider` must be `direct` or `tavily_extract`.")
+        return cls(
+            content=content,
+            title=_maybe_str(payload.get("title")),
+            final_url=_maybe_str(payload.get("final_url")),
+            content_type=_maybe_str(payload.get("content_type")) or "text/html; charset=utf-8",
+            provider=provider,
+        )
+
+
+@dataclass(slots=True)
 class EvalStep:
     input: EvalInput
     expect: EvalExpectation
@@ -100,6 +144,8 @@ class EvalStep:
 class EvalSetup:
     user_memory_markdown: str | None = None
     workspace_files: dict[str, str] = field(default_factory=dict)
+    web_search_results: dict[str, list[EvalWebSearchHit]] = field(default_factory=dict)
+    web_pages: dict[str, EvalWebPage] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "EvalSetup":
@@ -107,6 +153,8 @@ class EvalSetup:
         return cls(
             user_memory_markdown=_maybe_str(payload.get("user_memory_markdown")),
             workspace_files=_string_map(payload.get("workspace_files")),
+            web_search_results=_web_search_results_map(payload.get("web_search_results")),
+            web_pages=_web_pages_map(payload.get("web_pages")),
         )
 
 
@@ -234,6 +282,35 @@ def _string_list_map(value: Any) -> dict[str, list[str]]:
         tokens = _string_list(raw_value)
         if tokens:
             normalized[key] = tokens
+    return normalized
+
+
+def _web_search_results_map(value: Any) -> dict[str, list[EvalWebSearchHit]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, list[EvalWebSearchHit]] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not key or not isinstance(raw_value, list):
+            continue
+        hits: list[EvalWebSearchHit] = []
+        for item in raw_value:
+            if isinstance(item, dict):
+                hits.append(EvalWebSearchHit.from_dict(item))
+        if hits:
+            normalized[key] = hits
+    return normalized
+
+
+def _web_pages_map(value: Any) -> dict[str, EvalWebPage]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, EvalWebPage] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not key or not isinstance(raw_value, dict):
+            continue
+        normalized[key] = EvalWebPage.from_dict(raw_value)
     return normalized
 
 

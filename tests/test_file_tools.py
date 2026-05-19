@@ -212,6 +212,7 @@ def test_clawbot_service_exposes_file_tool_specs(tmp_path: Path) -> None:
     specs = {spec.name for spec in service._build_tool_specs()}
 
     assert {"list_files", "search_files", "read_file", "write_file"}.issubset(specs)
+    assert {"web_search", "web_fetch", "search_sessions"}.issubset(specs)
 
 
 def test_clawbot_service_cli_preset_exposes_shell_exec(tmp_path: Path) -> None:

@@ -19,6 +19,8 @@ class CoreSettings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: int = 60
+    tavily_api_key: str | None = None
+    tavily_base_url: str = "https://api.tavily.com"
     context_length: int = 128000
     context_compression_threshold: float = 0.50
     context_summary_target_ratio: float = 0.20
@@ -35,10 +37,14 @@ class CoreSettings(BaseSettings):
     wechat_account_name: str = "default"
     wechat_base_url: str = "https://ilinkai.weixin.qq.com"
     wechat_poll_timeout_seconds: int = 35
+    wechat_http_trust_env: bool = False
     wechat_session_idle_minutes: int = 120
     wechat_session_daily_reset_hour: int | None = 4
     wechat_session_timezone: str | None = None
     wechat_session_enable_manual_reset: bool = True
+    scheduler_timezone: str | None = None
+    scheduler_tick_seconds: int = 5
+    scheduler_lease_seconds: int = 600
 
     model_config = SettingsConfigDict(
         env_prefix="CORA_",

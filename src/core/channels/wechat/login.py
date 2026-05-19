@@ -18,9 +18,9 @@ class WechatLoginResult:
 
 
 class WechatQrLoginClient:
-    def __init__(self, *, base_url: str = ILINK_BASE_URL) -> None:
+    def __init__(self, *, base_url: str = ILINK_BASE_URL, http_trust_env: bool = False) -> None:
         self.base_url = base_url.rstrip("/")
-        self._http = httpx.AsyncClient(timeout=40.0)
+        self._http = httpx.AsyncClient(timeout=40.0, trust_env=http_trust_env)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -90,4 +90,3 @@ class WechatQrLoginClient:
         if isinstance(data, dict) and data.get("errcode") not in (None, 0):
             raise RuntimeError(f"iLink error {data.get('errcode')}: {data.get('errmsg')}")
         return data if isinstance(data, dict) else {}
-

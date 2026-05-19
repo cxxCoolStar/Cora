@@ -1,0 +1,46 @@
+{
+  "id": "web_search_latest_openai_releases",
+  "type": "research",
+  "description": "Current-information requests should use web search and return source URLs from deterministic eval fixtures.",
+  "tags": ["research", "web", "search", "current-info"],
+  "setup": {
+    "web_search_results": {
+      "search the latest OpenAI releases and include source links.": [
+        {
+          "title": "OpenAI Release Roundup",
+          "url": "https://example.com/openai/releases",
+          "snippet": "A compact list of recent OpenAI launches and updates."
+        },
+        {
+          "title": "GPT-4.1 API Notes",
+          "url": "https://example.com/openai/gpt-4-1",
+          "snippet": "API release details for the GPT-4.1 family."
+        },
+        {
+          "title": "Responses API Update",
+          "url": "https://example.com/openai/responses-api",
+          "snippet": "Recent changes to the Responses API platform surface."
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "label": "latest release search",
+      "input": {
+        "text": "Please search the latest OpenAI releases and include source links."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["web_search"],
+        "reply_contains_all": [
+          "Web search results for `search the latest OpenAI releases and include source links.`",
+          "https://example.com/openai/releases",
+          "https://example.com/openai/gpt-4-1",
+          "https://example.com/openai/responses-api"
+        ]
+      }
+    }
+  ]
+}

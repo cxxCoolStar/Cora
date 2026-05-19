@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -15,12 +15,14 @@ from core.storage.models import (
     SessionRecord,
     SessionSummaryRecord,
     SourceEventRecord,
+    ScheduledTaskRecord,
     TopicActivityRecord,
     TopicItemRecord,
     TopicRecord,
     UserSignalRecord,
     utc_now,
 )
+from core.tasks.schedule import compute_next_run_at, format_schedule, normalize_schedule_input
 
 
 class SessionRepository:
@@ -639,6 +641,27 @@ class ChannelSessionMapRepository:
         record = self.get_binding(channel=channel, external_user_id=external_user_id)
         return record.session_id if record is not None else None
 
+    def list_session_ids_for_user(self, *, channel: str, external_user_id: str, limit: int = 20) -> list[str]:
+        with self.database.session() as session:
+            stmt = (
+                select(ChannelSessionMapRecord)
+                .where(
+                    ChannelSessionMapRecord.channel == channel,
+                    ChannelSessionMapRecord.external_user_id == external_user_id,
+                )
+                .order_by(desc(ChannelSessionMapRecord.updated_at))
+            )
+            records = list(session.scalars(stmt))
+        session_ids: list[str] = []
+        for record in records:
+            session_id = str(record.session_id or "").strip()
+            if not session_id or session_id in session_ids:
+                continue
+            session_ids.append(session_id)
+            if len(session_ids) >= max(1, int(limit or 20)):
+                break
+        return session_ids
+
     def upsert(
         self,
         *,
@@ -755,6 +778,271 @@ class ChannelEventRepository:
                 reply_preview=reply_preview,
             )
             session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+
+class ScheduledTaskRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    @staticmethod
+    def _as_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def create(
+        self,
+        *,
+        session_id: str,
+        owner_external_user_id: str | None,
+        name: str,
+        prompt_text: str,
+        schedule: dict[str, Any],
+        enabled: bool = True,
+        run_immediately: bool = False,
+        delivery_kind: str = "session_channel",
+        metadata: dict[str, Any] | None = None,
+    ) -> ScheduledTaskRecord:
+        now = utc_now()
+        normalized_schedule = normalize_schedule_input(schedule, now=now)
+        next_run_at = now if run_immediately else compute_next_run_at(normalized_schedule, now=now)
+        state = "scheduled" if enabled else "paused"
+        with self.database.session() as session:
+            record = ScheduledTaskRecord(
+                session_id=session_id,
+                owner_external_user_id=owner_external_user_id,
+                name=name,
+                prompt_text=prompt_text,
+                schedule_json=normalized_schedule,
+                schedule_display=format_schedule(normalized_schedule),
+                delivery_kind=delivery_kind,
+                enabled=1 if enabled else 0,
+                state=state,
+                next_run_at=next_run_at,
+                metadata_json=dict(metadata or {}),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def get(self, *, task_id: str) -> ScheduledTaskRecord:
+        with self.database.session() as session:
+            record = session.get(ScheduledTaskRecord, task_id)
+            if record is None:
+                raise KeyError(f"Scheduled task not found: {task_id}")
+            return record
+
+    def list_for_scope(
+        self,
+        *,
+        session_id: str,
+        owner_external_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[ScheduledTaskRecord]:
+        with self.database.session() as session:
+            stmt = select(ScheduledTaskRecord)
+            if owner_external_user_id:
+                stmt = stmt.where(
+                    (ScheduledTaskRecord.owner_external_user_id == owner_external_user_id)
+                    | (ScheduledTaskRecord.session_id == session_id)
+                )
+            else:
+                stmt = stmt.where(ScheduledTaskRecord.session_id == session_id)
+            stmt = stmt.order_by(desc(ScheduledTaskRecord.created_at)).limit(limit)
+            return list(session.scalars(stmt))
+
+    def resolve_for_scope(
+        self,
+        *,
+        task_ref: str,
+        session_id: str,
+        owner_external_user_id: str | None = None,
+    ) -> ScheduledTaskRecord | None:
+        needle = str(task_ref or "").strip()
+        if not needle:
+            return None
+        records = self.list_for_scope(session_id=session_id, owner_external_user_id=owner_external_user_id, limit=100)
+        for record in records:
+            if record.id == needle:
+                return record
+        exact = [record for record in records if record.name.strip().lower() == needle.lower()]
+        if len(exact) == 1:
+            return exact[0]
+        partial = [record for record in records if needle.lower() in record.name.strip().lower()]
+        if len(partial) == 1:
+            return partial[0]
+        return None
+
+    def update(
+        self,
+        *,
+        task_id: str,
+        name: str | None = None,
+        prompt_text: str | None = None,
+        schedule: dict[str, Any] | None = None,
+        enabled: bool | None = None,
+        run_immediately: bool | None = None,
+        metadata: dict[str, Any] | None = None,
+        delivery_kind: str | None = None,
+    ) -> ScheduledTaskRecord:
+        now = utc_now()
+        with self.database.session() as session:
+            record = session.get(ScheduledTaskRecord, task_id)
+            if record is None:
+                raise KeyError(f"Scheduled task not found: {task_id}")
+            if name is not None:
+                record.name = name
+            if prompt_text is not None:
+                record.prompt_text = prompt_text
+            if schedule is not None:
+                normalized_schedule = normalize_schedule_input(schedule, now=now)
+                record.schedule_json = normalized_schedule
+                record.schedule_display = format_schedule(normalized_schedule)
+                if record.state != "running":
+                    if bool(run_immediately):
+                        record.next_run_at = now
+                    else:
+                        record.next_run_at = compute_next_run_at(
+                            normalized_schedule,
+                            now=now,
+                            last_run_at=None,
+                        )
+            elif bool(run_immediately):
+                record.next_run_at = now
+            if enabled is not None:
+                record.enabled = 1 if enabled else 0
+                if record.state != "running":
+                    record.state = "scheduled" if enabled else "paused"
+            if metadata is not None:
+                record.metadata_json = dict(metadata)
+            if delivery_kind is not None:
+                record.delivery_kind = delivery_kind
+            record.updated_at = now
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def pause(self, *, task_id: str) -> ScheduledTaskRecord:
+        return self.update(task_id=task_id, enabled=False)
+
+    def resume(self, *, task_id: str, run_immediately: bool = False) -> ScheduledTaskRecord:
+        return self.update(task_id=task_id, enabled=True, run_immediately=run_immediately)
+
+    def delete(self, *, task_id: str) -> bool:
+        with self.database.session() as session:
+            record = session.get(ScheduledTaskRecord, task_id)
+            if record is None:
+                return False
+            session.delete(record)
+            session.commit()
+            return True
+
+    def run_now(self, *, task_id: str) -> ScheduledTaskRecord:
+        return self.update(task_id=task_id, enabled=True, run_immediately=True)
+
+    def list_due(self, *, now: datetime, limit: int = 20) -> list[ScheduledTaskRecord]:
+        with self.database.session() as session:
+            stmt = (
+                select(ScheduledTaskRecord)
+                .where(
+                    ScheduledTaskRecord.enabled == 1,
+                    ScheduledTaskRecord.next_run_at.is_not(None),
+                    ScheduledTaskRecord.next_run_at <= now,
+                    (
+                        (ScheduledTaskRecord.lease_expires_at.is_(None))
+                        | (ScheduledTaskRecord.lease_expires_at <= now)
+                    ),
+                )
+                .order_by(ScheduledTaskRecord.next_run_at, ScheduledTaskRecord.created_at)
+                .limit(limit)
+            )
+            return list(session.scalars(stmt))
+
+    def peek_next_run_at(self) -> datetime | None:
+        with self.database.session() as session:
+            stmt = (
+                select(ScheduledTaskRecord.next_run_at)
+                .where(
+                    ScheduledTaskRecord.enabled == 1,
+                    ScheduledTaskRecord.next_run_at.is_not(None),
+                )
+                .order_by(ScheduledTaskRecord.next_run_at, ScheduledTaskRecord.created_at)
+                .limit(1)
+            )
+            next_run_at = session.scalar(stmt)
+            return self._as_utc(next_run_at)
+
+    def claim_for_run(
+        self,
+        *,
+        task_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> ScheduledTaskRecord | None:
+        with self.database.session() as session:
+            record = session.get(ScheduledTaskRecord, task_id)
+            if record is None or record.enabled != 1:
+                return None
+            next_run_at = self._as_utc(record.next_run_at)
+            lease_expires_at = self._as_utc(record.lease_expires_at)
+            if next_run_at is None or next_run_at > now:
+                return None
+            if lease_expires_at is not None and lease_expires_at > now:
+                return None
+            schedule = dict(record.schedule_json or {})
+            if str(schedule.get("kind") or "") != "once":
+                record.next_run_at = compute_next_run_at(schedule, now=now, last_run_at=now)
+            record.state = "running"
+            record.last_started_at = now
+            record.lease_expires_at = now + timedelta(seconds=max(30, int(lease_seconds)))
+            record.updated_at = now
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def finish_run(
+        self,
+        *,
+        task_id: str,
+        finished_at: datetime,
+        success: bool,
+        error: str | None = None,
+        delivery_error: str | None = None,
+        reply_preview: str | None = None,
+    ) -> ScheduledTaskRecord:
+        with self.database.session() as session:
+            record = session.get(ScheduledTaskRecord, task_id)
+            if record is None:
+                raise KeyError(f"Scheduled task not found: {task_id}")
+            schedule = dict(record.schedule_json or {})
+            kind = str(schedule.get("kind") or "").strip().lower()
+            record.last_run_at = finished_at
+            record.last_status = "ok" if success else "error"
+            record.last_error = error if not success else None
+            record.last_delivery_error = delivery_error
+            record.last_reply_preview = (reply_preview or "").strip() or None
+            record.lease_expires_at = None
+            if success:
+                if kind == "once":
+                    record.enabled = 0
+                    record.state = "completed"
+                    record.next_run_at = None
+                else:
+                    record.state = "scheduled" if record.enabled else "paused"
+            else:
+                if kind == "once":
+                    record.enabled = 0
+                    record.state = "error"
+                    record.next_run_at = None
+                else:
+                    record.state = "scheduled" if record.enabled else "paused"
+            record.updated_at = utc_now()
             session.commit()
             session.refresh(record)
             return record

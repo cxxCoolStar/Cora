@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import StringIO
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from core.cli.main import app
+from core.cli.main import _run_gateway_forever, app
 from core.cli.tui import InteractiveChatShell
 from core.clawbot.schemas import (
     DecisionDebugResponse,
@@ -186,3 +188,60 @@ def test_cli_tui_command_launches_tui_with_options(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [("session-9", False)]
+
+
+def test_run_gateway_forever_runs_poller_and_worker() -> None:
+    calls: list[str] = []
+
+    class _FakePoller:
+        async def run_forever(self) -> None:
+            calls.append("poller")
+
+    class _FakeWorker:
+        async def run_forever(self) -> None:
+            calls.append("worker")
+
+    asyncio.run(_run_gateway_forever(poller=_FakePoller(), worker=_FakeWorker()))
+
+    assert sorted(calls) == ["poller", "worker"]
+
+
+def test_cli_gateway_command_delegates_to_unified_runtime(monkeypatch) -> None:
+    calls: list[tuple[object, str]] = []
+    settings = SimpleNamespace(wechat_enabled=True, wechat_account_name="default")
+
+    monkeypatch.setattr("core.cli.main._configure_logging", lambda: None)
+    monkeypatch.setattr("core.cli.main.CoreSettings", lambda: settings)
+
+    def _fake_run_gateway_command(*, settings, start_message: str) -> None:
+        calls.append((settings, start_message))
+
+    monkeypatch.setattr("core.cli.main._run_gateway_command", _fake_run_gateway_command)
+
+    result = runner.invoke(app, ["gateway"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            settings,
+            "Starting Cora gateway (account={account}, base_url={base_url})",
+        )
+    ]
+
+
+def test_cli_wechat_poll_is_gateway_alias(monkeypatch) -> None:
+    calls: list[str] = []
+    settings = SimpleNamespace(wechat_enabled=True, wechat_account_name="default")
+
+    monkeypatch.setattr("core.cli.main._configure_logging", lambda: None)
+    monkeypatch.setattr("core.cli.main.CoreSettings", lambda: settings)
+
+    def _fake_run_gateway_command(*, settings, start_message: str) -> None:
+        calls.append(start_message)
+
+    monkeypatch.setattr("core.cli.main._run_gateway_command", _fake_run_gateway_command)
+
+    result = runner.invoke(app, ["wechat-poll"])
+
+    assert result.exit_code == 0
+    assert calls == ["Starting wechat gateway runtime (account={account}, base_url={base_url})"]

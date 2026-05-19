@@ -2066,6 +2066,34 @@ def test_build_wechat_runtime_wires_file_delivery_runtime(tmp_path):
     assert gateway._ilink_client is client
     assert container.tool_executor.gateway_service is gateway
     assert container.tool_executor.session_map_repository is not None
+    assert client.config.http_trust_env is False
+
+
+def test_build_wechat_runtime_allows_enabling_env_proxy_for_wechat(tmp_path):
+    class _SpyWechatIlinkClient:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        async def aclose(self) -> None:
+            return None
+
+    container = build_test_container(tmp_path)
+    settings = CoreSettings(
+        clawbot_database_path=tmp_path / "clawbot.db",
+        files_storage_dir=tmp_path / "files",
+        wechat_enabled=True,
+        wechat_token="test-token",
+        wechat_http_trust_env=True,
+    )
+
+    original_client_cls = sys.modules["core.cli.main"].WechatIlinkClient
+    sys.modules["core.cli.main"].WechatIlinkClient = _SpyWechatIlinkClient
+    try:
+        _, client, _, _, _ = _build_wechat_runtime(settings=settings, container=container)
+    finally:
+        sys.modules["core.cli.main"].WechatIlinkClient = original_client_cls
+
+    assert client.config.http_trust_env is True
 
 
 def test_archive_is_exposed_via_skill_run_tooling(tmp_path):
