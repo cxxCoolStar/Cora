@@ -6,6 +6,7 @@ from pathlib import Path
 from core.clawbot import RuntimeToolExecutor
 from core.clawbot.planner import ToolPlan
 from core.tools.registry import ToolInvocation
+from core.tools.session_search_tools import SessionSearchToolStore
 from core.ingestion.service import IngestionService
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
@@ -17,6 +18,87 @@ from core.storage.repositories import (
     SessionSummaryRepository,
     UserSignalRepository,
 )
+
+
+def test_session_search_prefers_phrase_matches_over_scattered_tokens(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    session_repository = SessionRepository(database)
+    session_summary_repository = SessionSummaryRepository(database)
+    message_repository = MessageRepository(database)
+
+    session = session_repository.create()
+    message_repository.add_user_message(
+        session_id=session.id,
+        content="The backup retention period is 30 days and the recovery window is 4 hours.",
+    )
+    message_repository.add_user_message(
+        session_id=session.id,
+        content=(
+            "We discussed backup plans yesterday. Retention numbers changed after the audit. "
+            "Later we reviewed the disaster recovery checklist and the maintenance window."
+        ),
+    )
+
+    store = SessionSearchToolStore(
+        message_repository=message_repository,
+        summary_repository=session_summary_repository,
+    )
+
+    result = store.search(
+        session_id=session.id,
+        query="backup retention period recovery window",
+        limit=2,
+    )
+
+    assert len(result.hits) == 2
+    assert result.hits[0].source == "message"
+    assert "backup retention period is 30 days and the recovery window is 4 hours" in result.hits[0].excerpt.lower()
+    assert "retention numbers changed" in result.hits[1].excerpt.lower()
+
+
+def test_session_search_summary_excerpt_focuses_best_matching_segment(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    session_repository = SessionRepository(database)
+    session_summary_repository = SessionSummaryRepository(database)
+    message_repository = MessageRepository(database)
+
+    session = session_repository.create()
+    session_summary_repository.upsert(
+        session_id=session.id,
+        summary={
+            "version": 1,
+            "covered_message_count": 0,
+            "last_compacted_message_id": None,
+            "summary": {
+                "active_task": "none",
+                "user_facts": ["The user works across APAC and EMEA time zones."],
+                "open_loops": ["Need to follow up on the vendor onboarding checklist."],
+                "resolved_requests": ["Reviewed the Q3 roadmap and captured launch dependencies."],
+                "recent_decisions": ["Keep the migration rollout behind a feature flag this week."],
+                "critical_context": ["The backup retention period is 30 days and the recovery window is 4 hours."],
+            },
+        },
+    )
+
+    store = SessionSearchToolStore(
+        message_repository=message_repository,
+        summary_repository=session_summary_repository,
+    )
+
+    result = store.search(
+        session_id=session.id,
+        query="backup retention period recovery window",
+        limit=1,
+    )
+
+    assert len(result.hits) == 1
+    assert result.hits[0].source == "summary"
+    assert result.hits[0].excerpt == (
+        "Critical context: The backup retention period is 30 days and the recovery window is 4 hours."
+    )
+    assert " | " not in result.hits[0].excerpt
 
 
 def test_runtime_tool_executor_searches_current_and_prior_wechat_sessions(tmp_path: Path) -> None:

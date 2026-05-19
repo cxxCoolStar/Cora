@@ -34,7 +34,7 @@ from core.clawbot import RuntimeToolExecutor  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ItemRepository, MessageRepository, PendingStateRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ItemRepository, MessageRepository, PendingStateRepository, ScheduledTaskRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
@@ -271,8 +271,10 @@ def build_test_container(
     session_summary_repository = SessionSummaryRepository(database)
     message_repository = MessageRepository(database)
     source_event_repository = SourceEventRepository(database)
+    session_map_repository = ChannelSessionMapRepository(database)
     item_repository = ItemRepository(database)
     pending_state_repository = PendingStateRepository(database)
+    scheduled_task_repository = ScheduledTaskRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
     topic_item_repository = TopicItemRepository(database)
@@ -297,6 +299,11 @@ def build_test_container(
         ingestion_service=ingestion_service,
         item_repository=item_repository,
         pending_state_repository=pending_state_repository,
+        message_repository=message_repository,
+        session_summary_repository=session_summary_repository,
+        scheduled_task_repository=scheduled_task_repository,
+        source_event_repository=source_event_repository,
+        session_map_repository=session_map_repository,
     )
     model_client = StubTopicModelClient()
     context_budget_manager = ContextBudgetManager(
@@ -333,6 +340,7 @@ def build_test_container(
         pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
+        scheduled_task_repository=scheduled_task_repository,
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,
         tool_executor=tool_executor,
@@ -2340,7 +2348,7 @@ def test_toolless_delivery_request_forces_tool_enforcement(tmp_path):
     )
 
     assert item is not None
-    assert retry_model.calls == 1
+    assert retry_model.calls >= 2
     assert result.primary_tool is not None
     assert result.primary_tool.tool_name == "skill_run"
     assert result.primary_tool.action == "retrieve"
@@ -2439,6 +2447,68 @@ def test_toolless_file_search_request_forces_native_file_tool(tmp_path):
     assert result.primary_tool.arguments == {"query": "hello_agent", "path": "src"}
     assert "src/example.py:1" in result.reply or "src/example.py:2" in result.reply
     assert result.trace[0]["metadata"]["category"] == "file_search"
+
+
+def test_toolless_session_search_request_forces_search_sessions_tool(tmp_path):
+    class _AlwaysChatModel(ModelClient):
+        def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+            return ModelResponse(assistant_text="Let me think.")
+
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = _AlwaysChatModel()
+
+    previous_session = container.session_repository.create()
+    current_session = container.session_repository.create()
+
+    previous_message = container.message_repository.add_user_message(
+        session_id=previous_session.id,
+        content="Please remember the office VPN profile is named corp-vpn and uses the tokyo gateway.",
+    )
+    container.message_repository.add_assistant_message(
+        session_id=previous_session.id,
+        content="Stored the VPN note for later reference.",
+    )
+    container.session_summary_repository.upsert(
+        session_id=previous_session.id,
+        summary={
+            "version": 1,
+            "covered_message_count": 2,
+            "last_compacted_message_id": previous_message.id,
+            "summary": {
+                "active_task": "none",
+                "user_facts": [],
+                "open_loops": [],
+                "resolved_requests": ["VPN profile corp-vpn uses the tokyo gateway."],
+                "recent_decisions": ["Keep the office VPN settings handy for later recall."],
+                "critical_context": ["The user may ask for the saved VPN config in a later session."],
+            },
+        },
+    )
+
+    session_map_repository = ChannelSessionMapRepository(container.database)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=previous_session.id)
+    session_map_repository.upsert(channel="wechat", external_user_id="wx-user-1", session_id=current_session.id)
+
+    request_text = "What did I tell you before about the VPN profile?"
+    user_message = container.message_repository.add_user_message(session_id=current_session.id, content=request_text)
+    context_snapshot = container.clawbot_service.load_context_snapshot(session_id=current_session.id)
+    result = asyncio.run(
+        container.clawbot_service.run_agent_loop(
+            session_id=current_session.id,
+            source_message_id=user_message.id,
+            user_text=request_text,
+            raw_text=request_text,
+            upload=None,
+            context_snapshot=context_snapshot,
+        )
+    )
+
+    assert result.primary_tool is not None
+    assert result.primary_tool.tool_name == "search_sessions"
+    assert result.primary_tool.action == "retrieve"
+    assert result.primary_tool.arguments == {"query": "VPN profile"}
+    assert "corp-vpn" in result.reply
+    assert result.trace[0]["metadata"]["category"] == "session_search"
 
 
 def test_toolless_file_write_and_read_requests_force_native_file_tools(tmp_path):

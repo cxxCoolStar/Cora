@@ -593,13 +593,19 @@ class RuntimeToolExecutor:
         invocation: ToolInvocation,
         runtime_metadata: dict[str, Any],
     ) -> str | None:
-        if skill_name != "archive-core":
-            return None
-        if "question" in input_payload:
+        del skill_name
+        phrases = runtime_metadata.get("intent_phrases") or {}
+        if not isinstance(phrases, dict):
+            phrases = {}
+
+        def supports(intent_name: str) -> bool:
+            return intent_name in phrases
+
+        if "question" in input_payload and supports("clarify"):
             return "clarify"
-        if "resolution" in input_payload:
+        if "resolution" in input_payload and supports("resolve_pending"):
             return "resolve_pending"
-        if invocation.upload is not None or str(input_payload.get("text") or "").strip():
+        if (invocation.upload is not None or str(input_payload.get("text") or "").strip()) and supports("save"):
             return "save"
         item_id = str(input_payload.get("item_id") or "").strip()
         query = str(input_payload.get("query") or "").strip()
@@ -608,8 +614,7 @@ class RuntimeToolExecutor:
             return "delete"
         if item_id and any(token in lowered_text for token in ("打开", "读取", "看看", "全文", "read", "open", "show")):
             return "read"
-        phrases = runtime_metadata.get("intent_phrases") or {}
-        if isinstance(phrases, dict) and lowered_text:
+        if lowered_text:
             for intent_name, candidates in phrases.items():
                 if not isinstance(candidates, list):
                     continue
@@ -617,7 +622,7 @@ class RuntimeToolExecutor:
                     token = str(candidate or "").strip().lower()
                     if token and token in lowered_text:
                         return intent_name
-        if query:
+        if query and supports("search"):
             return "search"
         return None
 

@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import re
 from typing import Any, Callable
 
 from fastapi import UploadFile
 
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
+from core.agent.turn_policies import (
+    ForcedToolSelection,
+    NativeToolRoute,
+    SkillIntentRoute,
+    ToolReplyPolicy,
+    ToolRoutingPolicy,
+)
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSnapshot
 from core.agent.skill_loader import SkillLoader
@@ -52,12 +58,6 @@ class AgentTurnResult:
         if not self.tool_trace:
             return None
         return self.tool_trace[-1]
-
-
-@dataclass(slots=True)
-class ForcedToolSelection:
-    tool_call: ToolCall
-    category: str
 
 
 @dataclass(slots=True)
@@ -128,6 +128,12 @@ class AgentTurnRunner:
                 history=prepared_turn.history,
             )
         )
+        retry_category = self.tool_retry_category(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
         forced_tool_selection = self.forced_tool_selection(
             user_text=user_text,
             raw_text=raw_text,
@@ -140,13 +146,7 @@ class AgentTurnRunner:
                 session_id=session_id,
                 prepared_turn=prepared_turn,
             )
-        retry_category = self.tool_retry_category(
-            user_text=user_text,
-            raw_text=raw_text,
-            upload=upload,
-            loop_result=loop_result,
-        )
-        if retry_category is not None:
+        elif retry_category is not None:
             retry_instruction = self.tool_retry_instruction(retry_category)
             retry_messages = self.orchestrator.prompt_builder.build_messages(
                 session_id=session_id,
@@ -166,6 +166,19 @@ class AgentTurnRunner:
                 initial_messages=retry_messages,
                 runtime=prepared_turn.runtime,
             )
+            fallback_selection = self.fallback_tool_selection(
+                retry_category=retry_category,
+                user_text=user_text,
+                raw_text=raw_text,
+                upload=upload,
+                loop_result=loop_result,
+            )
+            if fallback_selection is not None:
+                loop_result = await self._forced_tool_loop_result(
+                    selection=fallback_selection,
+                    session_id=session_id,
+                    prepared_turn=prepared_turn,
+                )
         return self.loop_result_to_turn_result(loop_result)
 
     def prepare_turn(
@@ -266,6 +279,9 @@ class AgentTurnRunner:
             artifacts=list(result.artifacts),
         )
 
+    def _tool_routing_policy(self) -> ToolRoutingPolicy:
+        return ToolRoutingPolicy.from_runner(self)
+
     def forced_tool_selection(
         self,
         *,
@@ -274,30 +290,29 @@ class AgentTurnRunner:
         upload: UploadFile | None,
         loop_result: LoopResult,
     ) -> ForcedToolSelection | None:
-        if upload is not None:
-            return None
-        if loop_result.tool_trace or loop_result.exit_reason != "assistant_text":
-            return None
-        text = (raw_text or user_text or "").strip()
-        if not text:
-            return None
-        lowered = text.lower()
-        if self._looks_like_delivery_request(text=text, lowered=lowered):
-            return ForcedToolSelection(
-                tool_call=ToolCall(
-                    tool_name="skill_run",
-                    arguments={
-                        "name": "archive-core",
-                        "script_path": "scripts/archive_dispatch.py",
-                        "input": {"query": text},
-                    },
-                ),
-                category="deliver",
-            )
-        forced_file_selection = self._forced_file_tool_selection(text=text)
-        if forced_file_selection is not None:
-            return forced_file_selection
-        return self._forced_web_tool_selection(text=text, lowered=lowered)
+        return self._tool_routing_policy().forced_tool_selection(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+
+    def fallback_tool_selection(
+        self,
+        *,
+        retry_category: str,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        loop_result: LoopResult,
+    ) -> ForcedToolSelection | None:
+        return self._tool_routing_policy().fallback_tool_selection(
+            retry_category=retry_category,
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
 
     def tool_retry_category(
         self,
@@ -307,55 +322,15 @@ class AgentTurnRunner:
         upload: UploadFile | None,
         loop_result: LoopResult,
     ) -> str | None:
-        if loop_result.tool_trace or loop_result.exit_reason != "assistant_text":
-            return None
-        text = (raw_text or user_text or "").strip()
-        if not text:
-            return None
-        lowered = text.lower()
-        if self._looks_like_delete_request(text=text, lowered=lowered):
-            return "delete"
-        if self._looks_like_user_memory_request(text=text, lowered=lowered):
-            return "user_memory"
-        if self._looks_like_scheduled_task_request(text=text, lowered=lowered):
-            return "scheduled_task"
-        if upload is not None and self.media_kind_resolver(upload) == "image":
-            return "save_file"
-        return None
-
-    @staticmethod
-    def tool_retry_instruction(category: str) -> str:
-        if category == "deliver":
-            return (
-                "Tool-use correction: the user is asking for a previously saved photo or file to be sent back over the current channel. "
-                "Do not claim file delivery is unsupported. Inspect the relevant skill with skill_view if needed, then use the appropriate tool workflow. "
-                "If the target is ambiguous, let the tool-backed workflow return a clarification instead of answering from chat."
-            )
-        if category == "delete":
-            return (
-                "Tool-use correction: the user is asking to delete saved content. "
-                "Do not answer with plain chat. Inspect the relevant skill if needed and use the proper tool-backed delete workflow."
-            )
-        if category == "user_memory":
-            return (
-                "Tool-use correction: the user is asking to remember, inspect, update, or forget durable personal information. "
-                "Use the user_memory tool instead of replying from chat."
-            )
-        if category == "scheduled_task":
-            return (
-                "Tool-use correction: the user is asking for a reminder, alarm, follow-up, or scheduled task. "
-                "Do not answer from plain chat. Use the scheduled_tasks tool to create, inspect, update, or manage the reminder, "
-                "and keep the scheduled time from the tool-backed result."
-            )
-        if category == "save_file":
-            return (
-                "Tool-use correction: the user uploaded a file or image that should be handled through a tool-backed workflow. "
-                "Inspect the relevant skill if needed and use the proper save workflow."
-            )
-        return (
-            "Tool-use correction: this request should be handled with tools instead of plain chat. "
-            "Use the relevant skill workflow and tool support before answering."
+        return self._tool_routing_policy().tool_retry_category(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
         )
+
+    def tool_retry_instruction(self, category: str) -> str:
+        return self._tool_routing_policy().tool_retry_instruction(category)
 
     def loop_result_to_turn_result(self, result: LoopResult) -> AgentTurnResult:
         runtime_context = self.runtime_manager.runtime_to_context(result.runtime)
@@ -412,185 +387,122 @@ class AgentTurnRunner:
 
     @staticmethod
     def select_final_agent_reply(*, last_execution: ToolExecutionTrace, assistant_text: str | None) -> str:
-        final_reply = (assistant_text or "").strip()
-        if not final_reply:
-            return last_execution.content
-        if AgentTurnRunner._should_prefer_tool_reply(last_execution=last_execution):
-            return last_execution.content
-        tool_name = last_execution.tool_name
-        tool_arguments = last_execution.arguments
-        if tool_name == "skill_run":
-            skill_input = tool_arguments.get("input") or {}
-            if str(skill_input.get("intent") or "").strip() == "deliver" and last_execution.action != "retrieve":
-                return last_execution.content
-        return final_reply
+        return ToolReplyPolicy.select_final_agent_reply(
+            last_execution=last_execution,
+            assistant_text=assistant_text,
+        )
 
     @staticmethod
     def _should_prefer_tool_reply(*, last_execution: ToolExecutionTrace) -> bool:
-        if last_execution.tool_name == "scheduled_tasks":
-            return bool((last_execution.content or "").strip())
-        if last_execution.tool_name != "skill_run":
-            return False
-        metadata = last_execution.metadata
-        if str(metadata.get("skill_name") or "").strip() != "archive-core":
-            return False
-        content = (last_execution.content or "").strip()
-        if not content:
-            return False
-        # When archive-core already returned a concrete "not found" retrieval result,
-        # keep that tool-authored reply instead of letting the model embellish it.
-        if "没有找到" in content and not last_execution.artifacts:
-            return True
-        return False
+        return ToolReplyPolicy._should_prefer_tool_reply(last_execution=last_execution)
 
+    @classmethod
+    def _natural_tool_reply(cls, *, last_execution: ToolExecutionTrace) -> str | None:
+        return ToolReplyPolicy._natural_tool_reply(last_execution=last_execution)
+
+    @staticmethod
+    def _session_search_hit_snippet(hit: dict[str, Any]) -> str:
+        return ToolReplyPolicy._session_search_hit_snippet(hit)
+
+    def _forced_skill_selection_for_intent(
+        self,
+        *,
+        intent: str,
+        query: str,
+        category: str,
+    ) -> ForcedToolSelection | None:
+        return self._tool_routing_policy()._forced_skill_selection_for_intent(
+            intent=intent,
+            query=query,
+            category=category,
+        )
+    def _available_tool_names(self) -> set[str]:
+        policy = self._tool_routing_policy()
+        return policy.tool_names_provider() if policy.tool_names_provider is not None else set()
+    def _tool_is_available(self, tool_name: str) -> bool:
+        return self._tool_routing_policy()._tool_is_available(tool_name)
+    def _native_tool_routes(self) -> list[NativeToolRoute]:
+        return self._tool_routing_policy()._native_tool_routes()
+    def _matching_native_tool_route(
+        self,
+        *,
+        text: str,
+        lowered: str,
+    ) -> NativeToolRoute | None:
+        return self._tool_routing_policy()._matching_native_tool_route(
+            text=text,
+            lowered=lowered,
+        )
+    def _native_tool_route_for_category(self, category: str) -> NativeToolRoute | None:
+        return self._tool_routing_policy()._native_tool_route_for_category(category)
+    def _forced_native_tool_selection_for_category(
+        self,
+        *,
+        category: str,
+        text: str,
+    ) -> ForcedToolSelection | None:
+        return self._tool_routing_policy()._forced_native_tool_selection_for_category(
+            category=category,
+            text=text,
+        )
+    def _skill_intent_routes(self) -> list[SkillIntentRoute]:
+        return self._tool_routing_policy()._skill_intent_routes()
+    def _find_skill_intent_route(self, *, intent: str) -> SkillIntentRoute | None:
+        return self._tool_routing_policy()._find_skill_intent_route(intent=intent)
+    def _matches_skill_intent_for_text(
+        self,
+        *,
+        text: str,
+        lowered: str,
+        intent: str,
+    ) -> bool:
+        return self._tool_routing_policy()._matches_skill_intent_for_text(
+            text=text,
+            lowered=lowered,
+            intent=intent,
+        )
     @staticmethod
     def _looks_like_delivery_request(*, text: str, lowered: str) -> bool:
-        delivery_verbs = ("发我", "发给我", "发送", "传给我", "回传", "转发", "send me", "send back", "deliver")
-        file_nouns = ("照片", "图片", "原图", "文件", "附件", "pdf", "jpg", "jpeg", "png", "文档", "file", "photo", "image")
-        return any(token in text for token in delivery_verbs) and any(token in lowered for token in file_nouns)
-
+        return ToolRoutingPolicy._looks_like_delivery_request(text=text, lowered=lowered)
     @staticmethod
     def _looks_like_delete_request(*, text: str, lowered: str) -> bool:
-        delete_verbs = ("删除", "删掉", "移除", "清掉", "remove", "delete")
-        target_nouns = ("资料", "文件", "图片", "照片", "附件", "第", "序号", "item", "file", "photo", "image")
-        return any(token in text for token in delete_verbs) and any(token in text or token in lowered for token in target_nouns)
-
+        return ToolRoutingPolicy._looks_like_delete_request(text=text, lowered=lowered)
     @staticmethod
     def _looks_like_user_memory_request(*, text: str, lowered: str) -> bool:
-        memory_markers = (
-            "记住", "记一下", "记下来", "忘记", "删掉这条记忆", "删除记忆", "查看记忆", "个人记忆",
-            "remember this", "forget this", "show my memory", "user memory",
-        )
-        return any(token in text or token in lowered for token in memory_markers)
-
+        return ToolRoutingPolicy._looks_like_user_memory_request(text=text, lowered=lowered)
     @staticmethod
     def _looks_like_scheduled_task_request(*, text: str, lowered: str) -> bool:
-        reminder_markers = (
-            "提醒我", "提醒一下", "提醒下", "叫我", "闹钟", "定时", "到时候叫我", "到点叫我",
-            "remind me", "set a reminder", "set reminder", "set an alarm", "alarm me", "ping me",
-        )
-        time_markers = (
-            "分钟后", "小时后", "天后", "待会", "一会", "稍后", "今晚", "明天", "后天", "早上", "上午", "中午", "下午", "晚上",
-            "每天", "每周", "每月", "周一", "周二", "周三", "周四", "周五", "周六", "周日", "星期", "点", "号",
-            " later", " tomorrow", " tonight", " next ", " every ", " daily", " weekly", " monthly", " at ", " in ",
-            "am", "pm",
-        )
-        if not any(token in text or token in lowered for token in reminder_markers):
-            return False
-        if any(token in text or token in lowered for token in time_markers):
-            return True
-        return bool(re.search(r"\b\d+\s*(?:m|min|mins|minute|minutes|h|hr|hour|hours|day|days)\b", lowered))
-
+        return ToolRoutingPolicy._looks_like_scheduled_task_request(text=text, lowered=lowered)
+    @staticmethod
+    def _looks_like_session_search_request(*, text: str, lowered: str) -> bool:
+        return ToolRoutingPolicy._looks_like_session_search_request(text=text, lowered=lowered)
+    @classmethod
+    def _search_sessions_fallback_arguments(cls, text: str) -> dict[str, Any] | None:
+        return ToolRoutingPolicy._search_sessions_fallback_arguments(text)
+    @classmethod
+    def _refined_session_search_query(cls, text: str) -> str:
+        return ToolRoutingPolicy._refined_session_search_query(text)
+    @staticmethod
+    def _cleanup_session_search_candidate(text: str) -> str:
+        return ToolRoutingPolicy._cleanup_session_search_candidate(text)
+    @classmethod
+    def _keyword_focused_session_search_query(cls, text: str) -> str:
+        return ToolRoutingPolicy._keyword_focused_session_search_query(text)
     @classmethod
     def _forced_file_tool_selection(cls, *, text: str) -> ForcedToolSelection | None:
-        search_match = re.match(
-            r"(?is)^\s*(?:please\s+)?(?:find|search(?:\s+for)?|look\s+for|locate|grep|查找|搜索|找一下)\s+`(?P<query>[^`]+)`(?:\s+(?:in|under|within|在)\s+`(?P<path>[^`]+)`)?\s*[.?!。？！]?\s*$",
-            text,
-        )
-        if search_match:
-            query = search_match.group("query").strip()
-            path = (search_match.group("path") or ".").strip() or "."
-            if query:
-                return ForcedToolSelection(
-                    tool_call=ToolCall(
-                        tool_name="search_files",
-                        arguments={"query": query, "path": path},
-                    ),
-                    category="file_search",
-                )
-
-        read_match = re.match(
-            r"(?is)^\s*(?:please\s+)?(?:read|show|open|cat|display|读取|读一下|查看|打开)\s+(?:the\s+file\s+)?`(?P<path>[^`]+)`\s*[.?!。？！]?\s*$",
-            text,
-        )
-        if read_match:
-            path = read_match.group("path").strip()
-            if path:
-                return ForcedToolSelection(
-                    tool_call=ToolCall(
-                        tool_name="read_file",
-                        arguments={"path": path},
-                    ),
-                    category="file_read",
-                )
-
-        write_match = re.match(
-            r"(?is)^\s*(?:please\s+)?(?P<mode>write|append|写入|写到|追加)\s+`(?P<content>[^`]+)`\s+(?:to|into|in|写到|追加到)\s+`(?P<path>[^`]+)`\s*[.?!。？！]?\s*$",
-            text,
-        )
-        if write_match:
-            path = write_match.group("path").strip()
-            content = cls._normalized_forced_write_content(write_match.group("content"))
-            append_mode = write_match.group("mode").strip().lower() in {"append", "追加"}
-            if path and content:
-                arguments = {"path": path, "content": content}
-                if append_mode:
-                    arguments["append"] = True
-                return ForcedToolSelection(
-                    tool_call=ToolCall(
-                        tool_name="write_file",
-                        arguments=arguments,
-                    ),
-                    category="file_write",
-                )
-
-        return None
-
+        return ToolRoutingPolicy._forced_file_tool_selection(text=text)
     @staticmethod
     def _normalized_forced_write_content(content: str) -> str:
-        normalized = content.replace("\r\n", "\n")
-        if not normalized.endswith("\n"):
-            normalized += "\n"
-        return normalized
-
+        return ToolRoutingPolicy._normalized_forced_write_content(content)
     @classmethod
     def _forced_web_tool_selection(cls, *, text: str, lowered: str) -> ForcedToolSelection | None:
-        url_match = re.search(r"https?://[^\s`<>\"')\]]+", text, flags=re.IGNORECASE)
-        if url_match:
-            url = url_match.group(0).rstrip(".,!?;:")
-            return ForcedToolSelection(
-                tool_call=ToolCall(
-                    tool_name="web_fetch",
-                    arguments={"url": url},
-                ),
-                category="web_fetch",
-            )
-        if not cls._looks_like_current_info_request(text=text, lowered=lowered):
-            return None
-        query = cls._normalized_web_search_query(text)
-        if not query:
-            return None
-        return ForcedToolSelection(
-            tool_call=ToolCall(
-                tool_name="web_search",
-                arguments={"query": query},
-            ),
-            category="web_search",
-        )
-
+        return ToolRoutingPolicy._forced_web_tool_selection(text=text, lowered=lowered)
     @staticmethod
     def _looks_like_current_info_request(*, text: str, lowered: str) -> bool:
-        local_file_markers = (
-            ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".json", ".yaml", ".yml", ".toml", ".txt",
-            "src/", "tests/", "docs/", "scripts/", "core/",
-        )
-        if any(marker in lowered for marker in local_file_markers):
-            return False
-        current_markers = ("latest", "recent", "current", "today", "news", "what's new", "最近", "最新", "近期", "今天")
-        search_markers = ("search", "look up", "find out", "check", "查", "搜", "搜索", "查一下", "搜一下", "查查")
-        source_markers = ("source", "sources", "link", "links", "url", "urls", "来源", "链接", "网址")
-        has_current = any(marker in lowered or marker in text for marker in current_markers)
-        has_search = any(marker in lowered or marker in text for marker in search_markers)
-        has_sources = any(marker in lowered or marker in text for marker in source_markers)
-        return has_current and (has_search or has_sources)
-
+        return ToolRoutingPolicy._looks_like_current_info_request(text=text, lowered=lowered)
     @staticmethod
     def _normalized_web_search_query(text: str) -> str:
-        normalized = " ".join(str(text or "").split())
-        normalized = re.sub(r"(?is)^(please|could you|can you|would you|help me)\s+", "", normalized)
-        normalized = re.sub(r"(?is)^(请|帮我|麻烦你)\s*", "", normalized)
-        return normalized.strip()
-
+        return ToolRoutingPolicy._normalized_web_search_query(text)
     @staticmethod
     def _sanitize_json(value: Any) -> Any:
         if isinstance(value, dict):

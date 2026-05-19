@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Any
 
 from core.storage.repositories import ChannelSessionMapRepository, MessageRepository, SessionSummaryRepository
@@ -13,6 +14,8 @@ MAX_QUERY_CHARS = 400
 MAX_SESSIONS_TO_SCAN = 12
 MAX_MESSAGES_PER_SESSION = 40
 MAX_EXCERPT_CHARS = 240
+MAX_PHRASE_TOKENS = 5
+SUMMARY_SEGMENT_SEPARATOR = " | "
 
 
 @dataclass(slots=True)
@@ -134,7 +137,8 @@ class SessionSearchToolStore:
                 continue
             summary_payload = dict(record.summary_json or {})
             structured = summary_payload.get("summary") if isinstance(summary_payload.get("summary"), dict) else {}
-            haystack = self._summary_haystack(structured)
+            segments = self._summary_segments(structured)
+            haystack = self._summary_haystack(segments)
             score = self._score(query=query, text=haystack)
             if score <= 0:
                 continue
@@ -142,7 +146,7 @@ class SessionSearchToolStore:
                 SessionSearchHit(
                     session_id=session_id,
                     source="summary",
-                    excerpt=self._clip_text(haystack),
+                    excerpt=self._summary_excerpt(query=query, segments=segments, haystack=haystack),
                     score=score + 20,
                     created_at=getattr(record, "updated_at", None),
                 )
@@ -173,7 +177,7 @@ class SessionSearchToolStore:
         return hits
 
     @staticmethod
-    def _summary_haystack(summary: dict[str, Any]) -> str:
+    def _summary_segments(summary: dict[str, Any]) -> list[str]:
         parts: list[str] = []
         active_task = str(summary.get("active_task") or "").strip()
         if active_task and active_task.lower() != "none":
@@ -192,7 +196,24 @@ class SessionSearchToolStore:
                 text = str(value or "").strip()
                 if text:
                     parts.append(f"{label}: {text}")
-        return " | ".join(parts)
+        return parts
+
+    @staticmethod
+    def _summary_haystack(segments: list[str]) -> str:
+        return SUMMARY_SEGMENT_SEPARATOR.join(segments)
+
+    @classmethod
+    def _summary_excerpt(cls, *, query: str, segments: list[str], haystack: str) -> str:
+        best_segment = ""
+        best_score = 0
+        for segment in segments:
+            segment_score = cls._score(query=query, text=segment)
+            if segment_score > best_score:
+                best_score = segment_score
+                best_segment = segment
+        if best_segment and best_score > 0:
+            return cls._excerpt_for_query(text=best_segment, query=query)
+        return cls._clip_text(haystack)
 
     @staticmethod
     def _score(*, query: str, text: str) -> int:
@@ -207,10 +228,117 @@ class SessionSearchToolStore:
             score += len(compact_query) ** 2 + 25
         if lowered_query in haystack:
             score += len(lowered_query) ** 2 + 10
-        for token in [part for part in lowered_query.split() if part]:
+        query_tokens = SessionSearchToolStore._query_tokens(lowered_query)
+        score += SessionSearchToolStore._phrase_match_bonus(
+            query_tokens=query_tokens,
+            haystack=haystack,
+        )
+        for token in query_tokens:
             if token in haystack:
                 score += len(token) ** 2
         return score
+
+    @staticmethod
+    def _query_tokens(query: str) -> list[str]:
+        lowered_query = SessionSearchToolStore._normalize_text(query).lower()
+        if not lowered_query:
+            return []
+        alnum_tokens = re.findall(r"[a-z0-9]+(?:[-.][a-z0-9]+)*", lowered_query)
+        if alnum_tokens:
+            return alnum_tokens
+        return [part for part in lowered_query.split() if part]
+
+    @staticmethod
+    def _query_phrases(query_tokens: list[str]) -> list[str]:
+        phrases: list[str] = []
+        seen_phrases: set[str] = set()
+        max_tokens = min(MAX_PHRASE_TOKENS, len(query_tokens))
+        for length in range(max_tokens, 1, -1):
+            for index in range(0, len(query_tokens) - length + 1):
+                phrase = " ".join(query_tokens[index : index + length])
+                if phrase in seen_phrases:
+                    continue
+                seen_phrases.add(phrase)
+                phrases.append(phrase)
+        return phrases
+
+    @staticmethod
+    def _phrase_match_bonus(*, query_tokens: list[str], haystack: str) -> int:
+        if len(query_tokens) < 2:
+            return 0
+        bonus = 0
+        index = 0
+        while index < len(query_tokens) - 1:
+            max_length = min(MAX_PHRASE_TOKENS, len(query_tokens) - index)
+            matched_length = 0
+            for length in range(max_length, 1, -1):
+                phrase = " ".join(query_tokens[index : index + length])
+                if phrase in haystack:
+                    compact_phrase = phrase.replace(" ", "")
+                    bonus += len(compact_phrase) ** 2 + length * 12
+                    matched_length = length
+                    break
+            if matched_length:
+                index += matched_length
+            else:
+                index += 1
+        return bonus
+
+    @classmethod
+    def _excerpt_for_query(cls, *, text: str, query: str) -> str:
+        compact = cls._normalize_text(text)
+        if len(compact) <= MAX_EXCERPT_CHARS:
+            return compact
+        span = cls._query_match_span(text=compact, query=query)
+        if span is None:
+            return cls._clip_text(compact)
+        match_start, match_end = span
+        body_budget = MAX_EXCERPT_CHARS - 6
+        if body_budget <= 0:
+            return cls._clip_text(compact)
+        match_center = match_start + ((match_end - match_start) // 2)
+        start = max(0, match_center - (body_budget // 2))
+        end = min(len(compact), start + body_budget)
+        if end - start < body_budget:
+            start = max(0, end - body_budget)
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(compact) else ""
+        body_budget = MAX_EXCERPT_CHARS - len(prefix) - len(suffix)
+        if body_budget <= 0:
+            return cls._clip_text(compact)
+        if end - start > body_budget:
+            if match_end - match_start >= body_budget:
+                start = match_start
+            else:
+                start = max(0, min(start, match_start - max(0, (body_budget - (match_end - match_start)) // 2)))
+            end = min(len(compact), start + body_budget)
+            if match_end > end:
+                end = min(len(compact), match_end)
+                start = max(0, end - body_budget)
+            prefix = "..." if start > 0 else ""
+            suffix = "..." if end < len(compact) else ""
+        body = compact[start:end].strip()
+        return f"{prefix}{body}{suffix}"
+
+    @classmethod
+    def _query_match_span(cls, *, text: str, query: str) -> tuple[int, int] | None:
+        lowered_text = cls._normalize_text(text).lower()
+        lowered_query = cls._normalize_text(query).lower()
+        if not lowered_text or not lowered_query:
+            return None
+        query_tokens = cls._query_tokens(lowered_query)
+        for phrase in cls._query_phrases(query_tokens):
+            index = lowered_text.find(phrase)
+            if index >= 0:
+                return (index, index + len(phrase))
+        full_index = lowered_text.find(lowered_query)
+        if full_index >= 0:
+            return (full_index, full_index + len(lowered_query))
+        for token in query_tokens:
+            index = lowered_text.find(token)
+            if index >= 0:
+                return (index, index + len(token))
+        return None
 
     @staticmethod
     def _normalize_text(value: str) -> str:
