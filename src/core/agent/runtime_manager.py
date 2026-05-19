@@ -23,6 +23,8 @@ class AgentRuntimeManager:
         pending_record = self.pending_state_repository.get_latest_pending(session_id=session_id)
         return ConversationRuntimeState(
             session_id=session_id,
+            session_kind=str(context_snapshot.session_kind or "conversation").strip() or "conversation",
+            session_metadata=dict(context_snapshot.session_metadata or {}),
             current_source_event_id=context_snapshot.current_source_event_id,
             recent_events=list(context_snapshot.recent_events),
             pending_state=self._runtime_pending_state(pending_record) or context_snapshot.pending_state,
@@ -38,6 +40,9 @@ class AgentRuntimeManager:
     @staticmethod
     def runtime_to_context(runtime: ConversationRuntimeState) -> dict[str, Any]:
         context = {
+            "session_kind": runtime.session_kind,
+            "session_metadata": dict(runtime.session_metadata),
+            "background_execution": runtime.is_background_execution,
             "recent_events": [AgentRuntimeManager._context_event_snapshot(event) for event in runtime.recent_events],
             "last_action": runtime.last_action,
             "skill_state": dict(runtime.skill_state),
@@ -50,6 +55,8 @@ class AgentRuntimeManager:
     @staticmethod
     def snapshot_from_runtime(runtime: ConversationRuntimeState) -> RuntimeContextSnapshot:
         return RuntimeContextSnapshot(
+            session_kind=runtime.session_kind,
+            session_metadata=dict(runtime.session_metadata),
             current_source_event_id=runtime.current_source_event_id,
             recent_events=list(runtime.recent_events),
             pending_state=runtime.pending_state,
@@ -64,6 +71,8 @@ class AgentRuntimeManager:
         state_delta: RuntimeStateDelta,
     ) -> RuntimeContextSnapshot:
         return RuntimeContextSnapshot(
+            session_kind=snapshot.session_kind,
+            session_metadata=dict(snapshot.session_metadata),
             current_source_event_id=state_delta.current_source_event_id or snapshot.current_source_event_id,
             recent_events=list(snapshot.recent_events),
             pending_state=(

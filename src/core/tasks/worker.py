@@ -137,12 +137,20 @@ class ScheduledTaskWorker:
         error: str | None = None
         delivery_error: str | None = None
         reply_preview = ""
+        execution_session_id: str | None = None
+        execution_mode = "agent_prompt"
         try:
             execution = ScheduledTaskExecution.from_metadata(
                 prompt_text=task.prompt_text,
                 metadata=dict(getattr(task, "metadata_json", {}) or {}),
             )
-            status, reply_text = await self._execute_task(task=task, execution=execution)
+            execution_mode = execution.mode
+            execution_session_id = self._create_execution_session_id(task=task, execution=execution)
+            status, reply_text = await self._execute_task(
+                task=task,
+                execution=execution,
+                execution_session_id=execution_session_id,
+            )
             reply_text = (reply_text or "").strip()
             if reply_text == self.silent_reply_token:
                 reply_text = ""
@@ -162,43 +170,102 @@ class ScheduledTaskWorker:
             error = str(exc)
             logger.exception("scheduled task run failed id=%s", task.id)
         finally:
+            finished_at = datetime.now(UTC)
             self.repository.finish_run(
                 task_id=task.id,
-                finished_at=datetime.now(UTC),
+                finished_at=finished_at,
                 success=success,
                 error=error,
                 delivery_error=delivery_error,
                 reply_preview=reply_preview,
+                run_metadata={
+                    "origin_session_id": str(task.session_id or "").strip() or None,
+                    "execution_session_id": execution_session_id,
+                    "execution_mode": execution_mode,
+                    "finished_at": finished_at.isoformat(),
+                    "success": success,
+                    "delivery_error": delivery_error,
+                    "error": error,
+                },
             )
             logger.info(
-                "scheduled task run done id=%s success=%s delivery_error=%s error=%s",
+                "scheduled task run done id=%s execution_session_id=%s success=%s delivery_error=%s error=%s",
                 task.id,
+                execution_session_id or "",
                 success,
                 bool(delivery_error),
                 error or "",
             )
 
-    async def _execute_task(self, *, task: Any, execution: ScheduledTaskExecution) -> tuple[str, str]:
-        if execution.mode == "skill":
-            return await self._execute_skill_task(task=task, execution=execution)
-        if execution.mode == "script":
-            return await self._execute_script_task(task=task, execution=execution)
-        return await self._execute_agent_prompt_task(task=task, execution=execution)
+    def _create_execution_session_id(self, *, task: Any, execution: ScheduledTaskExecution) -> str:
+        session = self.clawbot_service.create_job_execution_session(
+            origin_session_id=str(task.session_id or "").strip(),
+            scheduled_task_id=str(task.id or "").strip(),
+            task_name=str(task.name or "").strip() or "scheduled task",
+            execution_mode=execution.mode,
+            owner_external_user_id=str(task.owner_external_user_id or "").strip() or None,
+        )
+        return str(session.id)
 
-    async def _execute_agent_prompt_task(self, *, task: Any, execution: ScheduledTaskExecution) -> tuple[str, str]:
+    async def _execute_task(
+        self,
+        *,
+        task: Any,
+        execution: ScheduledTaskExecution,
+        execution_session_id: str,
+    ) -> tuple[str, str]:
+        if execution.mode == "skill":
+            return await self._execute_skill_task(
+                task=task,
+                execution=execution,
+                execution_session_id=execution_session_id,
+            )
+        if execution.mode == "script":
+            return await self._execute_script_task(
+                task=task,
+                execution=execution,
+                execution_session_id=execution_session_id,
+            )
+        return await self._execute_agent_prompt_task(
+            task=task,
+            execution=execution,
+            execution_session_id=execution_session_id,
+        )
+
+    async def _execute_agent_prompt_task(
+        self,
+        *,
+        task: Any,
+        execution: ScheduledTaskExecution,
+        execution_session_id: str,
+    ) -> tuple[str, str]:
         prompt_text = self._compose_prompt_text(task=task, execution=execution)
         outcome = await self.clawbot_service.reply_outcome(
-            session_id=task.session_id,
+            session_id=execution_session_id,
             text=prompt_text,
-            source_metadata=self._source_metadata(task=task, execution=execution),
+            source_metadata=self._source_metadata(
+                task=task,
+                execution=execution,
+                execution_session_id=execution_session_id,
+            ),
         )
         return outcome.status, outcome.reply
 
-    async def _execute_skill_task(self, *, task: Any, execution: ScheduledTaskExecution) -> tuple[str, str]:
+    async def _execute_skill_task(
+        self,
+        *,
+        task: Any,
+        execution: ScheduledTaskExecution,
+        execution_session_id: str,
+    ) -> tuple[str, str]:
         outcome = await self.clawbot_service.execute_tool_plan_outcome(
-            session_id=task.session_id,
+            session_id=execution_session_id,
             text=str(task.prompt_text or "").strip() or f"[scheduled skill task: {task.name}]",
-            source_metadata=self._source_metadata(task=task, execution=execution),
+            source_metadata=self._source_metadata(
+                task=task,
+                execution=execution,
+                execution_session_id=execution_session_id,
+            ),
             plan=ToolPlan(
                 tool="skill_run",
                 arguments={
@@ -212,7 +279,13 @@ class ScheduledTaskWorker:
         )
         return outcome.status, outcome.reply
 
-    async def _execute_script_task(self, *, task: Any, execution: ScheduledTaskExecution) -> tuple[str, str]:
+    async def _execute_script_task(
+        self,
+        *,
+        task: Any,
+        execution: ScheduledTaskExecution,
+        execution_session_id: str,
+    ) -> tuple[str, str]:
         runner = ScheduledTaskScriptRunner(
             script_root=Path(getattr(self.clawbot_service, "file_tool_root", Path("."))),
         )
@@ -220,12 +293,16 @@ class ScheduledTaskWorker:
             runner.run,
             script_path=str(execution.script_path or ""),
             input_payload={
-                "session_id": task.session_id,
+                "session_id": execution_session_id,
+                "origin_session_id": str(task.session_id or "").strip() or None,
+                "execution_session_id": execution_session_id,
                 "task": {
                     "id": task.id,
                     "name": task.name,
                     "prompt": task.prompt_text,
                     "owner_external_user_id": task.owner_external_user_id,
+                    "origin_session_id": str(task.session_id or "").strip() or None,
+                    "execution_session_id": execution_session_id,
                 },
                 "arguments": dict(execution.input_payload),
             },
@@ -256,11 +333,20 @@ class ScheduledTaskWorker:
         return combined or prompt_text
 
     @staticmethod
-    def _source_metadata(*, task: Any, execution: ScheduledTaskExecution) -> dict[str, Any]:
+    def _source_metadata(
+        *,
+        task: Any,
+        execution: ScheduledTaskExecution,
+        execution_session_id: str,
+    ) -> dict[str, Any]:
         return {
             "channel": "scheduled_task",
             "event_type": "scheduled_task",
+            "external_user_id": str(task.owner_external_user_id or "").strip() or None,
             "scheduled_task_id": task.id,
             "scheduled_task_name": task.name,
             "scheduled_task_execution_mode": execution.mode,
+            "scheduled_task_origin_session_id": str(task.session_id or "").strip() or None,
+            "scheduled_task_execution_session_id": execution_session_id,
+            "session_kind": "job_execution",
         }

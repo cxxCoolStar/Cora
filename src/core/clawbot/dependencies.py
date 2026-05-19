@@ -136,6 +136,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         item_repository=item_repository,
         pending_state_repository=pending_state_repository,
         message_repository=message_repository,
+        session_repository=session_repository,
         session_summary_repository=session_summary_repository,
         scheduled_task_repository=scheduled_task_repository,
         source_event_repository=source_event_repository,

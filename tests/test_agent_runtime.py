@@ -10,14 +10,17 @@ from fastapi import UploadFile
 
 from core.agent.context_budget import ContextBudgetManager
 from core.agent.context_manager import SessionContextManager
-from core.agent.loop import AgentLoop
+from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, RuntimeContextSnapshot, RuntimeStateDelta
+from core.agent.skill_protocol import PendingRequest, PendingStateDelta, SkillExecutionResult
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillLoader
+from core.agent.turn_runner import AgentTurnRunner
 from core.clawbot import RuntimeToolExecutor
+from core.clawbot.planner import ToolPlan
 from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import ToolExecutionResult
 from core.ingestion.service import IngestionService
@@ -27,15 +30,18 @@ from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
 from core.storage.db import DatabaseManager
 from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, UserSignalRepository
+from core.tools import ToolInvocation
 
 
 class StubModelClient(ModelClient):
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
         self.calls: list[list[Message]] = []
+        self.tools_seen: list[list[str]] = []
 
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         self.calls.append(list(messages))
+        self.tools_seen.append([tool.name for tool in tools])
         if not self._responses:
             raise AssertionError("No stub responses left")
         return self._responses.pop(0)
@@ -62,6 +68,20 @@ class StubMessageRepository:
 
     def get_latest_assistant_context(self, *, session_id: str) -> dict:
         return dict(self.context)
+
+
+@dataclass
+class StubSessionRecord:
+    session_kind: str = "conversation"
+    metadata_json: dict[str, Any] | None = None
+
+
+@dataclass
+class StubSessionRepository:
+    session: StubSessionRecord
+
+    def get(self, session_id: str) -> StubSessionRecord:
+        return self.session
 
 
 @dataclass
@@ -208,6 +228,27 @@ def test_prompt_builder_includes_wechat_platform_hint_when_delivery_available() 
     assert "Platform hints:" in messages[0].content
     assert "You are on WeChat." in messages[0].content
     assert "Do not tell the user that file sending is impossible" in messages[0].content
+
+
+def test_prompt_builder_includes_background_execution_policy_for_job_sessions() -> None:
+    runtime = ConversationRuntimeState(
+        session_id="job-session-1",
+        session_kind="job_execution",
+        session_metadata={"scheduled_task_id": "task-1"},
+    )
+    builder = AgentPromptBuilder()
+
+    messages = builder.build_messages(
+        session_id="job-session-1",
+        user_text="Check the latest build status.",
+        runtime=runtime,
+        skills=[],
+        history=[],
+    )
+
+    assert "Background execution policy:" in messages[0].content
+    assert "This turn is a background scheduled execution" in messages[0].content
+    assert "reply exactly with `[SILENT]`" in messages[0].content
 
 
 def test_prompt_builder_includes_user_memory_when_present(tmp_path: Path) -> None:
@@ -367,6 +408,35 @@ async def test_orchestrator_builds_messages_and_runs_loop() -> None:
     assert "archive-core" in first_call_messages[0].content
 
 
+@pytest.mark.anyio
+async def test_orchestrator_passes_per_turn_tool_specs_to_loop() -> None:
+    runtime = ConversationRuntimeState(session_id="session-2", session_kind="job_execution")
+    model = StubModelClient(responses=[ModelResponse(assistant_text="Ready.", tool_calls=[])])
+    executor = StubExecutor(results=[])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="scheduled_tasks", description="automation", input_schema={})],
+    )
+    orchestrator = AgentOrchestrator(
+        loop=loop,
+        prompt_builder=AgentPromptBuilder(),
+        skill_loader=SkillLoader(skill_roots=[Path(__file__).resolve().parents[1] / "skills"]),
+    )
+
+    result = await orchestrator.handle_turn(
+        OrchestratorInput(
+            session_id="session-2",
+            user_text="hello",
+            runtime=runtime,
+            tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+        )
+    )
+
+    assert result.final_response == "Ready."
+    assert model.tools_seen == [["read_file"]]
+
+
 def test_session_runtime_snapshot_loader_builds_context_from_history_and_events() -> None:
     source_events = StubSourceEventRepository(
         events=[
@@ -389,10 +459,18 @@ def test_session_runtime_snapshot_loader_builds_context_from_history_and_events(
             }
         ),
         source_event_repository=source_events,
+        session_repository=StubSessionRepository(
+            session=StubSessionRecord(
+                session_kind="job_execution",
+                metadata_json={"scheduled_task_id": "task-1"},
+            )
+        ),
     )
 
     snapshot = loader.load_context_snapshot(session_id="session-1")
 
+    assert snapshot.session_kind == "job_execution"
+    assert snapshot.session_metadata["scheduled_task_id"] == "task-1"
     assert snapshot.current_source_event_id == "evt-1"
     assert snapshot.last_action == "retrieve"
     assert len(snapshot.recent_events) == 1
@@ -479,6 +557,136 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
     next_runtime = result.metadata["runtime_state"]
     assert next_runtime.last_action == "capture"
     assert next_runtime.current_source_event_id == "event-2"
+
+
+@pytest.mark.anyio
+async def test_runtime_tool_executor_blocks_scheduled_tasks_inside_job_execution_sessions() -> None:
+    database = DatabaseManager("sqlite:///:memory:")
+    database.create_all()
+    item_repository = ItemRepository(database)
+    message_repository = MessageRepository(database)
+    pending_state_repository = PendingStateRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=Path.cwd() / ".tmp-test-files",
+    )
+    executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        pending_state_repository=pending_state_repository,
+    )
+
+    result = await executor.execute(
+        session_id="job-session-1",
+        source_message_id="msg-1",
+        plan=ToolPlan(tool="scheduled_tasks", arguments={"action": "list"}, reason="test", source="test"),
+        text="List my reminders.",
+        upload=None,
+        context={"session_kind": "job_execution"},
+    )
+
+    assert result.status == "failed"
+    assert result.metadata["job_execution_blocked_tool"] == "scheduled_tasks"
+    assert "background scheduled execution" in result.reply
+
+
+@pytest.mark.anyio
+async def test_runtime_tool_executor_suppresses_pending_clarification_for_job_execution_skill_runs() -> None:
+    database = DatabaseManager("sqlite:///:memory:")
+    database.create_all()
+    item_repository = ItemRepository(database)
+    message_repository = MessageRepository(database)
+    pending_state_repository = PendingStateRepository(database)
+    user_signal_repository = UserSignalRepository(database)
+    ingestion_service = IngestionService(
+        item_repository=item_repository,
+        message_repository=message_repository,
+        user_signal_repository=user_signal_repository,
+        storage_dir=Path.cwd() / ".tmp-test-files",
+    )
+    executor = RuntimeToolExecutor(
+        ingestion_service=ingestion_service,
+        item_repository=item_repository,
+        pending_state_repository=pending_state_repository,
+    )
+    executor.skill_script_executor.run = lambda request: SkillExecutionResult(
+        message="Which workspace should I inspect?",
+        action="skill",
+        pending_state_delta=PendingStateDelta(
+            request=PendingRequest(
+                kind="choice",
+                question="Which workspace should I inspect?",
+                choices=["prod", "staging"],
+            )
+        ),
+    )
+
+    result = await executor._tool_skill_run(
+        ToolInvocation(
+            session_id="job-session-1",
+            source_message_id="msg-1",
+            plan=ToolPlan(
+                tool="skill_run",
+                arguments={
+                    "name": "archive-core",
+                    "script_path": "scripts/archive_dispatch.py",
+                    "input": {"query": "check the latest item"},
+                },
+                reason="test",
+                source="test",
+            ),
+            text="check the latest item",
+            upload=None,
+            context={
+                "session_kind": "job_execution",
+                "current_source_event_id": "evt-1",
+            },
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.disposition == "clarify"
+    assert result.needs_clarification is True
+    assert result.reply == "[SILENT]"
+    assert result.metadata["background_policy"] == "no_clarify"
+    assert result.metadata["suppressed_pending"]["choices"] == ["prod", "staging"]
+    assert pending_state_repository.get_latest_pending(session_id="job-session-1") is None
+
+
+def test_loop_result_to_turn_result_converts_background_clarify_into_respond() -> None:
+    runner = object.__new__(AgentTurnRunner)
+    runner.runtime_manager = AgentRuntimeManager(pending_state_repository=StubPendingStateRepository())
+
+    result = LoopResult(
+        final_response="[SILENT]",
+        trace=[],
+        runtime=ConversationRuntimeState(session_id="job-session-1", session_kind="job_execution"),
+        exit_reason="needs_clarification",
+        steps=1,
+        status="failed",
+        disposition="clarify",
+        tool_trace=[
+            ToolExecutionTrace(
+                tool_name="skill_run",
+                arguments={},
+                action="skill",
+                status="failed",
+                disposition="clarify",
+                content="[SILENT]",
+                metadata={"background_execution_reply": "[SILENT]"},
+            )
+        ],
+    )
+
+    turn_result = AgentTurnRunner.loop_result_to_turn_result(runner, result)
+
+    assert turn_result.status == "failed"
+    assert turn_result.disposition == "respond"
+    assert turn_result.reply == "[SILENT]"
+    assert "without leaving a pending question" in turn_result.reason
 
 
 @pytest.mark.anyio

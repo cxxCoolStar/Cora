@@ -1,9 +1,11 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -12,10 +14,15 @@ if str(SRC) not in sys.path:
 
 from core.config import CoreSettings  # noqa: E402
 from core.clawbot.dependencies import build_clawbot_container  # noqa: E402
+from core.agent.skill_protocol import PendingRequest, PendingStateDelta, SkillExecutionResult  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
 from core.clawbot.planner import ToolPlan  # noqa: E402
 from core.clawbot.tool_domains import ScheduledTaskToolHandler  # noqa: E402
-from core.storage.repositories import ScheduledTaskRepository, SessionRepository, SourceEventRepository  # noqa: E402
+from core.llm.base import ModelClient  # noqa: E402
+from core.schemas.message import Message  # noqa: E402
+from core.schemas.model import ModelResponse  # noqa: E402
+from core.schemas.tool import ToolCall, ToolSpec  # noqa: E402
+from core.storage.repositories import MessageRepository, ScheduledTaskRepository, SessionRepository, SourceEventRepository  # noqa: E402
 from core.tasks.schedule import compute_next_run_at, normalize_schedule_input  # noqa: E402
 from core.tasks.worker import ScheduledTaskWorker  # noqa: E402
 from core.tools.registry import ToolInvocation  # noqa: E402
@@ -36,6 +43,83 @@ def _temp_dir() -> Path:
 def _write_python_task(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
+
+
+def _tool_reply_text(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if isinstance(payload, dict):
+        reply = payload.get("content")
+        if isinstance(reply, str) and reply.strip():
+            return reply
+        nested_reply = payload.get("reply")
+        if isinstance(nested_reply, str) and nested_reply.strip():
+            return nested_reply
+    return content
+
+
+def _build_runtime_container(tmp_path: Path, *, toolset_preset: str = "cora-wechat"):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    settings = CoreSettings(
+        clawbot_database_path=tmp_path / "clawbot.db",
+        files_storage_dir=tmp_path / "files",
+        archive_root_dir=tmp_path / "archive",
+        file_tool_root=workspace,
+        toolset_preset=toolset_preset,
+    )
+    container = build_clawbot_container(settings=settings)
+    container.initialize()
+    return container
+
+
+class _ForbiddenBackgroundToolModel(ModelClient):
+    def __init__(self, *, forbidden_tool_name: str) -> None:
+        self.forbidden_tool_name = forbidden_tool_name
+        self.seen_tool_names: list[list[str]] = []
+        self.tool_replies: list[str] = []
+
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        self.seen_tool_names.append([tool.name for tool in tools])
+        latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
+        if latest_tool is not None:
+            self.tool_replies.append(_tool_reply_text(latest_tool.content))
+            return ModelResponse(assistant_text="[SILENT]")
+        return ModelResponse(
+            tool_calls=[
+                ToolCall(
+                    tool_name=self.forbidden_tool_name,
+                    arguments={
+                        "action": "create",
+                        "name": "Nested reminder",
+                        "prompt": "This should never be created.",
+                        "schedule": {"kind": "once", "at": datetime(2026, 5, 19, 2, 0, tzinfo=UTC).isoformat()},
+                    },
+                )
+            ]
+        )
+
+
+class _ClarifyingSkillModel(ModelClient):
+    def __init__(self) -> None:
+        self.seen_tool_names: list[list[str]] = []
+
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        self.seen_tool_names.append([tool.name for tool in tools])
+        return ModelResponse(
+            tool_calls=[
+                ToolCall(
+                    tool_name="skill_run",
+                    arguments={
+                        "name": "archive-core",
+                        "script_path": "scripts/archive_dispatch.py",
+                        "input": {"query": "check the latest item"},
+                    },
+                )
+            ]
+        )
 
 
 def test_schedule_normalization_and_next_run() -> None:
@@ -126,10 +210,24 @@ def test_scheduled_task_worker_executes_due_task_and_delivers_reply() -> None:
 
     delivered: list[tuple[str, str]] = []
     seen_source_metadata: list[dict] = []
+    created_execution_session_ids: list[str] = []
 
     class _StubClawBotService:
+        def create_job_execution_session(
+            self,
+            *,
+            origin_session_id: str,
+            scheduled_task_id: str,
+            task_name: str,
+            execution_mode: str,
+            owner_external_user_id: str | None = None,
+        ):
+            session_id = f"job-session-{len(created_execution_session_ids) + 1}"
+            created_execution_session_ids.append(session_id)
+            return SimpleNamespace(id=session_id)
+
         async def reply_outcome(self, *, session_id: str, text: str, source_metadata=None):
-            seen_source_metadata.append(dict(source_metadata or {}))
+            seen_source_metadata.append({"session_id": session_id, **dict(source_metadata or {})})
             return SimpleNamespace(reply="Time to review the market open.", status="completed")
 
     async def _send_text(user_id: str, text: str):
@@ -149,12 +247,17 @@ def test_scheduled_task_worker_executes_due_task_and_delivers_reply() -> None:
     assert executed == 1
     assert delivered == [("wx-user-2", "Time to review the market open.")]
     assert seen_source_metadata[0]["scheduled_task_id"] == created.id
+    assert created_execution_session_ids == ["job-session-1"]
+    assert seen_source_metadata[0]["session_id"] == "job-session-1"
+    assert seen_source_metadata[0]["scheduled_task_origin_session_id"] == session.id
+    assert seen_source_metadata[0]["scheduled_task_execution_session_id"] == "job-session-1"
 
     updated = task_repository.get(task_id=created.id)
     assert updated.state == "completed"
     assert updated.enabled == 0
     assert updated.last_status == "ok"
     assert updated.last_reply_preview == "Time to review the market open."
+    assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-1"
 
 
 def test_scheduled_task_worker_suppresses_silent_reply() -> None:
@@ -176,6 +279,17 @@ def test_scheduled_task_worker_suppresses_silent_reply() -> None:
     delivered: list[tuple[str, str]] = []
 
     class _StubClawBotService:
+        def create_job_execution_session(
+            self,
+            *,
+            origin_session_id: str,
+            scheduled_task_id: str,
+            task_name: str,
+            execution_mode: str,
+            owner_external_user_id: str | None = None,
+        ):
+            return SimpleNamespace(id="job-session-silent")
+
         async def reply_outcome(self, *, session_id: str, text: str, source_metadata=None):
             return SimpleNamespace(reply="[SILENT]", status="completed")
 
@@ -200,6 +314,7 @@ def test_scheduled_task_worker_suppresses_silent_reply() -> None:
     assert updated.id == created.id
     assert updated.last_status == "ok"
     assert updated.last_reply_preview is None
+    assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-silent"
 
 
 def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
@@ -230,6 +345,17 @@ def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
     seen_calls: list[dict[str, object]] = []
 
     class _StubClawBotService:
+        def create_job_execution_session(
+            self,
+            *,
+            origin_session_id: str,
+            scheduled_task_id: str,
+            task_name: str,
+            execution_mode: str,
+            owner_external_user_id: str | None = None,
+        ):
+            return SimpleNamespace(id="job-session-skill")
+
         async def execute_tool_plan_outcome(self, *, session_id: str, plan: ToolPlan, text: str | None = None, source_metadata=None):
             seen_calls.append(
                 {
@@ -260,7 +386,7 @@ def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
     assert delivered == [("wx-user-4", "ETF 513650 is stable.")]
     assert seen_calls == [
         {
-            "session_id": session.id,
+            "session_id": "job-session-skill",
             "tool": "skill_run",
             "arguments": {
                 "name": "etf-monitor",
@@ -271,9 +397,13 @@ def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
             "source_metadata": {
                 "channel": "scheduled_task",
                 "event_type": "scheduled_task",
+                "external_user_id": "wx-user-4",
                 "scheduled_task_id": created.id,
                 "scheduled_task_name": "ETF skill runner",
                 "scheduled_task_execution_mode": "skill",
+                "scheduled_task_origin_session_id": session.id,
+                "scheduled_task_execution_session_id": "job-session-skill",
+                "session_kind": "job_execution",
             },
         }
     ]
@@ -281,6 +411,7 @@ def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
     updated = task_repository.get(task_id=created.id)
     assert updated.state == "completed"
     assert updated.last_reply_preview == "ETF 513650 is stable."
+    assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-skill"
 
 
 def test_scheduled_task_worker_runs_workspace_script_mode() -> None:
@@ -323,6 +454,17 @@ def test_scheduled_task_worker_runs_workspace_script_mode() -> None:
     class _StubClawBotService:
         file_tool_root = tmp_path
 
+        def create_job_execution_session(
+            self,
+            *,
+            origin_session_id: str,
+            scheduled_task_id: str,
+            task_name: str,
+            execution_mode: str,
+            owner_external_user_id: str | None = None,
+        ):
+            return SimpleNamespace(id="job-session-script")
+
     async def _send_text(user_id: str, text: str):
         delivered.append((user_id, text))
         return {"ret": 0, "errcode": 0}
@@ -343,6 +485,236 @@ def test_scheduled_task_worker_runs_workspace_script_mode() -> None:
     updated = task_repository.get(task_id=created.id)
     assert updated.state == "completed"
     assert updated.last_reply_preview == "Script checked 159915."
+    assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-script"
+
+
+def test_scheduled_task_worker_keeps_origin_session_clean_and_records_child_execution_session() -> None:
+    tmp_path = _temp_dir()
+    database = _make_database(tmp_path)
+    session_repository = SessionRepository(database)
+    message_repository = MessageRepository(database)
+    task_repository = ScheduledTaskRepository(database)
+    origin_session = session_repository.create()
+    message_repository.add_user_message(
+        session_id=origin_session.id,
+        content="Please remind me to review the market open.",
+    )
+
+    created = task_repository.create(
+        session_id=origin_session.id,
+        owner_external_user_id="wx-user-6",
+        name="Origin-safe reminder",
+        prompt_text="Remind me to review the market open.",
+        schedule={"kind": "once", "at": datetime.now(UTC).isoformat()},
+        enabled=True,
+    )
+
+    class _FakeClawBotService:
+        def __init__(self) -> None:
+            self.execution_session_ids: list[str] = []
+
+        def create_job_execution_session(
+            self,
+            *,
+            origin_session_id: str,
+            scheduled_task_id: str,
+            task_name: str,
+            execution_mode: str,
+            owner_external_user_id: str | None = None,
+        ):
+            record = session_repository.create(
+                session_kind="job_execution",
+                parent_session_id=origin_session_id,
+                metadata={
+                    "scheduled_task_id": scheduled_task_id,
+                    "scheduled_task_name": task_name,
+                    "scheduled_task_execution_mode": execution_mode,
+                },
+            )
+            self.execution_session_ids.append(record.id)
+            return record
+
+        async def reply_outcome(self, *, session_id: str, text: str, source_metadata=None):
+            message_repository.add_user_message(session_id=session_id, content=text)
+            message_repository.add_assistant_message(
+                session_id=session_id,
+                content="Time to review the market open.",
+                metadata={"source_metadata": dict(source_metadata or {})},
+            )
+            return SimpleNamespace(reply="Time to review the market open.", status="completed")
+
+    delivered: list[tuple[str, str]] = []
+
+    async def _send_text(user_id: str, text: str):
+        delivered.append((user_id, text))
+        return {"ret": 0, "errcode": 0}
+
+    fake_service = _FakeClawBotService()
+    worker = ScheduledTaskWorker(
+        repository=task_repository,
+        clawbot_service=fake_service,  # type: ignore[arg-type]
+        send_text=_send_text,
+        lock_path=tmp_path / "scheduled-tasks" / ".tick.lock",
+        poll_interval_seconds=1,
+        lease_seconds=60,
+    )
+
+    executed = asyncio.run(worker.tick())
+
+    assert executed == 1
+    assert delivered == [("wx-user-6", "Time to review the market open.")]
+    assert len(fake_service.execution_session_ids) == 1
+
+    origin_messages = message_repository.list_by_session(session_id=origin_session.id)
+    assert [message.content for message in origin_messages] == [
+        "Please remind me to review the market open.",
+    ]
+
+    execution_session_id = fake_service.execution_session_ids[0]
+    execution_record = session_repository.get(execution_session_id)
+    assert execution_record.session_kind == "job_execution"
+    assert execution_record.parent_session_id == origin_session.id
+
+    execution_messages = message_repository.list_by_session(session_id=execution_session_id)
+    assert [message.role for message in execution_messages] == ["user", "assistant"]
+    assert execution_messages[0].content == "Remind me to review the market open."
+    assert execution_messages[1].content == "Time to review the market open."
+
+    updated = task_repository.get(task_id=created.id)
+    assert updated.metadata_json["last_run"]["origin_session_id"] == origin_session.id
+    assert updated.metadata_json["last_run"]["execution_session_id"] == execution_session_id
+
+
+def test_scheduled_task_worker_blocks_forbidden_tool_calls_end_to_end(tmp_path: Path) -> None:
+    container = _build_runtime_container(tmp_path)
+    model = _ForbiddenBackgroundToolModel(forbidden_tool_name="scheduled_tasks")
+    container.clawbot_service.model_client = model
+    origin_session = container.session_repository.create()
+    created = container.scheduled_task_repository.create(
+        session_id=origin_session.id,
+        owner_external_user_id="wx-user-7",
+        name="No nested reminders",
+        prompt_text="Check status quietly.",
+        schedule={"kind": "once", "at": datetime.now(UTC).isoformat()},
+        enabled=True,
+    )
+
+    delivered: list[tuple[str, str]] = []
+
+    async def _send_text(user_id: str, text: str):
+        delivered.append((user_id, text))
+        return {"ret": 0, "errcode": 0}
+
+    worker = ScheduledTaskWorker(
+        repository=container.scheduled_task_repository,
+        clawbot_service=container.clawbot_service,
+        send_text=_send_text,
+        lock_path=tmp_path / "scheduled-tasks" / ".tick.lock",
+        poll_interval_seconds=1,
+        lease_seconds=60,
+    )
+
+    executed = asyncio.run(worker.tick())
+
+    assert executed == 1
+    assert model.seen_tool_names
+    assert "skill_run" in model.seen_tool_names[0]
+    assert "scheduled_tasks" not in model.seen_tool_names[0]
+    assert "user_memory" not in model.seen_tool_names[0]
+    assert "shell_exec" not in model.seen_tool_names[0]
+    assert model.tool_replies
+    assert "unavailable during background scheduled execution" in model.tool_replies[0]
+    assert delivered == [("wx-user-7", model.tool_replies[0])]
+
+    scoped_records = container.scheduled_task_repository.list_for_scope(
+        session_id=origin_session.id,
+        owner_external_user_id="wx-user-7",
+    )
+    assert [record.id for record in scoped_records] == [created.id]
+
+    updated = container.scheduled_task_repository.get(task_id=created.id)
+    assert updated.state == "completed"
+    assert updated.last_status == "ok"
+    assert updated.last_reply_preview == model.tool_replies[0]
+
+    execution_session_id = updated.metadata_json["last_run"]["execution_session_id"]
+    execution_record = container.session_repository.get(execution_session_id)
+    assert execution_record.session_kind == "job_execution"
+    assert execution_record.parent_session_id == origin_session.id
+    assert container.pending_state_repository.get_latest_pending(session_id=execution_session_id) is None
+
+    execution_messages = container.message_repository.list_by_session(session_id=execution_session_id)
+    assert [message.role for message in execution_messages] == ["user", "assistant"]
+    assert execution_messages[0].content == "Check status quietly."
+    assert execution_messages[1].content == model.tool_replies[0]
+
+
+def test_scheduled_task_worker_suppresses_clarifying_skill_without_pending_state_end_to_end(tmp_path: Path) -> None:
+    container = _build_runtime_container(tmp_path)
+    model = _ClarifyingSkillModel()
+    container.clawbot_service.model_client = model
+    container.tool_executor.skill_script_executor.run = lambda request: SkillExecutionResult(
+        message="Which workspace should I inspect?",
+        action="skill",
+        pending_state_delta=PendingStateDelta(
+            request=PendingRequest(
+                kind="choice",
+                question="Which workspace should I inspect?",
+                choices=["prod", "staging"],
+            )
+        ),
+    )
+    origin_session = container.session_repository.create()
+    created = container.scheduled_task_repository.create(
+        session_id=origin_session.id,
+        owner_external_user_id="wx-user-8",
+        name="Clarifying archive check",
+        prompt_text="Check the latest item and report back only if needed.",
+        schedule={"kind": "once", "at": datetime.now(UTC).isoformat()},
+        enabled=True,
+    )
+
+    delivered: list[tuple[str, str]] = []
+
+    async def _send_text(user_id: str, text: str):
+        delivered.append((user_id, text))
+        return {"ret": 0, "errcode": 0}
+
+    worker = ScheduledTaskWorker(
+        repository=container.scheduled_task_repository,
+        clawbot_service=container.clawbot_service,
+        send_text=_send_text,
+        lock_path=tmp_path / "scheduled-tasks" / ".tick.lock",
+        poll_interval_seconds=1,
+        lease_seconds=60,
+    )
+
+    executed = asyncio.run(worker.tick())
+
+    assert executed == 1
+    assert delivered == []
+    assert model.seen_tool_names
+    assert "skill_run" in model.seen_tool_names[0]
+    assert "scheduled_tasks" not in model.seen_tool_names[0]
+    assert "user_memory" not in model.seen_tool_names[0]
+    assert "shell_exec" not in model.seen_tool_names[0]
+
+    updated = container.scheduled_task_repository.get(task_id=created.id)
+    assert updated.state == "completed"
+    assert updated.last_status == "ok"
+    assert updated.last_reply_preview is None
+
+    execution_session_id = updated.metadata_json["last_run"]["execution_session_id"]
+    assert container.pending_state_repository.get_latest_pending(session_id=execution_session_id) is None
+
+    execution_record = container.session_repository.get(execution_session_id)
+    assert execution_record.session_kind == "job_execution"
+    assert execution_record.parent_session_id == origin_session.id
+
+    execution_messages = container.message_repository.list_by_session(session_id=execution_session_id)
+    assert [message.role for message in execution_messages] == ["user", "assistant"]
+    assert execution_messages[0].content == "Check the latest item and report back only if needed."
+    assert execution_messages[1].content == "[SILENT]"
 
 
 def test_scheduled_task_tool_coerces_one_shot_reminder_from_user_text() -> None:

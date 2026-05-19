@@ -35,11 +35,24 @@ from core.storage.repositories import (
     MessageRepository,
     PendingStateRepository,
     ScheduledTaskRepository,
+    SessionRepository,
     SessionSummaryRepository,
 )
 from core.tools import ToolInvocation, register_builtin_tools, registry
 
 logger = logging.getLogger(__name__)
+
+JOB_EXECUTION_ALLOWED_TOOL_NAMES = {
+    "list_files",
+    "search_files",
+    "read_file",
+    "web_search",
+    "web_fetch",
+    "skills_list",
+    "skill_view",
+    "skill_run",
+    "search_sessions",
+}
 
 
 @dataclass(slots=True)
@@ -91,6 +104,7 @@ class RuntimeToolExecutor:
         item_repository: ItemRepository,
         pending_state_repository: PendingStateRepository,
         message_repository: MessageRepository | None = None,
+        session_repository: SessionRepository | None = None,
         session_summary_repository: SessionSummaryRepository | None = None,
         scheduled_task_repository: ScheduledTaskRepository | None = None,
         source_event_repository: Any | None = None,
@@ -130,6 +144,7 @@ class RuntimeToolExecutor:
             SessionSearchToolHandler.from_repositories(
                 message_repository=message_repository,
                 summary_repository=session_summary_repository,
+                session_repository=session_repository,
                 session_map_repository=session_map_repository,
                 channel_name=channel_name,
             )
@@ -257,6 +272,12 @@ class RuntimeToolExecutor:
                     upload=invocation.upload,
                     context=dict(invocation.context),
                 )
+            blocked_result = self._background_blocked_tool_result(
+                invocation=normalized_invocation,
+                tool_name=tool_name,
+            )
+            if blocked_result is not None:
+                return blocked_result
             result = await registry.dispatch(self, name=tool_name, invocation=normalized_invocation)
             duration_ms = int((perf_counter() - started_at) * 1000)
             if result.status == "failed":
@@ -673,6 +694,20 @@ class RuntimeToolExecutor:
         pending_request = skill_result.pending_state_delta.request
         if pending_request is not UNSET and pending_request is not None:
             pending = pending_request
+            if self._is_background_execution_context(dict(invocation.context or {})):
+                execution.reply = "[SILENT]"
+                execution.status = "failed"
+                execution.needs_clarification = True
+                execution.disposition = "clarify"
+                execution.metadata = dict(execution.metadata or {})
+                execution.metadata["background_policy"] = "no_clarify"
+                execution.metadata["background_execution_reply"] = "[SILENT]"
+                execution.metadata["suppressed_pending"] = {
+                    "question": pending.question,
+                    "choices": list(pending.choices),
+                    "payload": dict(pending.payload),
+                }
+                return
             record = self._create_pending_record(
                 invocation=invocation,
                 question=pending.question or execution.reply,
@@ -745,6 +780,40 @@ class RuntimeToolExecutor:
         return self.session_map_repository.get_external_user_id(
             channel=self.channel_name,
             session_id=session_id,
+        )
+
+    @staticmethod
+    def _session_kind_from_context(context: dict[str, Any]) -> str:
+        return str(context.get("session_kind") or "conversation").strip() or "conversation"
+
+    @classmethod
+    def _is_background_execution_context(cls, context: dict[str, Any]) -> bool:
+        return cls._session_kind_from_context(context) == "job_execution"
+
+    @classmethod
+    def _background_blocked_tool_result(
+        cls,
+        *,
+        invocation: ToolInvocation,
+        tool_name: str,
+    ) -> ToolExecutionResult | None:
+        if not cls._is_background_execution_context(dict(invocation.context or {})):
+            return None
+        normalized_tool_name = str(tool_name or "").strip()
+        if not normalized_tool_name or normalized_tool_name in JOB_EXECUTION_ALLOWED_TOOL_NAMES:
+            return None
+        return ToolExecutionResult(
+            reply=(
+                f"{normalized_tool_name} is unavailable during background scheduled execution. "
+                "Use the tools that are available in this job session, and never create or manage reminders from inside the run."
+            ),
+            action="chat",
+            status="failed",
+            disposition="respond",
+            metadata={
+                "job_execution_blocked_tool": normalized_tool_name,
+                "background_policy": "restricted_tools",
+            },
         )
 
     async def _run_send_file(self, *, user_id: str, file_path: str, file_name: str) -> dict[str, Any]:

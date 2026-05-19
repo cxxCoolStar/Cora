@@ -714,6 +714,7 @@ class SessionSearchToolHandler:
         *,
         message_repository: Any,
         summary_repository: Any,
+        session_repository: Any | None = None,
         session_map_repository: Any | None = None,
         channel_name: str = "wechat",
     ) -> "SessionSearchToolHandler":
@@ -721,6 +722,7 @@ class SessionSearchToolHandler:
             store=SessionSearchToolStore(
                 message_repository=message_repository,
                 summary_repository=summary_repository,
+                session_repository=session_repository,
                 session_map_repository=session_map_repository,
                 channel_name=channel_name,
             )

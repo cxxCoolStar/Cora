@@ -62,7 +62,9 @@ class AgentLoop:
         session_id: str,
         initial_messages: list[Message],
         runtime: ConversationRuntimeState,
+        tool_specs: list[ToolSpec] | None = None,
     ) -> LoopResult:
+        active_tool_specs = list(tool_specs or self.tool_specs)
         messages = list(initial_messages)
         trace: list[Message] = []
         tool_trace: list[ToolExecutionTrace] = []
@@ -73,10 +75,10 @@ class AgentLoop:
             if self.context_budget_manager is not None:
                 estimated_prompt_tokens = self.context_budget_manager.estimate_prompt_tokens(
                     messages=messages,
-                    tools=self.tool_specs,
+                    tools=active_tool_specs,
                     calibrated=False,
                 )
-            response = self.model_client.generate(messages=messages, tools=self.tool_specs)
+            response = self.model_client.generate(messages=messages, tools=active_tool_specs)
             self._record_prompt_usage(
                 response_usage=response.usage,
                 estimated_prompt_tokens=estimated_prompt_tokens,

@@ -25,6 +25,9 @@ class SessionRecord(Base):
     __tablename__ = "clawbot_sessions"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    session_kind: Mapped[str] = mapped_column(String(32), default="conversation", index=True)
+    parent_session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

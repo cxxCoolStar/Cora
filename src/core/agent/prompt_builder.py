@@ -45,6 +45,13 @@ SKILLS_GUIDANCE = (
     "Use generic tools for generic tasks, and rely on skills for domain workflows or explicit reusable procedures."
 )
 
+BACKGROUND_EXECUTION_GUIDANCE = (
+    "This turn is a background scheduled execution, not a live user chat. "
+    "Treat the input as an offline task instruction. Do the best useful work you can with the available tools and current context. "
+    "Do not ask follow-up questions, do not create or manage reminders from inside this run, and do not leave the session waiting on clarification. "
+    "If you cannot make meaningful progress or there is nothing useful to send back, reply exactly with `[SILENT]`."
+)
+
 PLATFORM_HINTS = {
     "wechat": (
         "You are on WeChat. Keep replies compact and chat-friendly. "
@@ -98,6 +105,8 @@ class AgentPromptBuilder:
     ) -> list[str]:
         system_parts = [self.agent_identity]
         system_parts.extend(["", "Execution guidance:", EXECUTION_GUIDANCE])
+        if runtime.is_background_execution:
+            system_parts.extend(["", "Background execution policy:", BACKGROUND_EXECUTION_GUIDANCE])
         system_parts.extend(["", "Memory guidance:", MEMORY_GUIDANCE])
         system_parts.extend(["", "Skills guidance:", SKILLS_GUIDANCE])
         platform_hint = self._platform_hint(runtime=runtime, delivery_available=delivery_available)

@@ -29,9 +29,19 @@ class SessionRepository:
     def __init__(self, database: DatabaseManager) -> None:
         self.database = database
 
-    def create(self) -> SessionRecord:
+    def create(
+        self,
+        *,
+        session_kind: str = "conversation",
+        parent_session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SessionRecord:
         with self.database.session() as session:
-            record = SessionRecord()
+            record = SessionRecord(
+                session_kind=str(session_kind or "conversation").strip() or "conversation",
+                parent_session_id=str(parent_session_id or "").strip() or None,
+                metadata_json=dict(metadata or {}),
+            )
             session.add(record)
             session.commit()
             session.refresh(record)
@@ -44,10 +54,37 @@ class SessionRepository:
                 raise KeyError(f"Session not found: {session_id}")
             return record
 
-    def list_recent(self, *, limit: int = 20) -> list[SessionRecord]:
+    def list_recent(self, *, limit: int = 20, session_kind: str | None = None) -> list[SessionRecord]:
         with self.database.session() as session:
-            stmt = select(SessionRecord).order_by(desc(SessionRecord.created_at)).limit(limit)
+            stmt = select(SessionRecord)
+            if session_kind:
+                stmt = stmt.where(SessionRecord.session_kind == session_kind)
+            stmt = stmt.order_by(desc(SessionRecord.created_at)).limit(limit)
             return list(session.scalars(stmt))
+
+    def list_child_session_ids(
+        self,
+        *,
+        parent_session_id: str,
+        session_kind: str | None = None,
+        limit: int = 20,
+    ) -> list[str]:
+        with self.database.session() as session:
+            stmt = select(SessionRecord.id).where(SessionRecord.parent_session_id == parent_session_id)
+            if session_kind:
+                stmt = stmt.where(SessionRecord.session_kind == session_kind)
+            stmt = stmt.order_by(desc(SessionRecord.created_at)).limit(limit)
+            return [str(value) for value in session.scalars(stmt)]
+
+    def get_parent_session_id(self, *, session_id: str) -> str | None:
+        with self.database.session() as session:
+            stmt = (
+                select(SessionRecord.parent_session_id)
+                .where(SessionRecord.id == session_id)
+                .limit(1)
+            )
+            value = session.scalar(stmt)
+            return str(value).strip() or None if value is not None else None
 
 
 class SessionSummaryRepository:
@@ -1015,6 +1052,7 @@ class ScheduledTaskRepository:
         error: str | None = None,
         delivery_error: str | None = None,
         reply_preview: str | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ) -> ScheduledTaskRecord:
         with self.database.session() as session:
             record = session.get(ScheduledTaskRecord, task_id)
@@ -1028,6 +1066,10 @@ class ScheduledTaskRepository:
             record.last_delivery_error = delivery_error
             record.last_reply_preview = (reply_preview or "").strip() or None
             record.lease_expires_at = None
+            if run_metadata is not None:
+                metadata = dict(record.metadata_json or {})
+                metadata["last_run"] = dict(run_metadata)
+                record.metadata_json = metadata
             if success:
                 if kind == "once":
                     record.enabled = 0

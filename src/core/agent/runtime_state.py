@@ -30,6 +30,8 @@ class PendingSessionState:
 
 @dataclass(slots=True)
 class RuntimeContextSnapshot:
+    session_kind: str = "conversation"
+    session_metadata: dict[str, Any] = field(default_factory=dict)
     current_source_event_id: str | None = None
     recent_events: list[EventSnapshot] = field(default_factory=list)
     pending_state: PendingSessionState | None = None
@@ -48,6 +50,8 @@ class RuntimeStateDelta:
 @dataclass(slots=True)
 class ConversationRuntimeState:
     session_id: str
+    session_kind: str = "conversation"
+    session_metadata: dict[str, Any] = field(default_factory=dict)
     current_source_event_id: str | None = None
     recent_events: list[EventSnapshot] = field(default_factory=list)
     pending_state: PendingSessionState | None = None
@@ -55,9 +59,14 @@ class ConversationRuntimeState:
     skill_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def is_background_execution(self) -> bool:
+        return self.session_kind == "job_execution"
+
     def summary_lines(self) -> list[str]:
         lines = [
             f"session_id={self.session_id}",
+            f"session_kind={self.session_kind}",
             f"current_source_event_id={self.current_source_event_id or 'none'}",
             f"last_action={self.last_action or 'none'}",
             f"pending_owner={self.pending_state.skill_name if self.pending_state and self.pending_state.skill_name else 'none'}",

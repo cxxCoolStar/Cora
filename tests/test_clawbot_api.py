@@ -17,7 +17,7 @@ if str(SRC) not in sys.path:
 
 from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
-from core.agent.runtime_state import RuntimeContextSnapshot  # noqa: E402
+from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSnapshot  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.poller import WechatPoller  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
@@ -300,6 +300,7 @@ def build_test_container(
         item_repository=item_repository,
         pending_state_repository=pending_state_repository,
         message_repository=message_repository,
+        session_repository=session_repository,
         session_summary_repository=session_summary_repository,
         scheduled_task_repository=scheduled_task_repository,
         source_event_repository=source_event_repository,
@@ -2121,6 +2122,24 @@ def test_archive_is_exposed_via_skill_run_tooling(tmp_path):
     visible_specs = {spec.name: spec for spec in container.clawbot_service._build_tool_specs()}
     assert "archive" not in visible_specs
     assert "skill_run" in visible_specs
+
+
+def test_job_execution_tool_surface_excludes_reminders_and_memory_mutation(tmp_path):
+    container = build_test_container(tmp_path, toolset_preset="cora-cli")
+
+    specs = {
+        spec.name
+        for spec in container.clawbot_service._tool_specs_for_runtime(
+            ConversationRuntimeState(session_id="job-session-1", session_kind="job_execution")
+        )
+    }
+
+    assert "skill_run" in specs
+    assert "read_file" in specs
+    assert "search_sessions" in specs
+    assert "scheduled_tasks" not in specs
+    assert "user_memory" not in specs
+    assert "shell_exec" not in specs
 
 
 def test_skill_payload_uses_absolute_sqlite_database_url(tmp_path):

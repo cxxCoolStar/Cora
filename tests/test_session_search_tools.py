@@ -169,6 +169,7 @@ def test_runtime_tool_executor_searches_current_and_prior_wechat_sessions(tmp_pa
         item_repository=item_repository,
         pending_state_repository=pending_state_repository,
         message_repository=message_repository,
+        session_repository=session_repository,
         session_summary_repository=session_summary_repository,
         session_map_repository=session_map_repository,
         file_tool_root=tmp_path / "workspace",
@@ -236,3 +237,42 @@ def test_runtime_tool_executor_search_sessions_fails_when_query_is_empty(tmp_pat
 
     assert result.status == "failed"
     assert "query cannot be empty" in result.reply
+
+
+def test_session_search_includes_child_job_execution_sessions(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    database.create_all()
+    session_repository = SessionRepository(database)
+    session_summary_repository = SessionSummaryRepository(database)
+    message_repository = MessageRepository(database)
+
+    origin_session = session_repository.create()
+    execution_session = session_repository.create(
+        session_kind="job_execution",
+        parent_session_id=origin_session.id,
+        metadata={"scheduled_task_id": "task-1"},
+    )
+    message_repository.add_user_message(
+        session_id=execution_session.id,
+        content="Remind me to review the market open.",
+    )
+    message_repository.add_assistant_message(
+        session_id=execution_session.id,
+        content="Time to review the market open before the bell.",
+    )
+
+    store = SessionSearchToolStore(
+        message_repository=message_repository,
+        summary_repository=session_summary_repository,
+        session_repository=session_repository,
+    )
+
+    result = store.search(
+        session_id=origin_session.id,
+        query="market open before the bell",
+        limit=3,
+    )
+
+    assert execution_session.id in result.session_ids
+    assert any(hit.session_id == execution_session.id for hit in result.hits)
+    assert "market open" in result.render().lower()

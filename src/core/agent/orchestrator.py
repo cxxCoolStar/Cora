@@ -7,6 +7,7 @@ from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.runtime_state import ConversationRuntimeState
 from core.agent.skill_loader import SkillLoader
 from core.schemas.message import Message
+from core.schemas.tool import ToolSpec
 
 
 @dataclass(slots=True)
@@ -17,6 +18,7 @@ class OrchestratorInput:
     upload_name: str | None = None
     delivery_available: bool = False
     history: list[Message] | None = None
+    tool_specs: list[ToolSpec] | None = None
 
 
 class AgentOrchestrator:
@@ -46,4 +48,5 @@ class AgentOrchestrator:
             session_id=turn.session_id,
             initial_messages=messages,
             runtime=turn.runtime,
+            tool_specs=turn.tool_specs,
         )

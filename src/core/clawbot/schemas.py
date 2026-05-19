@@ -79,6 +79,9 @@ class DecisionDebugResponse(BaseModel):
 
 class SessionDebugResponse(BaseModel):
     session_id: str
+    session_kind: str = "conversation"
+    parent_session_id: str | None = None
+    session_metadata: dict = Field(default_factory=dict)
     created_at: datetime
     messages: list[MessageDebugResponse]
     items: list[ItemDetailResponse]

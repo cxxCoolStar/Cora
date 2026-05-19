@@ -52,6 +52,18 @@ from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
 
+JOB_EXECUTION_ALLOWED_TOOL_NAMES = {
+    "list_files",
+    "search_files",
+    "read_file",
+    "web_search",
+    "web_fetch",
+    "skills_list",
+    "skill_view",
+    "skill_run",
+    "search_sessions",
+}
+
 
 class ClawBotService:
     def __init__(
@@ -99,6 +111,7 @@ class ClawBotService:
             item_repository=item_repository,
             pending_state_repository=pending_state_repository,
             message_repository=message_repository,
+            session_repository=session_repository,
             session_summary_repository=session_summary_repository,
             source_event_repository=source_event_repository,
             user_memory_path=self.user_memory_path,
@@ -128,6 +141,7 @@ class ClawBotService:
         self._runtime_snapshot_loader = SessionRuntimeSnapshotLoader(
             message_repository=message_repository,
             source_event_repository=source_event_repository,
+            session_repository=session_repository,
         )
         self._source_event_manager = SourceEventManager(
             source_event_repository=source_event_repository,
@@ -154,13 +168,55 @@ class ClawBotService:
             history_loader=self._load_agent_history,
             delivery_available=self.tool_executor.can_send_files_to_user,
             media_kind_resolver=self._source_event_manager.detect_media_kind,
+            tool_specs_resolver=self._tool_specs_for_runtime,
         )
 
-    def create_session(self) -> SessionRecord:
-        return self.session_repository.create()
+    def create_session(
+        self,
+        *,
+        session_kind: str = "conversation",
+        parent_session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SessionRecord:
+        return self.session_repository.create(
+            session_kind=session_kind,
+            parent_session_id=parent_session_id,
+            metadata=metadata,
+        )
+
+    def create_job_execution_session(
+        self,
+        *,
+        origin_session_id: str,
+        scheduled_task_id: str,
+        task_name: str,
+        execution_mode: str,
+        owner_external_user_id: str | None = None,
+    ) -> SessionRecord:
+        self.session_repository.get(origin_session_id)
+        return self.create_session(
+            session_kind="job_execution",
+            parent_session_id=origin_session_id,
+            metadata={
+                "scheduled_task_id": scheduled_task_id,
+                "scheduled_task_name": task_name,
+                "scheduled_task_execution_mode": execution_mode,
+                "origin_session_id": origin_session_id,
+                "owner_external_user_id": str(owner_external_user_id or "").strip() or None,
+            },
+        )
 
     def _build_tool_specs(self) -> list[ModelToolSpec]:
         return self.tool_manager.build_model_tool_specs(toolset_preset=self.toolset_preset)
+
+    def _tool_specs_for_runtime(self, runtime) -> list[ModelToolSpec]:
+        if not getattr(runtime, "is_background_execution", False):
+            return list(self._tool_specs)
+        return [
+            spec
+            for spec in self._tool_specs
+            if str(spec.name or "").strip() in JOB_EXECUTION_ALLOWED_TOOL_NAMES
+        ]
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()
@@ -417,7 +473,7 @@ class ClawBotService:
         )
 
     def list_sessions(self) -> list[SessionRecord]:
-        return self.session_repository.list_recent()
+        return self.session_repository.list_recent(session_kind="conversation")
 
     def get_session_debug(self, *, session_id: str) -> SessionDebugResponse:
         return self._debug_assembler.build(session_id=session_id)

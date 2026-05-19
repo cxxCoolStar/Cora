@@ -5,7 +5,12 @@ from datetime import datetime
 import re
 from typing import Any
 
-from core.storage.repositories import ChannelSessionMapRepository, MessageRepository, SessionSummaryRepository
+from core.storage.repositories import (
+    ChannelSessionMapRepository,
+    MessageRepository,
+    SessionRepository,
+    SessionSummaryRepository,
+)
 
 
 DEFAULT_RESULT_LIMIT = 5
@@ -83,6 +88,7 @@ class SessionSearchResult:
 class SessionSearchToolStore:
     message_repository: MessageRepository
     summary_repository: SessionSummaryRepository
+    session_repository: SessionRepository | None = None
     session_map_repository: ChannelSessionMapRepository | None = None
     channel_name: str = "wechat"
 
@@ -111,23 +117,47 @@ class SessionSearchToolStore:
 
     def _candidate_session_ids(self, *, session_id: str) -> list[str]:
         session_ids = [session_id]
-        if self.session_map_repository is None:
+        if self.session_map_repository is not None:
+            external_user_id = self.session_map_repository.get_external_user_id(
+                channel=self.channel_name,
+                session_id=session_id,
+            )
+            if external_user_id:
+                linked_session_ids = self.session_map_repository.list_session_ids_for_user(
+                    channel=self.channel_name,
+                    external_user_id=external_user_id,
+                    limit=MAX_SESSIONS_TO_SCAN,
+                )
+                for linked_session_id in linked_session_ids:
+                    if linked_session_id not in session_ids:
+                        session_ids.append(linked_session_id)
+        return self._expand_related_session_ids(session_ids)
+
+    def _expand_related_session_ids(self, session_ids: list[str]) -> list[str]:
+        if self.session_repository is None:
             return session_ids
-        external_user_id = self.session_map_repository.get_external_user_id(
-            channel=self.channel_name,
-            session_id=session_id,
-        )
-        if not external_user_id:
-            return session_ids
-        linked_session_ids = self.session_map_repository.list_session_ids_for_user(
-            channel=self.channel_name,
-            external_user_id=external_user_id,
-            limit=MAX_SESSIONS_TO_SCAN,
-        )
-        for linked_session_id in linked_session_ids:
-            if linked_session_id not in session_ids:
-                session_ids.append(linked_session_id)
-        return session_ids
+        expanded = list(session_ids)
+        queue = list(session_ids)
+        max_sessions = max(MAX_SESSIONS_TO_SCAN, len(session_ids)) * 2
+        while queue and len(expanded) < max_sessions:
+            current_session_id = queue.pop(0)
+            parent_session_id = self.session_repository.get_parent_session_id(session_id=current_session_id)
+            if parent_session_id and parent_session_id not in expanded:
+                expanded.append(parent_session_id)
+                queue.append(parent_session_id)
+            child_session_ids = self.session_repository.list_child_session_ids(
+                parent_session_id=current_session_id,
+                session_kind="job_execution",
+                limit=MAX_SESSIONS_TO_SCAN,
+            )
+            for child_session_id in child_session_ids:
+                if child_session_id in expanded:
+                    continue
+                expanded.append(child_session_id)
+                if len(expanded) >= max_sessions:
+                    break
+                queue.append(child_session_id)
+        return expanded
 
     def _search_summaries(self, *, session_ids: list[str], query: str) -> list[SessionSearchHit]:
         hits: list[SessionSearchHit] = []

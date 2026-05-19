@@ -317,6 +317,9 @@ class SessionDebugAssembler:
         profile = self.user_profile_aggregator.build(signals=signals)
         return SessionDebugResponse(
             session_id=session.id,
+            session_kind=str(getattr(session, "session_kind", "conversation") or "conversation"),
+            parent_session_id=str(getattr(session, "parent_session_id", "") or "").strip() or None,
+            session_metadata=dict(getattr(session, "metadata_json", {}) or {}),
             created_at=session.created_at,
             messages=[
                 MessageDebugResponse(

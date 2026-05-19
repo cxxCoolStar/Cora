@@ -27,6 +27,9 @@ class DatabaseManager:
             raw = self._unwrap_sqlite_connection(connection.connection)
             if raw is None:
                 return
+            self._ensure_column(raw, "clawbot_sessions", "session_kind", "VARCHAR(32) NOT NULL DEFAULT 'conversation'")
+            self._ensure_column(raw, "clawbot_sessions", "parent_session_id", "VARCHAR")
+            self._ensure_column(raw, "clawbot_sessions", "metadata_json", "JSON NOT NULL DEFAULT '{}'")
             self._ensure_column(raw, "clawbot_messages", "metadata_json", "JSON NOT NULL DEFAULT '{}'")
             self._ensure_column(raw, "clawbot_items", "document_key", "VARCHAR(255)")
             self._ensure_column(raw, "clawbot_items", "version", "INTEGER NOT NULL DEFAULT 1")

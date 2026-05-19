@@ -21,6 +21,7 @@ from core.agent.skill_loader import SkillLoader
 from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.schemas.tool import ToolCall, ToolResult
+from core.schemas.tool import ToolSpec as ModelToolSpec
 
 
 @dataclass(slots=True)
@@ -28,6 +29,8 @@ class PreparedTurn:
     context_snapshot: RuntimeContextSnapshot
     runtime: ConversationRuntimeState
     history: list[Message]
+    tool_specs: list[ModelToolSpec]
+    tool_names: set[str]
 
 
 @dataclass(slots=True)
@@ -69,6 +72,7 @@ class AgentTurnRunner:
     history_loader: Callable[..., list[Message]]
     delivery_available: Callable[[], bool]
     media_kind_resolver: Callable[[UploadFile | None], str | None]
+    tool_specs_resolver: Callable[[ConversationRuntimeState], list[ModelToolSpec]]
 
     def sync_model_client(self, model_client: ModelClient) -> None:
         self.loop.model_client = model_client
@@ -126,15 +130,17 @@ class AgentTurnRunner:
                 upload_name=upload.filename if upload is not None else None,
                 delivery_available=self.delivery_available(),
                 history=prepared_turn.history,
+                tool_specs=prepared_turn.tool_specs,
             )
         )
-        retry_category = self.tool_retry_category(
+        policy = self._tool_routing_policy(tool_names=prepared_turn.tool_names)
+        retry_category = policy.tool_retry_category(
             user_text=user_text,
             raw_text=raw_text,
             upload=upload,
             loop_result=loop_result,
         )
-        forced_tool_selection = self.forced_tool_selection(
+        forced_tool_selection = policy.forced_tool_selection(
             user_text=user_text,
             raw_text=raw_text,
             upload=upload,
@@ -147,7 +153,7 @@ class AgentTurnRunner:
                 prepared_turn=prepared_turn,
             )
         elif retry_category is not None:
-            retry_instruction = self.tool_retry_instruction(retry_category)
+            retry_instruction = policy.tool_retry_instruction(retry_category)
             retry_messages = self.orchestrator.prompt_builder.build_messages(
                 session_id=session_id,
                 user_text=user_text,
@@ -165,8 +171,9 @@ class AgentTurnRunner:
                 session_id=session_id,
                 initial_messages=retry_messages,
                 runtime=prepared_turn.runtime,
+                tool_specs=prepared_turn.tool_specs,
             )
-            fallback_selection = self.fallback_tool_selection(
+            fallback_selection = policy.fallback_tool_selection(
                 retry_category=retry_category,
                 user_text=user_text,
                 raw_text=raw_text,
@@ -191,16 +198,20 @@ class AgentTurnRunner:
         upload: UploadFile | None,
         context_snapshot: RuntimeContextSnapshot,
     ) -> PreparedTurn:
+        runtime = self.runtime_manager.build_runtime_state(
+            session_id=session_id,
+            context_snapshot=context_snapshot,
+            source_message_id=source_message_id,
+            raw_text=raw_text,
+            upload=upload,
+        )
+        tool_specs = list(self.tool_specs_resolver(runtime))
         return PreparedTurn(
             context_snapshot=context_snapshot,
-            runtime=self.runtime_manager.build_runtime_state(
-                session_id=session_id,
-                context_snapshot=context_snapshot,
-                source_message_id=source_message_id,
-                raw_text=raw_text,
-                upload=upload,
-            ),
+            runtime=runtime,
             history=self.history_loader(session_id=session_id, user_text=user_text),
+            tool_specs=tool_specs,
+            tool_names={str(spec.name).strip() for spec in tool_specs if str(spec.name or "").strip()},
         )
 
     async def _forced_tool_loop_result(
@@ -279,8 +290,8 @@ class AgentTurnRunner:
             artifacts=list(result.artifacts),
         )
 
-    def _tool_routing_policy(self) -> ToolRoutingPolicy:
-        return ToolRoutingPolicy.from_runner(self)
+    def _tool_routing_policy(self, *, tool_names: set[str] | None = None) -> ToolRoutingPolicy:
+        return ToolRoutingPolicy.from_runner(self, tool_names=tool_names)
 
     def forced_tool_selection(
         self,
@@ -352,10 +363,15 @@ class AgentTurnRunner:
             else:
                 reason = "The model completed after repeated tool use."
             confidence = "high"
+        disposition = result.disposition
+        if result.runtime.is_background_execution and disposition == "clarify":
+            disposition = "respond"
+            reply = self._background_execution_reply(result=result, fallback_reply=reply)
+            reason = "Background execution could not wait for clarification, so it stopped without leaving a pending question."
         return AgentTurnResult(
             reply=reply,
             status=result.status,
-            disposition=result.disposition,
+            disposition=disposition,
             confidence=confidence,
             reason=reason,
             runtime_context=runtime_context,
@@ -372,6 +388,15 @@ class AgentTurnRunner:
             ],
             artifacts=self._sanitize_json(list(result.artifacts)),
         )
+
+    @staticmethod
+    def _background_execution_reply(*, result: LoopResult, fallback_reply: str) -> str:
+        if result.tool_trace:
+            metadata = dict(result.tool_trace[-1].metadata or {})
+            override = str(metadata.get("background_execution_reply") or "").strip()
+            if override:
+                return override
+        return fallback_reply
 
     @staticmethod
     def _tool_summary_from_loop_trace(entry: ToolExecutionTrace) -> ToolExecutionSummary:

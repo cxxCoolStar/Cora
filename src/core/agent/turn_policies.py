@@ -41,8 +41,10 @@ class ToolRoutingPolicy:
     media_kind_resolver: Callable[[UploadFile | None], str | None] | None = None
 
     @classmethod
-    def from_runner(cls, runner: Any) -> ToolRoutingPolicy:
+    def from_runner(cls, runner: Any, *, tool_names: set[str] | None = None) -> ToolRoutingPolicy:
         def tool_names_provider() -> set[str]:
+            if tool_names is not None:
+                return set(tool_names)
             tool_specs = getattr(getattr(runner, "loop", None), "tool_specs", None)
             if not tool_specs:
                 return set()
