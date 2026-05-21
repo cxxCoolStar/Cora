@@ -7,6 +7,7 @@ from core.agent.execution_policy import (
     ExecutionPolicyResolver,
     JOB_EXECUTION_MODE,
 )
+from core.agent.harness import AgentHarness, DefaultAgentHarness
 from core.agent.loop import AgentLoop, LoopResult
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
@@ -34,6 +35,8 @@ __all__ = [
     "CONVERSATION_EXECUTION_MODE",
     "DIRECT_TOOL_PLAN_MODE",
     "AgentLoop",
+    "AgentHarness",
+    "DefaultAgentHarness",
     "LoopResult",
     "AgentOrchestrator",
     "OrchestratorInput",

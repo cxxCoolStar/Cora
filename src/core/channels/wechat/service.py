@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from core.channels.base import ChannelTurnInput
 from core.channels.wechat.ilink_client import WechatIlinkClient
 from core.channels.wechat.session_router import WechatSessionRouter
 from core.channels.wechat.types import WechatHandleResult, WechatInboundEvent
@@ -108,24 +109,16 @@ class WechatGatewayService:
                     file=BytesIO(file_bytes),
                     headers=None,
                 )
-            response = await self.clawbot_service.ingest(
+            turn_input = self._build_turn_input(
+                event=event,
                 session_id=session_id,
-                text=resolution.normalized_text,
+                normalized_text=resolution.normalized_text,
+                session_reset_reason=resolution.reason,
+                session_is_new=resolution.is_new_session,
+                source_created_at=source_created_at,
                 upload=upload,
-                source_metadata={
-                    "channel": self.CHANNEL_NAME,
-                    "external_event_id": event.event_id,
-                    "external_user_id": event.user_id,
-                    "file_name": event.file_name,
-                    "file_mime": event.file_mime,
-                    "media_download_failed": event.media_download_failed,
-                    "media_download_error": event.media_download_error,
-                    "session_reset_reason": resolution.reason,
-                    "session_is_new": resolution.is_new_session,
-                    "source_create_time_ms": event.create_time_ms,
-                    "source_created_at": source_created_at.isoformat() if source_created_at is not None else None,
-                },
             )
+            response = await self._ingest_turn_input(turn_input)
             if event.media_download_failed and not event.file_path:
                 if response.reply.strip() == "I do not have a final answer yet.":
                     response.reply = "我收到了你发的文字，但这条消息里的图片下载失败了，所以这次还没有成功保存图片。你可以把图片再发一次，或者等我把这条微信图文接收链路修好后再试。"
@@ -147,6 +140,52 @@ class WechatGatewayService:
             session_id=session_id,
             reply=response.reply,
             action=response.action,
+        )
+
+    def _build_turn_input(
+        self,
+        *,
+        event: WechatInboundEvent,
+        session_id: str,
+        normalized_text: str | None,
+        session_reset_reason: str,
+        session_is_new: bool,
+        source_created_at: datetime | None,
+        upload: UploadFile | None,
+    ) -> ChannelTurnInput:
+        return ChannelTurnInput(
+            channel=self.CHANNEL_NAME,
+            session_id=session_id,
+            source_message_id=event.event_id,
+            external_user_id=event.user_id,
+            user_text=normalized_text,
+            raw_text=event.text,
+            upload=upload,
+            delivery_available=self._ilink_client is not None,
+            platform_preset="cora-wechat",
+            source_metadata={
+                "channel": self.CHANNEL_NAME,
+                "external_event_id": event.event_id,
+                "external_user_id": event.user_id,
+                "file_name": event.file_name,
+                "file_mime": event.file_mime,
+                "media_download_failed": event.media_download_failed,
+                "media_download_error": event.media_download_error,
+                "session_reset_reason": session_reset_reason,
+                "session_is_new": session_is_new,
+                "source_create_time_ms": event.create_time_ms,
+                "source_created_at": source_created_at.isoformat() if source_created_at is not None else None,
+                "delivery_available": self._ilink_client is not None,
+                "platform_preset": "cora-wechat",
+            },
+        )
+
+    async def _ingest_turn_input(self, turn_input: ChannelTurnInput):
+        return await self.clawbot_service.ingest(
+            session_id=turn_input.session_id,
+            text=turn_input.user_text,
+            upload=turn_input.upload,
+            source_metadata=turn_input.source_metadata,
         )
 
     @staticmethod

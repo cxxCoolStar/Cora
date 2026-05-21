@@ -11,6 +11,7 @@ from fastapi import UploadFile
 from core.agent.context_budget import ContextBudgetManager
 from core.agent.context_manager import SessionContextManager
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
+from core.agent.harness import DefaultAgentHarness, new_run_input
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
@@ -30,6 +31,7 @@ from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
+from core.schemas.harness import HarnessRunInput
 from core.storage.db import DatabaseManager
 from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, UserSignalRepository
 from core.tools import ToolInvocation
@@ -62,6 +64,18 @@ class StubExecutor:
 class StubPendingStateRepository:
     def get_latest_pending(self, *, session_id: str):
         return None
+
+
+@dataclass
+class SpyHarness:
+    result: LoopResult
+    inputs: list[HarnessRunInput]
+    execution_policy: Any = None
+    id: str = "spy-harness"
+
+    async def run(self, *, run_input: HarnessRunInput) -> LoopResult:
+        self.inputs.append(run_input)
+        return self.result
 
 
 @dataclass
@@ -477,6 +491,103 @@ async def test_orchestrator_passes_per_turn_tool_specs_to_loop() -> None:
 
     assert result.final_response == "Ready."
     assert model.tools_seen == [["read_file"]]
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_runs_single_agent_lifecycle() -> None:
+    runtime_manager = AgentRuntimeManager(pending_state_repository=StubPendingStateRepository())
+    model = StubModelClient(responses=[ModelResponse(assistant_text="Ready.", tool_calls=[])])
+    executor = StubExecutor(results=[])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=runtime_manager,
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner)
+
+    result = await harness.run(
+        run_input=new_run_input(
+            session_id="session-harness",
+            source_message_id="msg-harness",
+            user_text="hello",
+            raw_text="hello",
+            upload=None,
+            context_snapshot=RuntimeContextSnapshot(),
+        )
+    )
+
+    assert result.final_response == "Ready."
+    assert [event.event_type for event in harness.trace_events] == [
+        "harness.prepare.completed",
+        "harness.start.completed",
+        "harness.resolve.completed",
+        "harness.cleanup.completed",
+    ]
+    assert harness.trace_events[0].metadata["tool_count"] == 1
+    assert harness.execution_policy is not None
+    assert harness.execution_policy.mode == "conversation"
+
+
+@pytest.mark.anyio
+async def test_agent_turn_runner_delegates_to_harness() -> None:
+    runtime = ConversationRuntimeState(session_id="session-spy")
+    loop_result = LoopResult(
+        final_response="Harness reply.",
+        trace=[Message.assistant(session_id="session-spy", content="Harness reply.")],
+        runtime=runtime,
+        exit_reason="assistant_text",
+        steps=1,
+    )
+    spy_harness = SpyHarness(result=loop_result, inputs=[])
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(
+            loop=AgentLoop(
+                model_client=StubModelClient(responses=[]),
+                tool_executor=StubExecutor(results=[]),
+                tool_specs=[],
+            )
+        ),
+        loop=AgentLoop(
+            model_client=StubModelClient(responses=[]),
+            tool_executor=StubExecutor(results=[]),
+            tool_specs=[],
+        ),
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: [],
+        execution_policy_resolver=ExecutionPolicyResolver(),
+        harness=spy_harness,
+    )
+
+    result = await runner.run_turn(
+        session_id="session-spy",
+        source_message_id="msg-spy",
+        user_text="hello",
+        raw_text="hello raw",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+    )
+
+    assert result.reply == "Harness reply."
+    assert len(spy_harness.inputs) == 1
+    assert spy_harness.inputs[0].session_id == "session-spy"
+    assert spy_harness.inputs[0].source_message_id == "msg-spy"
+    assert spy_harness.inputs[0].user_text == "hello"
+    assert spy_harness.inputs[0].raw_text == "hello raw"
 
 
 def test_session_runtime_snapshot_loader_builds_context_from_history_and_events() -> None:

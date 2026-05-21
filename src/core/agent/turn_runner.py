@@ -7,6 +7,7 @@ from typing import Any, Callable
 from fastapi import UploadFile
 
 from core.agent.execution_policy import ExecutionPolicy, ExecutionPolicyResolver
+from core.agent.harness import AgentHarness, DefaultAgentHarness, new_run_input
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.turn_policies import (
@@ -93,6 +94,7 @@ class AgentTurnRunner:
     media_kind_resolver: Callable[[UploadFile | None], str | None]
     tool_specs_resolver: Callable[[ConversationRuntimeState], list[ModelToolSpec]]
     execution_policy_resolver: ExecutionPolicyResolver
+    harness: AgentHarness | None = None
 
     def sync_model_client(self, model_client: ModelClient) -> None:
         self.loop.model_client = model_client
@@ -134,25 +136,22 @@ class AgentTurnRunner:
         upload: UploadFile | None,
         context_snapshot: RuntimeContextSnapshot,
     ) -> AgentTurnResult:
-        prepared_turn = self.prepare_turn(
+        run_input = new_run_input(
             session_id=session_id,
-            user_text=user_text,
             source_message_id=source_message_id,
+            user_text=user_text,
             raw_text=raw_text,
             upload=upload,
             context_snapshot=context_snapshot,
         )
-        plan = await self._build_turn_execution_plan(
-            session_id=session_id,
-            user_text=user_text,
-            raw_text=raw_text,
-            upload=upload,
-            prepared_turn=prepared_turn,
+        harness = self.harness or DefaultAgentHarness(runner=self)
+        loop_result = await harness.run(run_input=run_input)
+        execution_policy = getattr(harness, "execution_policy", None) or self._policy_resolver().for_runtime(
+            loop_result.runtime
         )
-        loop_result = await self._execute_turn_plan(plan)
         return self.loop_result_to_turn_result(
             loop_result,
-            execution_policy=prepared_turn.execution_policy,
+            execution_policy=execution_policy,
         )
 
     async def _build_turn_execution_plan(

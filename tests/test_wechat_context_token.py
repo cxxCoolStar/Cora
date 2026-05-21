@@ -14,6 +14,7 @@ from core.channels.wechat.context_token_store import WechatContextTokenStore  # 
 from core.channels.wechat.ilink_client import WechatIlinkClient, WechatIlinkConfig, _aes128_ecb_encrypt  # noqa: E402
 from core.channels.wechat.login import WechatQrLoginClient  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
+from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
 
 
 class _SpyClient(WechatIlinkClient):
@@ -113,8 +114,6 @@ def test_wechat_gateway_passes_original_event_time_to_clawbot() -> None:
         session_router=_StubSessionRouter(),  # type: ignore[arg-type]
     )
 
-    from core.channels.wechat.types import WechatInboundEvent  # noqa: E402
-
     result = asyncio.run(
         gateway.handle_inbound_event(
             event=WechatInboundEvent(
@@ -130,6 +129,67 @@ def test_wechat_gateway_passes_original_event_time_to_clawbot() -> None:
     assert clawbot_service.source_metadata is not None
     assert clawbot_service.source_metadata["source_create_time_ms"] == 123456789
     assert clawbot_service.source_metadata["source_created_at"] == "1970-01-02T10:17:36.789000+00:00"
+
+
+def test_wechat_gateway_normalizes_inbound_event_to_channel_turn_input(tmp_path: Path) -> None:
+    client = _SpyClient(
+        WechatIlinkConfig(
+            token="dummy",
+            context_tokens_path=tmp_path / "wechat" / "tokens.json",
+        )
+    )
+    gateway = WechatGatewayService(
+        clawbot_service=object(),  # type: ignore[arg-type]
+        event_repository=object(),  # type: ignore[arg-type]
+        session_map_repository=object(),  # type: ignore[arg-type]
+        ilink_client=client,
+        session_router=object(),  # type: ignore[arg-type]
+    )
+    event = WechatInboundEvent(
+        event_id="msg-normalized",
+        user_id="wx-user-9",
+        text="  保存这张图  ",
+        file_name="photo.jpg",
+        file_mime="image/jpeg",
+        media_download_failed=True,
+        media_download_error="download timeout",
+        create_time_ms=123456789,
+    )
+
+    turn_input = gateway._build_turn_input(
+        event=event,
+        session_id="session-9",
+        normalized_text="保存这张图",
+        session_reset_reason="reuse_existing",
+        session_is_new=False,
+        source_created_at=gateway._source_created_at(event),
+        upload=None,
+    )
+
+    assert turn_input.channel == "wechat"
+    assert turn_input.session_id == "session-9"
+    assert turn_input.source_message_id == "msg-normalized"
+    assert turn_input.external_user_id == "wx-user-9"
+    assert turn_input.user_text == "保存这张图"
+    assert turn_input.raw_text == "  保存这张图  "
+    assert turn_input.delivery_available is True
+    assert turn_input.platform_preset == "cora-wechat"
+    assert turn_input.source_metadata == {
+        "channel": "wechat",
+        "external_event_id": "msg-normalized",
+        "external_user_id": "wx-user-9",
+        "file_name": "photo.jpg",
+        "file_mime": "image/jpeg",
+        "media_download_failed": True,
+        "media_download_error": "download timeout",
+        "session_reset_reason": "reuse_existing",
+        "session_is_new": False,
+        "source_create_time_ms": 123456789,
+        "source_created_at": "1970-01-02T10:17:36.789000+00:00",
+        "delivery_available": True,
+        "platform_preset": "cora-wechat",
+    }
+    asyncio.run(client.aclose())
 
 
 def test_ilink_client_download_file_decrypts_media_payload(tmp_path: Path):
