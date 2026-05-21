@@ -1,0 +1,40 @@
+{
+  "id": "tool_run_records_tool_trace",
+  "type": "harness",
+  "description": "Tool-using single-agent turns should record tool.completed in the harness trace.",
+  "tags": ["harness", "single-agent", "tool", "observability"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "file search tool turn",
+      "input": {
+        "text": "Find `hello_agent` in `src`"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["search_files"],
+        "reply_contains_all": [
+          "Matches for `hello_agent`",
+          "src/example.py"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "start.completed",
+            "resolve.completed",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

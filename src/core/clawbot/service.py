@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
+from core.agent.harness import DefaultAgentHarness
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
 from core.agent.context_budget import ContextBudgetManager
@@ -16,6 +17,9 @@ from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import RuntimeContextSnapshot
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.clawbot.schemas import (
+    AgentRunDetailResponse,
+    AgentRunSummaryResponse,
+    AgentRunTraceEventResponse,
     DeleteItemResponse,
     ItemDetailResponse,
     ItemSummaryResponse,
@@ -29,6 +33,7 @@ from core.clawbot.service_runtime import (
 )
 from core.agent.skill_loader import SkillLoader
 from core.agent.turn_runner import AgentTurnRunner
+from core.agent.run_records import AgentRunRecordRepository
 from core.clawbot.planner import ToolPlan
 from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import RuntimeToolExecutor
@@ -36,6 +41,7 @@ from core.clawbot.user_profile import UserProfileAggregator
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.schemas.harness import RunBudget
 from core.schemas.tool import ToolSpec as ModelToolSpec
 from core.storage.models import SessionRecord
 from core.storage.repositories import (
@@ -75,6 +81,10 @@ class ClawBotService:
         file_tool_root: Path | None = None,
         tool_manager: ToolManager | None = None,
         toolset_preset: str = "cora-wechat",
+        harness_policy_profile: str | None = None,
+        wechat_harness_policy_profile: str | None = "wechat_safe",
+        job_harness_policy_profile: str | None = "background_readonly",
+        agent_run_record_repository: AgentRunRecordRepository | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -90,6 +100,9 @@ class ClawBotService:
         self.file_tool_root = file_tool_root or Path(".")
         self.tool_manager = tool_manager or ToolManager()
         self.toolset_preset = toolset_preset or "cora-wechat"
+        self.harness_policy_profile = str(harness_policy_profile or "").strip() or None
+        self.wechat_harness_policy_profile = str(wechat_harness_policy_profile or "").strip() or None
+        self.job_harness_policy_profile = str(job_harness_policy_profile or "").strip() or None
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         preconfigured_policy_resolver = (
@@ -171,6 +184,11 @@ class ClawBotService:
             tool_specs_resolver=self._tool_specs_for_runtime,
             execution_policy_resolver=self.execution_policy_resolver,
         )
+        self.agent_run_record_repository = agent_run_record_repository
+        self._agent_turn_runner.harness = DefaultAgentHarness(
+            runner=self._agent_turn_runner,
+            run_record_repository=agent_run_record_repository,
+        )
 
     def create_session(
         self,
@@ -242,6 +260,8 @@ class ClawBotService:
         raw_text: str | None,
         upload: UploadFile | None,
         context_snapshot: RuntimeContextSnapshot,
+        run_budget: RunBudget | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ):
         self._agent_turn_runner.sync_model_client(self.model_client)
         return await self._agent_turn_runner.run_turn(
@@ -251,10 +271,50 @@ class ClawBotService:
             raw_text=raw_text,
             upload=upload,
             context_snapshot=context_snapshot,
+            run_budget=run_budget,
+            run_metadata=run_metadata,
         )
 
     def _load_agent_history(self, *, session_id: str, user_text: str) -> list[Message]:
         return self._context_manager.build_history(session_id=session_id, current_user_text=user_text).as_messages()
+
+    def _run_budget_for_turn(
+        self,
+        *,
+        run_budget: RunBudget | None,
+        context_snapshot: RuntimeContextSnapshot,
+        source_metadata: dict[str, Any] | None,
+    ) -> RunBudget:
+        budget = run_budget or RunBudget()
+        if str(budget.policy_profile or "").strip():
+            return budget
+        default_profile = self._default_harness_policy_profile(
+            context_snapshot=context_snapshot,
+            source_metadata=source_metadata,
+        )
+        if not default_profile:
+            return budget
+        return RunBudget(
+            policy_profile=default_profile,
+            max_steps=budget.max_steps,
+            timeout_seconds=budget.timeout_seconds,
+            max_tool_calls=budget.max_tool_calls,
+            allowed_tool_names=list(budget.allowed_tool_names),
+            denied_tool_names=list(budget.denied_tool_names),
+        )
+
+    def _default_harness_policy_profile(
+        self,
+        *,
+        context_snapshot: RuntimeContextSnapshot,
+        source_metadata: dict[str, Any] | None,
+    ) -> str | None:
+        if context_snapshot.session_kind == "job_execution":
+            return self.job_harness_policy_profile or self.harness_policy_profile
+        metadata = dict(source_metadata or {})
+        if str(metadata.get("channel") or "").strip() == "wechat":
+            return self.wechat_harness_policy_profile or self.harness_policy_profile
+        return self.harness_policy_profile
 
     async def ingest(
         self,
@@ -295,6 +355,12 @@ class ClawBotService:
             raw_text=text,
             upload=upload,
             context_snapshot=context_snapshot,
+            run_budget=self._run_budget_for_turn(
+                run_budget=None,
+                context_snapshot=context_snapshot,
+                source_metadata=source_metadata,
+            ),
+            run_metadata=source_metadata,
         )
         outcome = self._session_shell.outcome_from_turn_result(turn_result)
         self._session_shell.persist_assistant_turn(
@@ -316,8 +382,14 @@ class ClawBotService:
         session_id: str,
         text: str,
         source_metadata: dict[str, Any] | None = None,
+        run_budget: RunBudget | None = None,
     ) -> TurnResponse:
-        outcome = await self.reply_outcome(session_id=session_id, text=text, source_metadata=source_metadata)
+        outcome = await self.reply_outcome(
+            session_id=session_id,
+            text=text,
+            source_metadata=source_metadata,
+            run_budget=run_budget,
+        )
         return self._session_shell.to_turn_response(outcome=outcome)
 
     async def reply_outcome(
@@ -326,6 +398,7 @@ class ClawBotService:
         session_id: str,
         text: str,
         source_metadata: dict[str, Any] | None = None,
+        run_budget: RunBudget | None = None,
     ) -> AssistantTurnOutcome:
         self.session_repository.get(session_id)
         inbound_turn = await self._session_shell.record_inbound_turn(
@@ -343,6 +416,12 @@ class ClawBotService:
             raw_text=text,
             upload=None,
             context_snapshot=context_snapshot,
+            run_budget=self._run_budget_for_turn(
+                run_budget=run_budget,
+                context_snapshot=context_snapshot,
+                source_metadata=source_metadata,
+            ),
+            run_metadata=source_metadata,
         )
         outcome = self._session_shell.outcome_from_turn_result(turn_result)
         self._session_shell.persist_assistant_turn(
@@ -480,6 +559,22 @@ class ClawBotService:
             item_id=item.id,
         )
 
+    def list_agent_runs(self, *, session_id: str) -> list[AgentRunSummaryResponse]:
+        self.session_repository.get(session_id)
+        if self.agent_run_record_repository is None:
+            return []
+        records = self.agent_run_record_repository.list_by_session(session_id=session_id)
+        return [self._agent_run_summary(record) for record in records]
+
+    def get_agent_run(self, *, session_id: str, run_id: str) -> AgentRunDetailResponse:
+        self.session_repository.get(session_id)
+        if self.agent_run_record_repository is None:
+            raise KeyError(f"Agent run record not found: {run_id}")
+        record = self.agent_run_record_repository.get(run_id=run_id)
+        if record.session_id != session_id:
+            raise KeyError(f"Agent run record not found: {run_id}")
+        return self._agent_run_detail(record)
+
     def list_sessions(self) -> list[SessionRecord]:
         return self.session_repository.list_recent(session_kind="conversation")
 
@@ -491,3 +586,37 @@ class ClawBotService:
 
     def list_tool_names(self) -> list[str]:
         return [spec.name for spec in self._tool_specs]
+
+    @staticmethod
+    def _agent_run_summary(record) -> AgentRunSummaryResponse:
+        return AgentRunSummaryResponse(
+            run_id=record.run_id,
+            session_id=record.session_id,
+            source_message_id=record.source_message_id,
+            harness_id=record.harness_id,
+            status=record.status,
+            outcome=record.outcome,
+            steps=record.steps,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+        )
+
+    @classmethod
+    def _agent_run_detail(cls, record) -> AgentRunDetailResponse:
+        return AgentRunDetailResponse(
+            **cls._agent_run_summary(record).model_dump(),
+            input_metadata=dict(record.input_metadata or {}),
+            metadata=dict(record.metadata or {}),
+            error=record.error,
+            trace_events=[
+                AgentRunTraceEventResponse(
+                    event_type=event.event_type,
+                    run_id=event.run_id,
+                    session_id=event.session_id,
+                    sequence=event.sequence,
+                    severity=event.severity,
+                    metadata=dict(event.metadata or {}),
+                )
+                for event in list(record.trace_events or [])
+            ],
+        )

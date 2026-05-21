@@ -3,7 +3,6 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import sys
-import tempfile
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,12 +31,6 @@ def _make_database(tmp_path: Path) -> DatabaseManager:
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'scheduled-tasks.db').as_posix()}")
     database.create_all()
     return database
-
-
-def _temp_dir() -> Path:
-    root = ROOT / ".tmp-test-files"
-    root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(dir=root))
 
 
 def _write_python_task(path: Path, body: str) -> None:
@@ -155,8 +148,7 @@ def test_schedule_normalization_and_next_run() -> None:
     assert delayed_once == {"kind": "once", "at": datetime(2026, 5, 18, 1, 1, tzinfo=UTC).isoformat()}
 
 
-def test_scheduled_task_repository_state_transitions() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_repository_state_transitions(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -192,8 +184,7 @@ def test_scheduled_task_repository_state_transitions() -> None:
     assert resolved.id == created.id
 
 
-def test_scheduled_task_worker_executes_due_task_and_delivers_reply() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_executes_due_task_and_delivers_reply(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -260,8 +251,7 @@ def test_scheduled_task_worker_executes_due_task_and_delivers_reply() -> None:
     assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-1"
 
 
-def test_scheduled_task_worker_suppresses_silent_reply() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_suppresses_silent_reply(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -317,8 +307,7 @@ def test_scheduled_task_worker_suppresses_silent_reply() -> None:
     assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-silent"
 
 
-def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_dispatches_skill_execution_mode(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -414,8 +403,7 @@ def test_scheduled_task_worker_dispatches_skill_execution_mode() -> None:
     assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-skill"
 
 
-def test_scheduled_task_worker_runs_workspace_script_mode() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_runs_workspace_script_mode(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -488,8 +476,7 @@ def test_scheduled_task_worker_runs_workspace_script_mode() -> None:
     assert updated.metadata_json["last_run"]["execution_session_id"] == "job-session-script"
 
 
-def test_scheduled_task_worker_keeps_origin_session_clean_and_records_child_execution_session() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_keeps_origin_session_clean_and_records_child_execution_session(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     message_repository = MessageRepository(database)
@@ -623,7 +610,7 @@ def test_scheduled_task_worker_blocks_forbidden_tool_calls_end_to_end(tmp_path: 
     assert "user_memory" not in model.seen_tool_names[0]
     assert "shell_exec" not in model.seen_tool_names[0]
     assert model.tool_replies
-    assert "unavailable during background scheduled execution" in model.tool_replies[0]
+    assert "not allowed by this run's harness policy" in model.tool_replies[0]
     assert delivered == [("wx-user-7", model.tool_replies[0])]
 
     scoped_records = container.scheduled_task_repository.list_for_scope(
@@ -768,8 +755,7 @@ def test_execute_tool_plan_outcome_suppresses_clarifying_skill_for_job_execution
     assert execution_messages[1].content == "[SILENT]"
 
 
-def test_scheduled_task_tool_coerces_one_shot_reminder_from_user_text() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_tool_coerces_one_shot_reminder_from_user_text(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -803,8 +789,7 @@ def test_scheduled_task_tool_coerces_one_shot_reminder_from_user_text() -> None:
     assert records[0].schedule_json["kind"] == "once"
 
 
-def test_scheduled_task_tool_creates_skill_execution_without_prompt() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_tool_creates_skill_execution_without_prompt(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -851,8 +836,7 @@ def test_scheduled_task_tool_creates_skill_execution_without_prompt() -> None:
     }
 
 
-def test_scheduled_task_tool_anchors_relative_delay_to_source_event_time_and_formats_local_next_run() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_tool_anchors_relative_delay_to_source_event_time_and_formats_local_next_run(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     source_event_repository = SourceEventRepository(database)
@@ -907,8 +891,7 @@ def test_scheduled_task_tool_anchors_relative_delay_to_source_event_time_and_for
     assert "2026-05-18 10:06:11 (Asia/Shanghai)" in result.reply
 
 
-def test_scheduled_task_worker_shortens_sleep_to_nearest_due_task() -> None:
-    tmp_path = _temp_dir()
+def test_scheduled_task_worker_shortens_sleep_to_nearest_due_task(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     session_repository = SessionRepository(database)
     task_repository = ScheduledTaskRepository(database)
@@ -934,8 +917,7 @@ def test_scheduled_task_worker_shortens_sleep_to_nearest_due_task() -> None:
     assert worker.next_sleep_seconds(now=now) == 17
 
 
-def test_container_defaults_scheduled_task_timezone_to_asia_shanghai() -> None:
-    tmp_path = _temp_dir()
+def test_container_defaults_scheduled_task_timezone_to_asia_shanghai(tmp_path: Path) -> None:
     container = build_clawbot_container(
         settings=CoreSettings(
             clawbot_database_path=tmp_path / "clawbot.db",

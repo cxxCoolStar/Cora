@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.schemas.harness import RunBudget
+
 
 @dataclass(slots=True)
 class EvalStateExpectation:
@@ -11,6 +13,11 @@ class EvalStateExpectation:
     deleted_item_count: int | None = None
     pending_exists: bool | None = None
     pending_kind: str | None = None
+    agent_run_count: int | None = None
+    latest_agent_run_status: str | None = None
+    latest_agent_run_outcome: str | None = None
+    latest_agent_run_error_contains_all: list[str] = field(default_factory=list)
+    latest_agent_run_trace_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_any: list[str] = field(default_factory=list)
     user_memory_not_contains: list[str] = field(default_factory=list)
@@ -27,6 +34,11 @@ class EvalStateExpectation:
             deleted_item_count=_maybe_int(payload.get("deleted_item_count")),
             pending_exists=_maybe_bool(payload.get("pending_exists")),
             pending_kind=_maybe_str(payload.get("pending_kind")),
+            agent_run_count=_maybe_int(payload.get("agent_run_count")),
+            latest_agent_run_status=_maybe_str(payload.get("latest_agent_run_status")),
+            latest_agent_run_outcome=_maybe_str(payload.get("latest_agent_run_outcome")),
+            latest_agent_run_error_contains_all=_string_list(payload.get("latest_agent_run_error_contains_all")),
+            latest_agent_run_trace_contains_all=_string_list(payload.get("latest_agent_run_trace_contains_all")),
             user_memory_contains_all=_string_list(payload.get("user_memory_contains_all")),
             user_memory_contains_any=_string_list(payload.get("user_memory_contains_any")),
             user_memory_not_contains=_string_list(payload.get("user_memory_not_contains")),
@@ -42,6 +54,7 @@ class EvalExpectation:
     status: str | None = None
     disposition: str | None = None
     action: str | None = None
+    error_contains_all: list[str] = field(default_factory=list)
     tool_names_any: list[str] = field(default_factory=list)
     tool_names_all: list[str] = field(default_factory=list)
     reply_contains_all: list[str] = field(default_factory=list)
@@ -58,6 +71,7 @@ class EvalExpectation:
             status=_maybe_str(payload.get("status")),
             disposition=_maybe_str(payload.get("disposition")),
             action=_maybe_str(payload.get("action")),
+            error_contains_all=_string_list(payload.get("error_contains_all")),
             tool_names_any=_string_list(payload.get("tool_names_any")),
             tool_names_all=_string_list(payload.get("tool_names_all")),
             reply_contains_all=_string_list(payload.get("reply_contains_all")),
@@ -72,13 +86,17 @@ class EvalExpectation:
 @dataclass(slots=True)
 class EvalInput:
     text: str
+    run_budget: RunBudget = field(default_factory=RunBudget)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvalInput":
         text = str(payload.get("text") or "").strip()
         if not text:
             raise ValueError("Eval step input.text is required.")
-        return cls(text=text)
+        return cls(
+            text=text,
+            run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),
+        )
 
 
 @dataclass(slots=True)
@@ -144,6 +162,8 @@ class EvalStep:
 class EvalSetup:
     user_memory_markdown: str | None = None
     workspace_files: dict[str, str] = field(default_factory=dict)
+    harness_tool_delay_seconds: float | None = None
+    harness_prepare_failure_message: str | None = None
     web_search_results: dict[str, list[EvalWebSearchHit]] = field(default_factory=dict)
     web_pages: dict[str, EvalWebPage] = field(default_factory=dict)
 
@@ -153,6 +173,8 @@ class EvalSetup:
         return cls(
             user_memory_markdown=_maybe_str(payload.get("user_memory_markdown")),
             workspace_files=_string_map(payload.get("workspace_files")),
+            harness_tool_delay_seconds=_maybe_float(payload.get("harness_tool_delay_seconds")),
+            harness_prepare_failure_message=_maybe_str(payload.get("harness_prepare_failure_message")),
             web_search_results=_web_search_results_map(payload.get("web_search_results")),
             web_pages=_web_pages_map(payload.get("web_pages")),
         )
@@ -186,6 +208,11 @@ class EvalObservedState:
     deleted_item_count: int
     pending_exists: bool
     pending_kind: str | None = None
+    agent_run_count: int = 0
+    latest_agent_run_status: str | None = None
+    latest_agent_run_outcome: str | None = None
+    latest_agent_run_error: str | None = None
+    latest_agent_run_trace_events: list[str] = field(default_factory=list)
     user_memory_text: str = ""
     workspace_root: str = ""
 
@@ -251,6 +278,19 @@ def maybe_str(value: Any) -> str | None:
 
 def maybe_int(value: Any) -> int | None:
     return _maybe_int(value)
+
+
+def _run_budget(value: Any) -> RunBudget:
+    if not isinstance(value, dict):
+        return RunBudget()
+    return RunBudget(
+        policy_profile=_maybe_str(value.get("policy_profile")),
+        max_steps=_maybe_int(value.get("max_steps")),
+        timeout_seconds=_maybe_float(value.get("timeout_seconds")),
+        max_tool_calls=_maybe_int(value.get("max_tool_calls")),
+        allowed_tool_names=_string_list(value.get("allowed_tool_names")),
+        denied_tool_names=_string_list(value.get("denied_tool_names")),
+    )
 
 
 def _string_list(value: Any) -> list[str]:
@@ -325,6 +365,12 @@ def _maybe_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _maybe_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _maybe_bool(value: Any) -> bool | None:

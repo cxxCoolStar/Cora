@@ -1,0 +1,39 @@
+{
+  "id": "failure_records_run_failed_trace",
+  "type": "harness",
+  "description": "Failed single-agent turns should record run.failed and the error text.",
+  "tags": ["harness", "single-agent", "failure", "observability"],
+  "setup": {
+    "harness_prepare_failure_message": "eval injected prepare failure"
+  },
+  "steps": [
+    {
+      "label": "prepare failure",
+      "input": {
+        "text": "Hello"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "error",
+        "action": "error",
+        "error_contains_all": [
+          "RuntimeError",
+          "eval injected prepare failure"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "failed",
+          "latest_agent_run_outcome": "error",
+          "latest_agent_run_error_contains_all": [
+            "RuntimeError",
+            "eval injected prepare failure"
+          ],
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "run.failed"
+          ]
+        }
+      }
+    }
+  ]
+}

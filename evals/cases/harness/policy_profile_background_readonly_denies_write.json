@@ -1,0 +1,38 @@
+{
+  "id": "policy_profile_background_readonly_denies_write",
+  "type": "harness",
+  "description": "background_readonly policy profile should deny write tools.",
+  "tags": ["harness", "single-agent", "tool-governance", "policy-profile"],
+  "steps": [
+    {
+      "label": "write tool denied by profile",
+      "input": {
+        "text": "/tool write_file {\"path\":\"notes/todo.txt\",\"content\":\"ship it\\n\"}",
+        "run_budget": {
+          "policy_profile": "background_readonly"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "not allowed by this run's harness policy"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "workspace_files_not_exist": ["notes/todo.txt"],
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "tool.policy.applied",
+            "tool.denied",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -14,7 +14,7 @@ import httpx
 from core.clawbot.dependencies import get_clawbot_container
 from core.evals.judge import evaluate_step
 from core.evals.models import EvalAssertionFailure, EvalCase, EvalCaseResult, EvalObservedState, EvalSetup, EvalStepResult
-from core.storage.repositories import ItemRepository, PendingStateRepository
+from core.storage.repositories import ItemRepository, PendingStateRepository, SqlAgentRunRecordRepository
 
 
 class EvalRuntime:
@@ -51,10 +51,23 @@ class EvalRuntime:
                 clawbot_dependencies._container = None
                 container = get_clawbot_container()
                 container.initialize()
+                self._configure_harness_tool_delay(container=container, setup=case.setup)
+                self._configure_harness_prepare_failure(container=container, setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
                 for index, step in enumerate(case.steps, start=1):
-                    response = asyncio.run(container.clawbot_service.reply(session_id=session.id, text=step.input.text))
+                    try:
+                        response = asyncio.run(
+                            container.clawbot_service.reply(
+                                session_id=session.id,
+                                text=step.input.text,
+                                run_budget=step.input.run_budget,
+                            )
+                        )
+                    except Exception as exc:
+                        if not step.expect.error_contains_all:
+                            raise
+                        response = _failed_turn_response(exc)
                     observed_state = observe_state(
                         database=container.database,
                         session_id=session.id,
@@ -122,6 +135,30 @@ class EvalRuntime:
             web_store.tavily_api_key = "eval-tavily-key"
         return mock_web_client
 
+    @staticmethod
+    def _configure_harness_tool_delay(*, container, setup: EvalSetup) -> None:
+        delay_seconds = setup.harness_tool_delay_seconds
+        if delay_seconds is None or delay_seconds <= 0:
+            return
+        original_execute_tool_call = container.tool_executor.execute_tool_call
+
+        async def delayed_execute_tool_call(**kwargs):
+            await asyncio.sleep(float(delay_seconds))
+            return await original_execute_tool_call(**kwargs)
+
+        container.tool_executor.execute_tool_call = delayed_execute_tool_call
+
+    @staticmethod
+    def _configure_harness_prepare_failure(*, container, setup: EvalSetup) -> None:
+        message = setup.harness_prepare_failure_message
+        if not message:
+            return
+
+        def failing_history_loader(**kwargs):
+            raise RuntimeError(message)
+
+        container.clawbot_service._agent_turn_runner.history_loader = failing_history_loader
+
 
 @contextmanager
 def isolated_settings_env(*, project_root: Path, sandbox_root: Path, user_memory_path: Path, workspace_root: Path):
@@ -161,11 +198,30 @@ _OVERRIDDEN_ENV = {
 }
 
 
+def _failed_turn_response(exc: Exception):
+    from core.clawbot.schemas import TurnResponse
+
+    return TurnResponse(
+        reply=f"{exc.__class__.__name__}: {exc}",
+        status="failed",
+        disposition="error",
+        action="error",
+        item_id=None,
+        needs_clarification=False,
+        artifacts=[],
+        trace=[],
+        decision_source="exception",
+    )
+
+
 def observe_state(*, database, session_id: str, user_memory_path: Path, workspace_root: Path) -> EvalObservedState:
     item_repository = ItemRepository(database)
     pending_repository = PendingStateRepository(database)
+    agent_run_repository = SqlAgentRunRecordRepository(database)
     active_items = item_repository.list_by_session(session_id=session_id, include_deleted=False)
     all_items = item_repository.list_by_session(session_id=session_id, include_deleted=True)
+    agent_runs = agent_run_repository.list_by_session(session_id=session_id)
+    latest_agent_run = agent_runs[0] if agent_runs else None
     deleted_item_count = sum(1 for item in all_items if bool(getattr(item, "is_deleted", 0)))
     pending = pending_repository.get_latest_pending(session_id=session_id)
     pending_kind = None
@@ -178,6 +234,15 @@ def observe_state(*, database, session_id: str, user_memory_path: Path, workspac
         deleted_item_count=deleted_item_count,
         pending_exists=pending is not None,
         pending_kind=pending_kind,
+        agent_run_count=len(agent_runs),
+        latest_agent_run_status=latest_agent_run.status if latest_agent_run is not None else None,
+        latest_agent_run_outcome=latest_agent_run.outcome if latest_agent_run is not None else None,
+        latest_agent_run_error=latest_agent_run.error if latest_agent_run is not None else None,
+        latest_agent_run_trace_events=[
+            event.event_type for event in list(latest_agent_run.trace_events or [])
+        ]
+        if latest_agent_run is not None
+        else [],
         user_memory_text=user_memory_text,
         workspace_root=str(workspace_root),
     )

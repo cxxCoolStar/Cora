@@ -23,6 +23,7 @@ from core.storage.repositories import (
     ScheduledTaskRepository,
     SessionRepository,
     SessionSummaryRepository,
+    SqlAgentRunRecordRepository,
     SourceEventRepository,
     TopicActivityRepository,
     TopicItemRepository,
@@ -46,6 +47,7 @@ class ClawBotContainer:
     pending_state_repository: PendingStateRepository
     user_signal_repository: UserSignalRepository
     topic_repository: TopicRepository
+    agent_run_record_repository: SqlAgentRunRecordRepository
     scheduled_task_repository: ScheduledTaskRepository
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
@@ -76,6 +78,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
     pending_state_repository = PendingStateRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
+    agent_run_record_repository = SqlAgentRunRecordRepository(database)
     scheduled_task_repository = ScheduledTaskRepository(database)
     session_map_repository = ChannelSessionMapRepository(database)
     topic_item_repository = TopicItemRepository(database)
@@ -174,6 +177,10 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         user_memory_path=active_settings.user_memory_path,
         file_tool_root=active_settings.file_tool_root,
         toolset_preset=active_settings.toolset_preset,
+        harness_policy_profile=active_settings.harness_policy_profile,
+        wechat_harness_policy_profile=active_settings.wechat_harness_policy_profile,
+        job_harness_policy_profile=active_settings.job_harness_policy_profile,
+        agent_run_record_repository=agent_run_record_repository,
     )
     return ClawBotContainer(
         settings=active_settings,
@@ -186,6 +193,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
+        agent_run_record_repository=agent_run_record_repository,
         scheduled_task_repository=scheduled_task_repository,
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,

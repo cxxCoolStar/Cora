@@ -11,6 +11,8 @@ from core.agent.harness import AgentHarness, DefaultAgentHarness
 from core.agent.loop import AgentLoop, LoopResult
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
+from core.agent.policy_profiles import HARNESS_POLICY_PROFILES, HarnessPolicyProfile, get_harness_policy_profile
+from core.agent.run_records import AgentRunRecord, AgentRunRecordRepository, InMemoryAgentRunRecordRepository
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import (
     ConversationRuntimeState,
@@ -30,6 +32,7 @@ from core.agent.turn_policies import (
 )
 from core.agent.turn_runner import AgentTurnRunner, PreparedTurn
 from core.schemas.execution import ExecutionHints, SuppressedPendingRequest
+from core.schemas.harness import HarnessTraceEventType
 
 __all__ = [
     "CONVERSATION_EXECUTION_MODE",
@@ -41,6 +44,12 @@ __all__ = [
     "AgentOrchestrator",
     "OrchestratorInput",
     "AgentPromptBuilder",
+    "HARNESS_POLICY_PROFILES",
+    "HarnessPolicyProfile",
+    "get_harness_policy_profile",
+    "AgentRunRecord",
+    "AgentRunRecordRepository",
+    "InMemoryAgentRunRecordRepository",
     "ExecutionPolicy",
     "ExecutionPolicyResolver",
     "JOB_EXECUTION_MODE",
@@ -62,4 +71,5 @@ __all__ = [
     "PreparedTurn",
     "ExecutionHints",
     "SuppressedPendingRequest",
+    "HarnessTraceEventType",
 ]

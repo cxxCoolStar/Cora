@@ -1,0 +1,42 @@
+{
+  "id": "tool_budget_denies_extra_tool_call",
+  "type": "harness",
+  "description": "Harness tool governance should deny tool calls that exceed max_tool_calls.",
+  "tags": ["harness", "single-agent", "tool-governance", "budget"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "second tool call denied",
+      "input": {
+        "text": "/tool search_files {\"query\":\"hello_agent\",\"path\":\"src\"}",
+        "run_budget": {
+          "max_tool_calls": 0
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Tool call budget exceeded"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "tool.policy.applied",
+            "tool.denied",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

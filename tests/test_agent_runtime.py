@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +16,7 @@ from core.agent.harness import DefaultAgentHarness, new_run_input
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
+from core.agent.run_records import InMemoryAgentRunRecordRepository
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, RuntimeContextSnapshot, RuntimeStateDelta
 from core.agent.skill_protocol import PendingRequest, PendingStateDelta, SkillExecutionResult
@@ -31,9 +33,9 @@ from core.llm.base import ModelClient
 from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
-from core.schemas.harness import HarnessRunInput
+from core.schemas.harness import HarnessRunInput, HarnessTraceEventType, RunBudget, RunTraceEvent
 from core.storage.db import DatabaseManager
-from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, UserSignalRepository
+from core.storage.repositories import ItemRepository, MessageRepository, PendingStateRepository, SessionRepository, SqlAgentRunRecordRepository, UserSignalRepository
 from core.tools import ToolInvocation
 
 
@@ -59,6 +61,12 @@ class StubExecutor:
         if not self.results:
             raise AssertionError("No stub tool results left")
         return self.results.pop(0)
+
+
+class SlowExecutor:
+    async def execute_tool_call(self, *, session_id: str, tool_call: ToolCall, runtime: ConversationRuntimeState) -> ToolResult:
+        await asyncio.sleep(0.05)
+        return ToolResult(success=True, content="Too late.")
 
 
 class StubPendingStateRepository:
@@ -529,14 +537,584 @@ async def test_default_agent_harness_runs_single_agent_lifecycle() -> None:
 
     assert result.final_response == "Ready."
     assert [event.event_type for event in harness.trace_events] == [
-        "harness.prepare.completed",
-        "harness.start.completed",
-        "harness.resolve.completed",
-        "harness.cleanup.completed",
+        HarnessTraceEventType.RUN_STARTED,
+        HarnessTraceEventType.PREPARE_COMPLETED,
+        HarnessTraceEventType.TOOL_POLICY_APPLIED,
+        HarnessTraceEventType.START_COMPLETED,
+        HarnessTraceEventType.RESOLVE_COMPLETED,
+        HarnessTraceEventType.CLEANUP_COMPLETED,
     ]
-    assert harness.trace_events[0].metadata["tool_count"] == 1
+    assert [event.sequence for event in harness.trace_events] == [1, 2, 3, 4, 5, 6]
+    assert harness.trace_events[1].metadata["tool_count"] == 1
+    assert harness.trace_events[2].metadata["tool_surface"] == "full"
+    assert harness.trace_events[2].metadata["exposed_tool_names"] == ["read_file"]
     assert harness.execution_policy is not None
     assert harness.execution_policy.mode == "conversation"
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_records_completed_run() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    runtime_manager = AgentRuntimeManager(pending_state_repository=StubPendingStateRepository())
+    model = StubModelClient(responses=[ModelResponse(assistant_text="Ready.", tool_calls=[])])
+    executor = StubExecutor(results=[])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=runtime_manager,
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-recorded",
+        source_message_id="msg-recorded",
+        user_text="hello",
+        raw_text="hello",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.final_response == "Ready."
+    assert record.status == "completed"
+    assert record.outcome == "assistant_text"
+    assert record.steps == 1
+    assert record.completed_at is not None
+    assert record.input_metadata == {"has_upload": False, "raw_text_present": True}
+    assert [event.event_type for event in record.trace_events] == [
+        HarnessTraceEventType.RUN_STARTED,
+        HarnessTraceEventType.PREPARE_COMPLETED,
+        HarnessTraceEventType.TOOL_POLICY_APPLIED,
+        HarnessTraceEventType.START_COMPLETED,
+        HarnessTraceEventType.RESOLVE_COMPLETED,
+        HarnessTraceEventType.CLEANUP_COMPLETED,
+    ]
+    assert repository.list_by_session(session_id="session-recorded") == [record]
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_records_incomplete_outcome() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="read_file", arguments={})],
+            )
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(
+                success=True,
+                content="read",
+                status="completed",
+                disposition="continue",
+            )
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+        max_steps=1,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-incomplete",
+        source_message_id="msg-incomplete",
+        user_text="read",
+        raw_text="read",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+    )
+
+    await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert record.status == "incomplete"
+    assert record.outcome == "max_steps"
+    assert record.steps == 1
+    assert record.metadata["tool_trace_count"] == 1
+    tool_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_COMPLETED)
+    assert tool_event.metadata["tool_name"] == "read_file"
+    assert tool_event.metadata["status"] == "completed"
+    assert tool_event.metadata["tool_index"] == 1
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_applies_run_budget_max_steps() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="read_file", arguments={})],
+            )
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(
+                success=True,
+                content="read",
+                status="completed",
+                disposition="continue",
+            )
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+        max_steps=6,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-budget",
+        source_message_id="msg-budget",
+        user_text="read",
+        raw_text="read",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(max_steps=1),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.status == "incomplete"
+    assert result.exit_reason == "max_steps"
+    assert record.outcome == "max_steps"
+    assert record.steps == 1
+    assert record.trace_events[1].metadata["budget_max_steps"] == 1
+    assert loop.max_steps == 6
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_denies_tool_calls_over_budget() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="read_file", arguments={})],
+            ),
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="read_file", arguments={})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(
+                success=True,
+                content="read",
+                status="completed",
+                disposition="continue",
+            )
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+        max_steps=3,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-tool-budget",
+        source_message_id="msg-tool-budget",
+        user_text="read twice",
+        raw_text="read twice",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(max_tool_calls=1),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.status == "completed"
+    assert result.exit_reason == "assistant_text"
+    assert len(result.tool_trace) == 2
+    assert result.tool_trace[0].status == "completed"
+    assert result.tool_trace[1].status == "failed"
+    assert result.tool_trace[1].action == "policy_denied"
+    assert result.tool_trace[1].metadata["policy_reason"] == "max_tool_calls_exceeded"
+    assert len(executor.results) == 0
+    assert HarnessTraceEventType.TOOL_DENIED in [event.event_type for event in record.trace_events]
+    denied_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_DENIED)
+    assert denied_event.metadata["attempted_tool_name"] == "read_file"
+    assert denied_event.metadata["max_tool_calls"] == 1
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_filters_denied_tools_from_run_policy() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(responses=[ModelResponse(assistant_text="Ready.", tool_calls=[])])
+    executor = StubExecutor(results=[])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(name="read_file", description="file reader", input_schema={}),
+            ToolSpec(name="shell_exec", description="shell", input_schema={}),
+        ],
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-denied-surface",
+        source_message_id="msg-denied-surface",
+        user_text="hello",
+        raw_text="hello",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(denied_tool_names=["shell_exec"]),
+    )
+
+    await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
+    assert policy_event.metadata["original_tool_names"] == ["read_file", "shell_exec"]
+    assert policy_event.metadata["filtered_tool_names"] == ["shell_exec"]
+    assert policy_event.metadata["exposed_tool_names"] == ["read_file"]
+    assert policy_event.metadata["run_denied_tool_names"] == ["shell_exec"]
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_denies_disallowed_tool_execution() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="shell_exec", arguments={})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(
+                success=True,
+                content="should not run",
+                status="completed",
+                disposition="continue",
+            )
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(name="read_file", description="file reader", input_schema={}),
+            ToolSpec(name="shell_exec", description="shell", input_schema={}),
+        ],
+        max_steps=2,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-disallowed-exec",
+        source_message_id="msg-disallowed-exec",
+        user_text="run shell",
+        raw_text="run shell",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(allowed_tool_names=["read_file"]),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.tool_trace[0].tool_name == "shell_exec"
+    assert result.tool_trace[0].action == "policy_denied"
+    assert result.tool_trace[0].metadata["policy_reason"] == "tool_not_allowed"
+    assert len(executor.results) == 1
+    denied_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_DENIED)
+    assert denied_event.metadata["reason"] == "tool_not_allowed"
+    assert denied_event.metadata["attempted_tool_name"] == "shell_exec"
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_applies_policy_profile() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="write_file", arguments={})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(
+                success=True,
+                content="should not run",
+                status="completed",
+                disposition="continue",
+            )
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(name="read_file", description="file reader", input_schema={}),
+            ToolSpec(name="write_file", description="file writer", input_schema={}),
+            ToolSpec(name="web_search", description="web", input_schema={}),
+            ToolSpec(name="skill_run", description="skill runner", input_schema={}),
+        ],
+        max_steps=2,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-policy-profile",
+        source_message_id="msg-policy-profile",
+        user_text="write",
+        raw_text="write",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(policy_profile="background_readonly"),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
+    denied_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_DENIED)
+    assert policy_event.metadata["policy_profile"] == "background_readonly"
+    assert policy_event.metadata["exposed_tool_names"] == ["read_file", "skill_run", "web_search"]
+    assert policy_event.metadata["filtered_tool_names"] == ["write_file"]
+    assert result.tool_trace[0].action == "policy_denied"
+    assert result.tool_trace[0].metadata["policy_reason"] == "tool_not_allowed"
+    assert denied_event.metadata["attempted_tool_name"] == "write_file"
+    assert len(executor.results) == 1
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_applies_timeout_budget() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    loop = AgentLoop(
+        model_client=StubModelClient(
+            responses=[
+                ModelResponse(
+                    assistant_text="",
+                    tool_calls=[ToolCall(tool_name="read_file", arguments={})],
+                )
+            ]
+        ),
+        tool_executor=SlowExecutor(),
+        tool_specs=[ToolSpec(name="read_file", description="file reader", input_schema={})],
+        max_steps=4,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-timeout",
+        source_message_id="msg-timeout",
+        user_text="hello",
+        raw_text="hello",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(timeout_seconds=0.001),
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.status == "incomplete"
+    assert result.exit_reason == "timeout"
+    assert record.status == "incomplete"
+    assert record.outcome == "timeout"
+    assert record.completed_at is not None
+    assert [event.event_type for event in record.trace_events][-1] == HarnessTraceEventType.BUDGET_TIMEOUT
+    assert record.trace_events[-1].severity == "warning"
+    assert loop.max_steps == 4
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_records_failed_run_and_reraises() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(responses=[ModelResponse(assistant_text="Ready.", tool_calls=[])])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=StubExecutor(results=[]),
+        tool_specs=[],
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("history unavailable")),
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    run_input = new_run_input(
+        session_id="session-failed",
+        source_message_id="msg-failed",
+        user_text="hello",
+        raw_text="hello",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+    )
+
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert record.status == "failed"
+    assert record.outcome == "error"
+    assert record.completed_at is not None
+    assert "RuntimeError: history unavailable" == record.error
+    assert [event.event_type for event in record.trace_events] == [
+        HarnessTraceEventType.RUN_STARTED,
+        HarnessTraceEventType.RUN_FAILED,
+    ]
+    assert record.trace_events[-1].severity == "error"
+
+
+def test_sql_agent_run_record_repository_roundtrip(tmp_path: Path) -> None:
+    database = DatabaseManager(f"sqlite:///{tmp_path / 'runs.db'}")
+    database.create_all()
+    session = SessionRepository(database).create()
+    repository = SqlAgentRunRecordRepository(database)
+    run_input = new_run_input(
+        session_id=session.id,
+        source_message_id="msg-sql",
+        user_text="hello",
+        raw_text="hello",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+    )
+
+    created = repository.create_started(
+        run_input=run_input,
+        harness_id="default-single-agent",
+        input_metadata={"channel": "wechat"},
+    )
+    completed = repository.mark_completed(
+        run_id=created.run_id,
+        status="completed",
+        outcome="assistant_text",
+        steps=1,
+        trace_events=[
+            RunTraceEvent(
+                event_type=HarnessTraceEventType.CLEANUP_COMPLETED,
+                run_id=created.run_id,
+                session_id=session.id,
+                sequence=1,
+                metadata={"harness_id": "default-single-agent"},
+            )
+        ],
+        metadata={"tool_trace_count": 0},
+    )
+
+    fetched = repository.get(run_id=created.run_id)
+    assert completed.run_id == created.run_id
+    assert fetched.status == "completed"
+    assert fetched.outcome == "assistant_text"
+    assert fetched.input_metadata["channel"] == "wechat"
+    assert fetched.trace_events[0].event_type == HarnessTraceEventType.CLEANUP_COMPLETED
+    assert fetched.trace_events[0].sequence == 1
+    assert repository.list_by_session(session_id=session.id)[0].run_id == created.run_id
 
 
 @pytest.mark.anyio

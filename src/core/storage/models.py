@@ -187,6 +187,24 @@ class ChannelEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class AgentRunRecordModel(Base):
+    __tablename__ = "clawbot_agent_runs"
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    source_message_id: Mapped[str] = mapped_column(String, index=True)
+    harness_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    outcome: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    steps: Mapped[int | None] = mapped_column(nullable=True)
+    input_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trace_events_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ScheduledTaskRecord(Base):
     __tablename__ = "clawbot_scheduled_tasks"
 

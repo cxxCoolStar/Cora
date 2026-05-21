@@ -214,8 +214,13 @@ class InteractiveChatShell:
 
 def launch_tui(*, session_id: str | None = None, trace: bool = True) -> int:
     settings = CoreSettings()
+    updates: dict[str, str] = {}
     if "CORA_TOOLSET_PRESET" not in os.environ:
-        settings = settings.model_copy(update={"toolset_preset": "cora-cli"})
+        updates["toolset_preset"] = "cora-cli"
+    if "CORA_HARNESS_POLICY_PROFILE" not in os.environ:
+        updates["harness_policy_profile"] = "coding_full"
+    if updates:
+        settings = settings.model_copy(update=updates)
     container = build_clawbot_container(settings=settings)
     container.initialize()
     shell = InteractiveChatShell(

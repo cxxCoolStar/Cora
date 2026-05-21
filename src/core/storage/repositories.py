@@ -7,6 +7,7 @@ from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
 from core.storage.models import (
+    AgentRunRecordModel,
     ChannelEventRecord,
     ChannelSessionMapRecord,
     PendingStateRecord,
@@ -22,6 +23,8 @@ from core.storage.models import (
     UserSignalRecord,
     utc_now,
 )
+from core.agent.run_records import AgentRunRecord
+from core.schemas.harness import HarnessRunInput, RunTraceEvent
 from core.tasks.schedule import compute_next_run_at, format_schedule, normalize_schedule_input
 
 
@@ -818,6 +821,138 @@ class ChannelEventRepository:
             session.commit()
             session.refresh(record)
             return record
+
+
+class SqlAgentRunRecordRepository:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create_started(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        harness_id: str,
+        input_metadata: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        with self.database.session() as session:
+            record = AgentRunRecordModel(
+                run_id=run_input.run_id,
+                session_id=run_input.session_id,
+                source_message_id=run_input.source_message_id,
+                harness_id=harness_id,
+                status="running",
+                input_metadata_json=dict(input_metadata or {}),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return self._to_agent_run_record(record)
+
+    def mark_completed(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        outcome: str,
+        steps: int | None,
+        trace_events: list[RunTraceEvent],
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        with self.database.session() as session:
+            record = session.get(AgentRunRecordModel, run_id)
+            if record is None:
+                raise KeyError(f"Agent run record not found: {run_id}")
+            record.status = status
+            record.outcome = outcome
+            record.steps = steps
+            record.completed_at = utc_now()
+            record.trace_events_json = [self._trace_event_to_json(event) for event in trace_events]
+            record.error = None
+            record.metadata_json = dict(metadata or {})
+            session.commit()
+            session.refresh(record)
+            return self._to_agent_run_record(record)
+
+    def mark_failed(
+        self,
+        *,
+        run_id: str,
+        error: str,
+        trace_events: list[RunTraceEvent],
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        with self.database.session() as session:
+            record = session.get(AgentRunRecordModel, run_id)
+            if record is None:
+                raise KeyError(f"Agent run record not found: {run_id}")
+            record.status = "failed"
+            record.outcome = "error"
+            record.completed_at = utc_now()
+            record.trace_events_json = [self._trace_event_to_json(event) for event in trace_events]
+            record.error = error
+            record.metadata_json = dict(metadata or {})
+            session.commit()
+            session.refresh(record)
+            return self._to_agent_run_record(record)
+
+    def get(self, *, run_id: str) -> AgentRunRecord:
+        with self.database.session() as session:
+            record = session.get(AgentRunRecordModel, run_id)
+            if record is None:
+                raise KeyError(f"Agent run record not found: {run_id}")
+            return self._to_agent_run_record(record)
+
+    def list_by_session(self, *, session_id: str) -> list[AgentRunRecord]:
+        with self.database.session() as session:
+            stmt = (
+                select(AgentRunRecordModel)
+                .where(AgentRunRecordModel.session_id == session_id)
+                .order_by(desc(AgentRunRecordModel.started_at))
+            )
+            return [self._to_agent_run_record(record) for record in session.scalars(stmt)]
+
+    @staticmethod
+    def _trace_event_to_json(event: RunTraceEvent) -> dict[str, Any]:
+        return {
+            "event_type": event.event_type,
+            "run_id": event.run_id,
+            "session_id": event.session_id,
+            "sequence": event.sequence,
+            "severity": event.severity,
+            "metadata": dict(event.metadata),
+        }
+
+    @staticmethod
+    def _trace_event_from_json(payload: dict[str, Any]) -> RunTraceEvent:
+        return RunTraceEvent(
+            event_type=str(payload.get("event_type") or ""),
+            run_id=str(payload.get("run_id") or ""),
+            session_id=str(payload.get("session_id") or ""),
+            sequence=int(payload.get("sequence") or 0),
+            severity=str(payload.get("severity") or "info"),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+
+    @classmethod
+    def _to_agent_run_record(cls, record: AgentRunRecordModel) -> AgentRunRecord:
+        return AgentRunRecord(
+            run_id=record.run_id,
+            session_id=record.session_id,
+            source_message_id=record.source_message_id,
+            harness_id=record.harness_id,
+            status=record.status,
+            outcome=record.outcome,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            steps=record.steps,
+            input_metadata=dict(record.input_metadata_json or {}),
+            trace_events=[
+                cls._trace_event_from_json(payload)
+                for payload in list(record.trace_events_json or [])
+            ],
+            error=record.error,
+            metadata=dict(record.metadata_json or {}),
+        )
 
 
 class ScheduledTaskRepository:

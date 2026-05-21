@@ -41,6 +41,34 @@ class DeleteItemResponse(BaseModel):
     item_id: str
 
 
+class AgentRunTraceEventResponse(BaseModel):
+    event_type: str
+    run_id: str
+    session_id: str
+    sequence: int
+    severity: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class AgentRunSummaryResponse(BaseModel):
+    run_id: str
+    session_id: str
+    source_message_id: str
+    harness_id: str
+    status: str
+    outcome: str | None = None
+    steps: int | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
+class AgentRunDetailResponse(AgentRunSummaryResponse):
+    input_metadata: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    error: str | None = None
+    trace_events: list[AgentRunTraceEventResponse] = Field(default_factory=list)
+
+
 class MessageDebugResponse(BaseModel):
     id: str
     role: str

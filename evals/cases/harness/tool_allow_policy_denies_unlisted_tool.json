@@ -1,0 +1,42 @@
+{
+  "id": "tool_allow_policy_denies_unlisted_tool",
+  "type": "harness",
+  "description": "Per-run allow policy should deny tools that are not listed.",
+  "tags": ["harness", "single-agent", "tool-governance", "allow-deny"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "unlisted tool denied",
+      "input": {
+        "text": "/tool search_files {\"query\":\"hello_agent\",\"path\":\"src\"}",
+        "run_budget": {
+          "allowed_tool_names": ["read_file"]
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "not allowed by this run's harness policy"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "tool.policy.applied",
+            "tool.denied",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

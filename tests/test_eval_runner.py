@@ -237,6 +237,79 @@ def test_eval_runner_evaluate_step_checks_workspace_file_assertions(tmp_path: Pa
     assert result.observed_state is observed_state
 
 
+def test_eval_runner_evaluate_step_checks_agent_run_state_assertions(tmp_path: Path) -> None:
+    path = tmp_path / "sample-agent-run.json"
+    path.write_text(
+        """
+        {
+          "id": "sample_case",
+          "type": "harness",
+          "steps": [
+            {
+              "input": {"text": "hello"},
+              "expect": {
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "completed",
+                  "latest_agent_run_outcome": "assistant_text",
+                  "latest_agent_run_trace_contains_all": [
+                    "run.started",
+                    "prepare.completed",
+                    "start.completed",
+                    "resolve.completed",
+                    "cleanup.completed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    case = EvalCase.from_path(path)
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path)
+    response = TurnResponse(
+        reply="ok",
+        status="completed",
+        disposition="respond",
+        action="chat",
+        item_id=None,
+        needs_clarification=False,
+        artifacts=[],
+        trace=[],
+        decision_source="llm_tool_call",
+    )
+    observed_state = EvalObservedState(
+        item_count=0,
+        deleted_item_count=0,
+        pending_exists=False,
+        pending_kind=None,
+        agent_run_count=1,
+        latest_agent_run_status="completed",
+        latest_agent_run_outcome="assistant_text",
+        latest_agent_run_trace_events=[
+            "run.started",
+            "prepare.completed",
+            "start.completed",
+            "resolve.completed",
+            "cleanup.completed",
+        ],
+        user_memory_text="# User Memory\n",
+    )
+
+    result = runner.evaluate_step(
+        case=case,
+        step=case.steps[0],
+        index=1,
+        response=response,
+        observed_state=observed_state,
+    )
+
+    assert result.ok
+    assert result.observed_state is observed_state
+
+
 def test_eval_runner_run_continues_after_infrastructure_failure(tmp_path: Path) -> None:
     cases_dir = tmp_path / "cases" / "capability"
     cases_dir.mkdir(parents=True)
@@ -420,6 +493,324 @@ def test_eval_runtime_runs_mock_web_fetch_fallback_case(tmp_path: Path) -> None:
     assert result.passed_cases == 1
     assert result.failed_cases == 0
     assert result.case_results[0].step_results[0].tool_names == ["web_fetch"]
+
+
+def test_eval_runtime_observes_agent_run_tool_trace(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "tool_trace_case.json").write_text(
+        """
+        {
+          "id": "tool_trace_case",
+          "type": "harness",
+          "description": "Tool turns should be visible in harness eval state.",
+          "setup": {
+            "workspace_files": {
+              "src/example.py": "def hello_agent():\\n    return 'ok'\\n"
+            }
+          },
+          "steps": [
+            {
+              "label": "file search tool turn",
+              "input": {
+                "text": "Find `hello_agent` in `src`"
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "tool_names_any": ["search_files"],
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "completed",
+                  "latest_agent_run_trace_contains_all": [
+                    "run.started",
+                    "tool.completed",
+                    "cleanup.completed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert result.case_results[0].step_results[0].tool_names == ["search_files"]
+    assert observed_state is not None
+    assert observed_state.agent_run_count == 1
+    assert "tool.completed" in observed_state.latest_agent_run_trace_events
+
+
+def test_eval_runtime_observes_agent_run_timeout_trace(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "timeout_case.json").write_text(
+        """
+        {
+          "id": "timeout_case",
+          "type": "harness",
+          "description": "Timeouts should be visible in harness eval state.",
+          "setup": {
+            "harness_tool_delay_seconds": 0.05,
+            "workspace_files": {
+              "src/example.py": "def hello_agent():\\n    return 'ok'\\n"
+            }
+          },
+          "steps": [
+            {
+              "label": "tool turn exceeds budget",
+              "input": {
+                "text": "/tool search_files {\\"query\\":\\"hello_agent\\",\\"path\\":\\"src\\"}",
+                "run_budget": {"timeout_seconds": 0.001}
+              },
+              "expect": {
+                "status": "incomplete",
+                "disposition": "respond",
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "incomplete",
+                  "latest_agent_run_outcome": "timeout",
+                  "latest_agent_run_trace_contains_all": [
+                    "run.started",
+                    "budget.timeout"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert observed_state is not None
+    assert observed_state.latest_agent_run_outcome == "timeout"
+    assert "budget.timeout" in observed_state.latest_agent_run_trace_events
+
+
+def test_eval_runtime_observes_agent_run_failed_trace(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "failure_case.json").write_text(
+        """
+        {
+          "id": "failure_case",
+          "type": "harness",
+          "description": "Expected harness failures should be visible in eval state.",
+          "setup": {
+            "harness_prepare_failure_message": "eval injected prepare failure"
+          },
+          "steps": [
+            {
+              "label": "prepare failure",
+              "input": {"text": "hello"},
+              "expect": {
+                "status": "failed",
+                "disposition": "error",
+                "action": "error",
+                "error_contains_all": ["RuntimeError", "eval injected prepare failure"],
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "failed",
+                  "latest_agent_run_outcome": "error",
+                  "latest_agent_run_error_contains_all": [
+                    "RuntimeError",
+                    "eval injected prepare failure"
+                  ],
+                  "latest_agent_run_trace_contains_all": [
+                    "run.started",
+                    "run.failed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert observed_state is not None
+    assert observed_state.latest_agent_run_error == "RuntimeError: eval injected prepare failure"
+    assert "run.failed" in observed_state.latest_agent_run_trace_events
+
+
+def test_eval_runtime_observes_agent_run_tool_governance_denial(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "tool_budget_case.json").write_text(
+        """
+        {
+          "id": "tool_budget_case",
+          "type": "harness",
+          "description": "Tool budget denials should be visible in eval state.",
+          "setup": {
+            "workspace_files": {
+              "src/example.py": "def hello_agent():\\n    return 'ok'\\n"
+            }
+          },
+          "steps": [
+            {
+              "label": "deny first tool call",
+              "input": {
+                "text": "/tool search_files {\\"query\\":\\"hello_agent\\",\\"path\\":\\"src\\"}",
+                "run_budget": {"max_tool_calls": 0}
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "reply_contains_all": ["Tool call budget exceeded"],
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "completed",
+                  "latest_agent_run_trace_contains_all": [
+                    "tool.policy.applied",
+                    "tool.denied",
+                    "tool.completed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert observed_state is not None
+    assert "tool.policy.applied" in observed_state.latest_agent_run_trace_events
+    assert "tool.denied" in observed_state.latest_agent_run_trace_events
+
+
+def test_eval_runtime_observes_agent_run_allow_policy_denial(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "allow_policy_case.json").write_text(
+        """
+        {
+          "id": "allow_policy_case",
+          "type": "harness",
+          "description": "Per-run allow policy should be visible in eval state.",
+          "setup": {
+            "workspace_files": {
+              "src/example.py": "def hello_agent():\\n    return 'ok'\\n"
+            }
+          },
+          "steps": [
+            {
+              "label": "unlisted tool denied",
+              "input": {
+                "text": "/tool search_files {\\"query\\":\\"hello_agent\\",\\"path\\":\\"src\\"}",
+                "run_budget": {"allowed_tool_names": ["read_file"]}
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "reply_contains_all": ["not allowed by this run's harness policy"],
+                "state": {
+                  "agent_run_count": 1,
+                  "latest_agent_run_status": "completed",
+                  "latest_agent_run_trace_contains_all": [
+                    "tool.policy.applied",
+                    "tool.denied",
+                    "tool.completed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert observed_state is not None
+    assert "tool.denied" in observed_state.latest_agent_run_trace_events
+
+
+def test_eval_runtime_observes_agent_run_policy_profile_denial(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases" / "harness"
+    cases_dir.mkdir(parents=True)
+    (cases_dir / "policy_profile_case.json").write_text(
+        """
+        {
+          "id": "policy_profile_case",
+          "type": "harness",
+          "description": "Policy profiles should be visible in eval state.",
+          "steps": [
+            {
+              "label": "write tool denied by readonly profile",
+              "input": {
+                "text": "/tool write_file {\\"path\\":\\"notes/todo.txt\\",\\"content\\":\\"ship it\\\\n\\"}",
+                "run_budget": {"policy_profile": "background_readonly"}
+              },
+              "expect": {
+                "status": "completed",
+                "disposition": "respond",
+                "reply_contains_all": ["not allowed by this run's harness policy"],
+                "state": {
+                  "agent_run_count": 1,
+                  "workspace_files_not_exist": ["notes/todo.txt"],
+                  "latest_agent_run_status": "completed",
+                  "latest_agent_run_trace_contains_all": [
+                    "tool.policy.applied",
+                    "tool.denied",
+                    "tool.completed"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = EvalRunner(project_root=tmp_path, cases_dir=tmp_path / "cases", case_type="harness")
+
+    result = runner.run()
+    observed_state = result.case_results[0].step_results[0].observed_state
+
+    assert result.passed_cases == 1
+    assert result.failed_cases == 0
+    assert observed_state is not None
+    assert "tool.denied" in observed_state.latest_agent_run_trace_events
 
 
 def test_run_result_to_html_includes_failure_details() -> None:

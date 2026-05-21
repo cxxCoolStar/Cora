@@ -24,6 +24,7 @@ from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSnapshot
 from core.agent.skill_loader import SkillLoader
 from core.llm.base import ModelClient
+from core.schemas.harness import RunBudget
 from core.schemas.message import Message
 from core.schemas.execution import ExecutionHints
 from core.schemas.tool import ToolCall, ToolResult
@@ -135,6 +136,8 @@ class AgentTurnRunner:
         raw_text: str | None,
         upload: UploadFile | None,
         context_snapshot: RuntimeContextSnapshot,
+        run_budget: RunBudget | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ) -> AgentTurnResult:
         run_input = new_run_input(
             session_id=session_id,
@@ -143,6 +146,8 @@ class AgentTurnRunner:
             raw_text=raw_text,
             upload=upload,
             context_snapshot=context_snapshot,
+            budget=run_budget,
+            metadata=run_metadata,
         )
         harness = self.harness or DefaultAgentHarness(runner=self)
         loop_result = await harness.run(run_input=run_input)

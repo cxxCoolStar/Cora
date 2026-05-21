@@ -1,0 +1,27 @@
+name: Harness Evals
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  harness-evals:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run harness evals
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/run_harness_evals.ps1

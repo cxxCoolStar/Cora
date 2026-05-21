@@ -1,0 +1,30 @@
+{
+  "id": "single_agent_run_records_trace",
+  "type": "harness",
+  "description": "Single-agent turns should create an agent run record with lifecycle trace events.",
+  "tags": ["harness", "single-agent", "observability"],
+  "steps": [
+    {
+      "label": "simple chat turn",
+      "input": {
+        "text": "Hello, please reply briefly."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "start.completed",
+            "resolve.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

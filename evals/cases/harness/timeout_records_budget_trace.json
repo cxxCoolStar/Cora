@@ -1,0 +1,40 @@
+{
+  "id": "timeout_records_budget_trace",
+  "type": "harness",
+  "description": "Timed-out single-agent turns should record budget.timeout and an incomplete run.",
+  "tags": ["harness", "single-agent", "timeout", "observability"],
+  "setup": {
+    "harness_tool_delay_seconds": 0.05,
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "tool turn exceeds run budget",
+      "input": {
+        "text": "/tool search_files {\"query\":\"hello_agent\",\"path\":\"src\"}",
+        "run_budget": {
+          "timeout_seconds": 0.001
+        }
+      },
+      "expect": {
+        "status": "incomplete",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "I reached the run timeout before finishing."
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "incomplete",
+          "latest_agent_run_outcome": "timeout",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "budget.timeout"
+          ]
+        }
+      }
+    }
+  ]
+}

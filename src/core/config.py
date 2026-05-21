@@ -14,6 +14,9 @@ class CoreSettings(BaseSettings):
     user_memory_path: Path = Field(default=Path("user-memory/USER.md"))
     file_tool_root: Path = Field(default=Path("."))
     toolset_preset: str = "cora-wechat"
+    harness_policy_profile: str | None = None
+    wechat_harness_policy_profile: str = "wechat_safe"
+    job_harness_policy_profile: str = "background_readonly"
     model_provider: str = "dev"
     model: str | None = None
     openai_api_key: str | None = None

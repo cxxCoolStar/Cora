@@ -439,6 +439,46 @@ OpenAI 适配器走的是兼容 Chat Completions 的 `tools` / `tool_choice=auto
 pytest
 ```
 
+### Harness eval smoke gate
+
+Run the production harness smoke cases locally with:
+
+```powershell
+.\scripts\run_harness_evals.ps1
+```
+
+If your local PowerShell execution policy blocks `.ps1` files, use:
+
+```powershell
+.\scripts\run_harness_evals.cmd
+```
+
+This is equivalent to:
+
+```powershell
+python -B -m core.cli.main eval-run --case-type harness --report-path .cora/evals/harness-latest.json
+```
+
+The harness smoke gate currently covers:
+
+- normal single-agent completion
+- tool-using turns and `tool.completed` trace events
+- timeout budget handling and `budget.timeout`
+- expected harness failure handling and `run.failed`
+- per-run allow/deny tool policy and named policy profiles
+
+### Harness policy profiles
+
+Harness tool permissions are configurable through environment variables:
+
+- `CORA_HARNESS_POLICY_PROFILE`: global fallback profile, unset by default.
+- `CORA_WECHAT_HARNESS_POLICY_PROFILE`: default profile for WeChat turns, `wechat_safe` by default.
+- `CORA_JOB_HARNESS_POLICY_PROFILE`: default profile for job execution sessions, `background_readonly` by default.
+
+The built-in profiles are defined in `src/core/agent/policy_profiles.py`.
+The CLI TUI entry uses `coding_full` as its fallback profile unless
+`CORA_HARNESS_POLICY_PROFILE` is already set.
+
 项目里目前有覆盖以下关键路径的测试：
 
 - 本地 API ingest / reply

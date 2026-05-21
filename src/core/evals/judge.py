@@ -24,6 +24,12 @@ def evaluate_step(
         failures.append(EvalAssertionFailure(f"expected disposition={step.expect.disposition!r}, got {response.disposition!r}"))
     if step.expect.action and response.action != step.expect.action:
         failures.append(EvalAssertionFailure(f"expected action={step.expect.action!r}, got {response.action!r}"))
+    error_text = str(getattr(response, "reply", "") or "")
+    if step.expect.error_contains_all and response.status != "failed":
+        failures.append(EvalAssertionFailure(f"expected an error response, got status={response.status!r}"))
+    for token in step.expect.error_contains_all:
+        if token not in error_text:
+            failures.append(EvalAssertionFailure(f"error missing required text: {token!r}"))
     if step.expect.max_trace_messages is not None and len(response.trace) > step.expect.max_trace_messages:
         failures.append(
             EvalAssertionFailure(
@@ -80,6 +86,42 @@ def evaluate_step(
         actual = observed_state.pending_kind if observed_state is not None else None
         if actual != state_expect.pending_kind:
             failures.append(EvalAssertionFailure(f"expected state.pending_kind={state_expect.pending_kind!r}, got {actual!r}"))
+    if state_expect.agent_run_count is not None:
+        actual = observed_state.agent_run_count if observed_state is not None else None
+        if actual != state_expect.agent_run_count:
+            failures.append(
+                EvalAssertionFailure(f"expected state.agent_run_count={state_expect.agent_run_count!r}, got {actual!r}")
+            )
+    if state_expect.latest_agent_run_status is not None:
+        actual = observed_state.latest_agent_run_status if observed_state is not None else None
+        if actual != state_expect.latest_agent_run_status:
+            failures.append(
+                EvalAssertionFailure(
+                    f"expected state.latest_agent_run_status={state_expect.latest_agent_run_status!r}, got {actual!r}"
+                )
+            )
+    if state_expect.latest_agent_run_outcome is not None:
+        actual = observed_state.latest_agent_run_outcome if observed_state is not None else None
+        if actual != state_expect.latest_agent_run_outcome:
+            failures.append(
+                EvalAssertionFailure(
+                    f"expected state.latest_agent_run_outcome={state_expect.latest_agent_run_outcome!r}, got {actual!r}"
+                )
+            )
+    latest_agent_run_error = observed_state.latest_agent_run_error if observed_state is not None else ""
+    for token in state_expect.latest_agent_run_error_contains_all:
+        if token not in str(latest_agent_run_error or ""):
+            failures.append(EvalAssertionFailure(f"latest agent run error missing required text: {token!r}"))
+    missing_agent_run_events = [
+        name for name in state_expect.latest_agent_run_trace_contains_all
+        if observed_state is None or name not in observed_state.latest_agent_run_trace_events
+    ]
+    if missing_agent_run_events:
+        failures.append(
+            EvalAssertionFailure(
+                f"latest agent run trace missing required events: {missing_agent_run_events!r}; got {getattr(observed_state, 'latest_agent_run_trace_events', [])!r}"
+            )
+        )
 
     user_memory_text = observed_state.user_memory_text if observed_state is not None else ""
     for token in state_expect.user_memory_contains_all:

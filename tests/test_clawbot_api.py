@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
 from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSnapshot  # noqa: E402
+from core.schemas.harness import HarnessTraceEventType  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.poller import WechatPoller  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
@@ -34,7 +35,7 @@ from core.clawbot import RuntimeToolExecutor  # noqa: E402
 from core.ingestion.parsers.image_parser import ImageFileParser  # noqa: E402
 from core.ingestion.service import IngestionService  # noqa: E402
 from core.storage.db import DatabaseManager  # noqa: E402
-from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ItemRepository, MessageRepository, PendingStateRepository, ScheduledTaskRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
+from core.storage.repositories import ChannelEventRepository, ChannelSessionMapRepository, ItemRepository, MessageRepository, PendingStateRepository, ScheduledTaskRepository, SessionRepository, SessionSummaryRepository, SourceEventRepository, SqlAgentRunRecordRepository, TopicActivityRepository, TopicItemRepository, TopicRepository, UserSignalRepository  # noqa: E402
 from core.topics.classifier import TopicClassifier  # noqa: E402
 from core.topics.service import TopicOrganizerService  # noqa: E402
 from core.llm.base import ModelClient  # noqa: E402
@@ -228,6 +229,20 @@ class StubToollessDeliveryRetryModelClient(ModelClient):
         return ModelResponse(assistant_text="抱歉，我无法直接转发这张照片给你。")
 
 
+class StubWriteFileToolModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        if messages and messages[-1].role == "tool":
+            return ModelResponse(assistant_text="done")
+        return ModelResponse(
+            tool_calls=[
+                ToolCall(
+                    tool_name="write_file",
+                    arguments={"path": "notes/todo.txt", "content": "ship it\n"},
+                )
+            ]
+        )
+
+
 class FakeVisionDescriber:
     def describe_image(self, *, image_path: Path, mime_type: str) -> str:
         return (
@@ -275,6 +290,7 @@ def build_test_container(
     item_repository = ItemRepository(database)
     pending_state_repository = PendingStateRepository(database)
     scheduled_task_repository = ScheduledTaskRepository(database)
+    agent_run_record_repository = SqlAgentRunRecordRepository(database)
     user_signal_repository = UserSignalRepository(database)
     topic_repository = TopicRepository(database)
     topic_item_repository = TopicItemRepository(database)
@@ -329,6 +345,7 @@ def build_test_container(
         context_budget_manager=context_budget_manager,
         tool_manager=tool_manager,
         toolset_preset=toolset_preset,
+        agent_run_record_repository=agent_run_record_repository,
     )
     container = ClawBotContainer(
         settings=settings,
@@ -341,6 +358,7 @@ def build_test_container(
         pending_state_repository=pending_state_repository,
         user_signal_repository=user_signal_repository,
         topic_repository=topic_repository,
+        agent_run_record_repository=agent_run_record_repository,
         scheduled_task_repository=scheduled_task_repository,
         ingestion_service=ingestion_service,
         clawbot_service=clawbot_service,
@@ -364,6 +382,76 @@ def test_tool_loop_prompt_includes_archive_core_skill(tmp_path):
     assert messages[0].role == "system"
     assert "archive-core" in messages[0].content
     assert "Shared skills summary:" in messages[0].content
+
+
+def test_wechat_turn_creates_agent_run_record(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+
+    result = asyncio.run(
+        container.clawbot_service.run_agent_loop(
+            session_id=session.id,
+            source_message_id="msg-agent-run",
+            user_text="hello",
+            raw_text="hello",
+            upload=None,
+            context_snapshot=RuntimeContextSnapshot(),
+        )
+    )
+
+    records = container.agent_run_record_repository.list_by_session(session_id=session.id)
+    assert len(records) == 1
+    record = records[0]
+    assert record.session_id == session.id
+    assert record.source_message_id == "msg-agent-run"
+    assert record.status == result.status
+    assert record.outcome is not None
+    assert record.completed_at is not None
+    assert [event.event_type for event in record.trace_events][-1] == HarnessTraceEventType.CLEANUP_COMPLETED
+
+
+def test_wechat_source_metadata_applies_default_harness_profile(tmp_path):
+    container = build_test_container(tmp_path)
+    session = container.session_repository.create()
+
+    response = asyncio.run(
+        container.clawbot_service.reply(
+            session_id=session.id,
+            text="hello",
+            source_metadata={"channel": "wechat"},
+        )
+    )
+
+    record = container.agent_run_record_repository.list_by_session(session_id=session.id)[0]
+    policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
+    assert response.status == "completed"
+    assert policy_event.metadata["policy_profile"] == "wechat_safe"
+
+
+def test_job_session_applies_default_harness_profile(tmp_path):
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = StubWriteFileToolModelClient()
+    origin = container.session_repository.create()
+    job = container.clawbot_service.create_job_execution_session(
+        origin_session_id=origin.id,
+        scheduled_task_id="task-1",
+        task_name="readonly task",
+        execution_mode="agent_prompt",
+    )
+
+    outcome = asyncio.run(
+        container.clawbot_service.reply_outcome(
+            session_id=job.id,
+            text="write a todo note",
+        )
+    )
+
+    record = container.agent_run_record_repository.list_by_session(session_id=job.id)[0]
+    policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
+    assert outcome.status == "completed"
+    assert "not allowed by this run's harness policy" in outcome.reply
+    assert policy_event.metadata["policy_profile"] == "background_readonly"
+    assert not (tmp_path / "notes" / "todo.txt").exists()
 
 
 def test_clawbot_service_toolset_preset_controls_exposed_tools(tmp_path):
@@ -688,6 +776,37 @@ def test_text_ingest_flow(tmp_path):
     items = items_response.json()
     assert len(items) == 1
     assert items[0]["item_type"] == "text_note"
+
+
+def test_agent_run_query_api_returns_trace_detail(tmp_path):
+    deps._container = build_test_container(tmp_path)
+    app = create_app()
+
+    session_id = asyncio.run(api_request(app, "POST", "/sessions")).json()["session_id"]
+    ingest_response = asyncio.run(
+        api_request(
+            app,
+            "POST",
+            f"/sessions/{session_id}/ingest",
+            data={"text": "hello"},
+        )
+    )
+    assert ingest_response.status_code == 200
+
+    runs_response = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/runs"))
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    assert len(runs) == 1
+    assert runs[0]["session_id"] == session_id
+    assert runs[0]["status"] == "completed"
+
+    detail_response = asyncio.run(api_request(app, "GET", f"/sessions/{session_id}/runs/{runs[0]['run_id']}"))
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["run_id"] == runs[0]["run_id"]
+    assert detail["trace_events"][0]["event_type"] == HarnessTraceEventType.RUN_STARTED
+    assert detail["trace_events"][0]["sequence"] == 1
+    assert detail["trace_events"][-1]["event_type"] == HarnessTraceEventType.CLEANUP_COMPLETED
 
 
 def test_greeting_is_not_saved_as_item(tmp_path):
@@ -1718,6 +1837,33 @@ def test_wechat_gateway_reuses_session_for_same_user(tmp_path):
 
     assert first.session_id == second.session_id
     assert second.action in {"retrieve", "organize", "chat"}
+
+
+def test_wechat_gateway_turn_runs_through_harness_with_wechat_profile(tmp_path):
+    container = build_test_container(tmp_path)
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    result = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-harness-1", user_id="wx-user-harness", text="你好")
+        )
+    )
+
+    assert result.action in {"chat", "retrieve", "organize"}
+    records = container.agent_run_record_repository.list_by_session(session_id=result.session_id)
+    assert len(records) == 1
+    record = records[0]
+    policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
+    assert record.input_metadata["channel"] == "wechat"
+    assert policy_event.metadata["policy_profile"] == "wechat_safe"
 
 
 def test_wechat_gateway_manual_new_command_starts_fresh_session(tmp_path):
