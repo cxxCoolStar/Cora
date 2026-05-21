@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 from time import perf_counter
@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import UploadFile
 import httpx
 
+from core.agent.execution_policy import ExecutionPolicy, ExecutionPolicyResolver
 from core.agent.skill_effects import HostEffectDispatcher
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, PendingSessionState, RuntimeStateDelta
@@ -28,6 +29,7 @@ from core.clawbot.tool_domains import (
     WebToolHandler,
 )
 from core.ingestion.service import IngestionService
+from core.schemas.execution import ExecutionHints, SuppressedPendingRequest
 from core.schemas.tool import ToolCall, ToolResult
 from core.storage.repositories import (
     ChannelSessionMapRepository,
@@ -42,18 +44,6 @@ from core.tools import ToolInvocation, register_builtin_tools, registry
 
 logger = logging.getLogger(__name__)
 
-JOB_EXECUTION_ALLOWED_TOOL_NAMES = {
-    "list_files",
-    "search_files",
-    "read_file",
-    "web_search",
-    "web_fetch",
-    "skills_list",
-    "skill_view",
-    "skill_run",
-    "search_sessions",
-}
-
 
 @dataclass(slots=True)
 class ToolExecutionResult:
@@ -64,8 +54,17 @@ class ToolExecutionResult:
     item_id: str | None = None
     needs_clarification: bool = False
     artifacts: list[dict[str, Any]] | None = None
+    hints: ExecutionHints = field(default_factory=ExecutionHints)
     metadata: dict[str, Any] | None = None
     state_delta: RuntimeStateDelta | None = None
+
+    def __post_init__(self) -> None:
+        self.sync_legacy_metadata()
+
+    def sync_legacy_metadata(self) -> None:
+        metadata = dict(self.metadata or {})
+        metadata.update(self.hints.to_legacy_metadata())
+        self.metadata = metadata
 
 
 @dataclass(slots=True)
@@ -115,6 +114,7 @@ class RuntimeToolExecutor:
         file_tool_root: Path | None = None,
         skill_roots: list[Path] | None = None,
         runtime_manager: AgentRuntimeManager | None = None,
+        execution_policy_resolver: ExecutionPolicyResolver | None = None,
         web_http_client: httpx.Client | None = None,
         web_tavily_api_key: str | None = None,
         web_tavily_base_url: str | None = None,
@@ -128,8 +128,10 @@ class RuntimeToolExecutor:
         self.gateway_service = gateway_service
         self.session_map_repository = session_map_repository
         self.channel_name = channel_name
+        self.execution_policy_resolver = execution_policy_resolver or ExecutionPolicyResolver()
         self.runtime_manager = runtime_manager or AgentRuntimeManager(
             pending_state_repository=pending_state_repository,
+            execution_policy_resolver=self.execution_policy_resolver,
         )
         self.user_memory_tools = UserMemoryToolHandler.from_path(user_memory_path or Path("user-memory/USER.md"))
         self.file_tools = FileToolHandler.from_root(file_tool_root or Path("."))
@@ -223,6 +225,13 @@ class RuntimeToolExecutor:
             context=self.runtime_manager.runtime_to_context(runtime),
         )
         next_runtime = self._apply_runtime_update(runtime=runtime, execution=execution)
+        result_metadata = {
+            "action": execution.action,
+            "item_id": execution.item_id,
+            "needs_clarification": execution.needs_clarification,
+            "runtime_state": next_runtime,
+        } | dict(execution.metadata or {})
+        result_metadata.update(execution.hints.to_legacy_metadata())
         return ToolResult(
             success=execution.status != "failed",
             content=execution.reply,
@@ -236,13 +245,8 @@ class RuntimeToolExecutor:
                 "skill_state": dict(next_runtime.skill_state),
             },
             artifacts=list(execution.artifacts or []),
-            metadata={
-                "action": execution.action,
-                "item_id": execution.item_id,
-                "needs_clarification": execution.needs_clarification,
-                "runtime_state": next_runtime,
-            }
-            | dict(execution.metadata or {}),
+            hints=execution.hints.model_copy(deep=True),
+            metadata=result_metadata,
             error=None,
         )
 
@@ -272,7 +276,7 @@ class RuntimeToolExecutor:
                     upload=invocation.upload,
                     context=dict(invocation.context),
                 )
-            blocked_result = self._background_blocked_tool_result(
+            blocked_result = self._blocked_tool_result(
                 invocation=normalized_invocation,
                 tool_name=tool_name,
             )
@@ -695,18 +699,19 @@ class RuntimeToolExecutor:
         if pending_request is not UNSET and pending_request is not None:
             pending = pending_request
             if self._is_background_execution_context(dict(invocation.context or {})):
-                execution.reply = "[SILENT]"
+                policy = self._execution_policy_for_context(invocation.context)
+                execution.reply = policy.clarify_suppressed_reply or execution.reply
                 execution.status = "failed"
                 execution.needs_clarification = True
                 execution.disposition = "clarify"
-                execution.metadata = dict(execution.metadata or {})
-                execution.metadata["background_policy"] = "no_clarify"
-                execution.metadata["background_execution_reply"] = "[SILENT]"
-                execution.metadata["suppressed_pending"] = {
-                    "question": pending.question,
-                    "choices": list(pending.choices),
-                    "payload": dict(pending.payload),
-                }
+                execution.hints.policy_tag = policy.clarify_policy_tag
+                execution.hints.override_reply = policy.clarify_suppressed_reply
+                execution.hints.suppressed_pending = SuppressedPendingRequest(
+                    question=pending.question,
+                    choices=list(pending.choices),
+                    payload=dict(pending.payload),
+                )
+                execution.sync_legacy_metadata()
                 return
             record = self._create_pending_record(
                 invocation=invocation,
@@ -782,38 +787,35 @@ class RuntimeToolExecutor:
             session_id=session_id,
         )
 
-    @staticmethod
-    def _session_kind_from_context(context: dict[str, Any]) -> str:
-        return str(context.get("session_kind") or "conversation").strip() or "conversation"
+    def _execution_policy_for_context(
+        self,
+        context: dict[str, Any] | None,
+    ) -> ExecutionPolicy:
+        return self.execution_policy_resolver.for_context(context)
 
-    @classmethod
-    def _is_background_execution_context(cls, context: dict[str, Any]) -> bool:
-        return cls._session_kind_from_context(context) == "job_execution"
+    def _is_background_execution_context(self, context: dict[str, Any]) -> bool:
+        return self._execution_policy_for_context(context).background_execution
 
-    @classmethod
-    def _background_blocked_tool_result(
-        cls,
+    def _blocked_tool_result(
+        self,
         *,
         invocation: ToolInvocation,
         tool_name: str,
     ) -> ToolExecutionResult | None:
-        if not cls._is_background_execution_context(dict(invocation.context or {})):
-            return None
+        policy = self._execution_policy_for_context(dict(invocation.context or {}))
         normalized_tool_name = str(tool_name or "").strip()
-        if not normalized_tool_name or normalized_tool_name in JOB_EXECUTION_ALLOWED_TOOL_NAMES:
+        blocked_tool_reply = policy.blocked_tool_reply(tool_name=normalized_tool_name)
+        if blocked_tool_reply is None:
             return None
         return ToolExecutionResult(
-            reply=(
-                f"{normalized_tool_name} is unavailable during background scheduled execution. "
-                "Use the tools that are available in this job session, and never create or manage reminders from inside the run."
-            ),
+            reply=blocked_tool_reply,
             action="chat",
             status="failed",
             disposition="respond",
-            metadata={
-                "job_execution_blocked_tool": normalized_tool_name,
-                "background_policy": "restricted_tools",
-            },
+            hints=ExecutionHints(
+                policy_tag=policy.blocked_tool_policy_tag,
+                blocked_tool_name=normalized_tool_name,
+            ),
         )
 
     async def _run_send_file(self, *, user_id: str, file_path: str, file_name: str) -> dict[str, Any]:

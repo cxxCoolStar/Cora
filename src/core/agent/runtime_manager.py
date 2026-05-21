@@ -4,12 +4,19 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from core.agent.execution_policy import ExecutionPolicyResolver
 from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, PendingSessionState, RuntimeContextSnapshot, RuntimeStateDelta, UNSET
 
 
 class AgentRuntimeManager:
-    def __init__(self, *, pending_state_repository: Any) -> None:
+    def __init__(
+        self,
+        *,
+        pending_state_repository: Any,
+        execution_policy_resolver: ExecutionPolicyResolver | None = None,
+    ) -> None:
         self.pending_state_repository = pending_state_repository
+        self.execution_policy_resolver = execution_policy_resolver or ExecutionPolicyResolver()
 
     def build_runtime_state(
         self,
@@ -19,11 +26,19 @@ class AgentRuntimeManager:
         source_message_id: str,
         raw_text: str | None,
         upload: UploadFile | None,
+        execution_mode: str | None = None,
     ) -> ConversationRuntimeState:
         pending_record = self.pending_state_repository.get_latest_pending(session_id=session_id)
+        resolved_execution_mode = str(
+            execution_mode
+            or context_snapshot.execution_mode
+            or self.execution_policy_resolver.default_mode_for_session_kind(context_snapshot.session_kind)
+            or ""
+        ).strip() or self.execution_policy_resolver.default_mode_for_session_kind(context_snapshot.session_kind)
         return ConversationRuntimeState(
             session_id=session_id,
             session_kind=str(context_snapshot.session_kind or "conversation").strip() or "conversation",
+            execution_mode=resolved_execution_mode,
             session_metadata=dict(context_snapshot.session_metadata or {}),
             current_source_event_id=context_snapshot.current_source_event_id,
             recent_events=list(context_snapshot.recent_events),
@@ -37,12 +52,12 @@ class AgentRuntimeManager:
             },
         )
 
-    @staticmethod
-    def runtime_to_context(runtime: ConversationRuntimeState) -> dict[str, Any]:
+    def runtime_to_context(self, runtime: ConversationRuntimeState) -> dict[str, Any]:
+        policy = self.execution_policy_resolver.for_runtime(runtime)
         context = {
             "session_kind": runtime.session_kind,
             "session_metadata": dict(runtime.session_metadata),
-            "background_execution": runtime.is_background_execution,
+            **policy.context_patch(),
             "recent_events": [AgentRuntimeManager._context_event_snapshot(event) for event in runtime.recent_events],
             "last_action": runtime.last_action,
             "skill_state": dict(runtime.skill_state),
@@ -56,6 +71,7 @@ class AgentRuntimeManager:
     def snapshot_from_runtime(runtime: ConversationRuntimeState) -> RuntimeContextSnapshot:
         return RuntimeContextSnapshot(
             session_kind=runtime.session_kind,
+            execution_mode=runtime.execution_mode,
             session_metadata=dict(runtime.session_metadata),
             current_source_event_id=runtime.current_source_event_id,
             recent_events=list(runtime.recent_events),
@@ -72,6 +88,7 @@ class AgentRuntimeManager:
     ) -> RuntimeContextSnapshot:
         return RuntimeContextSnapshot(
             session_kind=snapshot.session_kind,
+            execution_mode=snapshot.execution_mode,
             session_metadata=dict(snapshot.session_metadata),
             current_source_event_id=state_delta.current_source_event_id or snapshot.current_source_event_id,
             recent_events=list(snapshot.recent_events),

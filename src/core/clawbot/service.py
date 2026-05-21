@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
 from core.agent.context_budget import ContextBudgetManager
@@ -52,18 +53,6 @@ from core.topics.service import TopicOrganizerService
 
 logger = logging.getLogger(__name__)
 
-JOB_EXECUTION_ALLOWED_TOOL_NAMES = {
-    "list_files",
-    "search_files",
-    "read_file",
-    "web_search",
-    "web_fetch",
-    "skills_list",
-    "skill_view",
-    "skill_run",
-    "search_sessions",
-}
-
 
 class ClawBotService:
     def __init__(
@@ -103,8 +92,15 @@ class ClawBotService:
         self.toolset_preset = toolset_preset or "cora-wechat"
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
+        preconfigured_policy_resolver = (
+            getattr(tool_executor, "execution_policy_resolver", None)
+            if tool_executor is not None
+            else None
+        )
+        self.execution_policy_resolver = preconfigured_policy_resolver or ExecutionPolicyResolver()
         self.runtime_manager = AgentRuntimeManager(
             pending_state_repository=pending_state_repository,
+            execution_policy_resolver=self.execution_policy_resolver,
         )
         self.tool_executor = tool_executor or RuntimeToolExecutor(
             ingestion_service=ingestion_service,
@@ -118,6 +114,7 @@ class ClawBotService:
             file_tool_root=self.file_tool_root,
             skill_roots=self.skill_loader.skill_roots,
             runtime_manager=self.runtime_manager,
+            execution_policy_resolver=self.execution_policy_resolver,
         )
         self.topic_organizer = topic_organizer
         self._tool_specs = self._build_tool_specs()
@@ -129,7 +126,10 @@ class ClawBotService:
         )
         self._agent_orchestrator = AgentOrchestrator(
             loop=self._agent_loop,
-            prompt_builder=AgentPromptBuilder(user_memory_path=self.user_memory_path),
+            prompt_builder=AgentPromptBuilder(
+                user_memory_path=self.user_memory_path,
+                execution_policy_resolver=self.execution_policy_resolver,
+            ),
             skill_loader=self.skill_loader,
         )
         self._context_manager = SessionContextManager(
@@ -169,6 +169,7 @@ class ClawBotService:
             delivery_available=self.tool_executor.can_send_files_to_user,
             media_kind_resolver=self._source_event_manager.detect_media_kind,
             tool_specs_resolver=self._tool_specs_for_runtime,
+            execution_policy_resolver=self.execution_policy_resolver,
         )
 
     def create_session(
@@ -210,13 +211,8 @@ class ClawBotService:
         return self.tool_manager.build_model_tool_specs(toolset_preset=self.toolset_preset)
 
     def _tool_specs_for_runtime(self, runtime) -> list[ModelToolSpec]:
-        if not getattr(runtime, "is_background_execution", False):
-            return list(self._tool_specs)
-        return [
-            spec
-            for spec in self._tool_specs
-            if str(spec.name or "").strip() in JOB_EXECUTION_ALLOWED_TOOL_NAMES
-        ]
+        policy = self.execution_policy_resolver.for_runtime(runtime)
+        return policy.filter_tool_specs(self._tool_specs)
 
     def refresh_tool_specs(self) -> None:
         self._tool_specs = self._build_tool_specs()
@@ -386,7 +382,9 @@ class ClawBotService:
             source_message_id=inbound_turn.source_message_id,
             raw_text=inbound_text,
             upload=None,
+            execution_mode=DIRECT_TOOL_PLAN_MODE,
         )
+        execution_policy = self.execution_policy_resolver.for_runtime(runtime)
         execution = await self.tool_executor.execute(
             session_id=session_id,
             source_message_id=inbound_turn.source_message_id,
@@ -399,10 +397,19 @@ class ClawBotService:
             runtime=runtime,
             execution=execution,
         )
+        disposition = "clarify" if execution.needs_clarification else execution.disposition
+        reply = execution.reply
+        if execution_policy.normalize_disposition(disposition=disposition) != disposition:
+            disposition = execution_policy.normalize_disposition(disposition=disposition)
+            reply = execution_policy.suppressed_clarification_reply(
+                hints=execution.hints,
+                metadata=execution.metadata,
+                fallback_reply=reply,
+            )
         outcome = AssistantTurnOutcome(
-            reply=execution.reply,
+            reply=reply,
             action=execution.action,
-            disposition="clarify" if execution.needs_clarification else execution.disposition,
+            disposition=disposition,
             status=execution.status,
             tool_name=plan.tool,
             tool_arguments=dict(plan.arguments or {}),
@@ -417,8 +424,9 @@ class ClawBotService:
                     "arguments": dict(plan.arguments or {}),
                     "action": execution.action,
                     "status": execution.status,
-                    "disposition": execution.disposition,
+                    "disposition": disposition,
                     "artifacts": list(execution.artifacts or []),
+                    "hints": execution.hints.model_dump(exclude_none=True),
                     "metadata": dict(execution.metadata or {}),
                 }
             ],

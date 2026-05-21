@@ -247,6 +247,7 @@ class ClawBotSessionShell:
                     "status": entry.status,
                     "disposition": entry.disposition,
                     "artifacts": list(entry.artifacts),
+                    "hints": entry.hints.model_dump(exclude_none=True),
                     "metadata": {
                         key: value
                         for key, value in entry.metadata.items()

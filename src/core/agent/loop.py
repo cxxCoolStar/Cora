@@ -8,6 +8,7 @@ from core.agent.context_budget import ContextBudgetManager
 from core.agent.runtime_state import ConversationRuntimeState
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.schemas.execution import ExecutionHints
 from core.schemas.tool import ToolCall, ToolResult, ToolSpec
 
 
@@ -31,6 +32,7 @@ class ToolExecutionTrace:
     disposition: str = "continue"
     content: str = ""
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    hints: ExecutionHints = field(default_factory=ExecutionHints)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,6 +121,9 @@ class AgentLoop:
                     tool_call=tool_call,
                     runtime=runtime,
                 )
+                execution_hints = result.hints.model_copy(deep=True)
+                if execution_hints.is_empty():
+                    execution_hints = ExecutionHints.from_legacy_metadata(result.metadata)
                 current_trace = ToolExecutionTrace(
                     tool_name=tool_call.tool_name,
                     arguments=dict(tool_call.arguments),
@@ -127,6 +132,7 @@ class AgentLoop:
                     disposition=result.disposition,
                     content=result.content,
                     artifacts=list(result.artifacts),
+                    hints=execution_hints,
                     metadata=dict(result.metadata),
                 )
                 tool_trace.append(current_trace)

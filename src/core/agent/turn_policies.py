@@ -17,6 +17,18 @@ class ForcedToolSelection:
 
 
 @dataclass(slots=True)
+class RetryDirective:
+    category: str
+    instruction: str
+
+
+@dataclass(slots=True)
+class TurnHeuristicDecision:
+    forced_tool_selection: ForcedToolSelection | None = None
+    retry: RetryDirective | None = None
+
+
+@dataclass(slots=True)
 class SkillIntentRoute:
     skill_name: str
     script_path: str
@@ -853,10 +865,85 @@ class ToolReplyPolicy:
         return excerpt
 
 
+@dataclass(slots=True)
+class TurnDecisionPolicy:
+    routing_policy: ToolRoutingPolicy
+    reply_policy: type[ToolReplyPolicy] = ToolReplyPolicy
+
+    @classmethod
+    def from_runner(cls, runner: Any, *, tool_names: set[str] | None = None) -> TurnDecisionPolicy:
+        return cls(
+            routing_policy=ToolRoutingPolicy.from_runner(runner, tool_names=tool_names),
+        )
+
+    def initial_decision(
+        self,
+        *,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        loop_result: LoopResult,
+    ) -> TurnHeuristicDecision:
+        forced_tool_selection = self.routing_policy.forced_tool_selection(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+        if forced_tool_selection is not None:
+            return TurnHeuristicDecision(forced_tool_selection=forced_tool_selection)
+
+        retry_category = self.routing_policy.tool_retry_category(
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+        if retry_category is None:
+            return TurnHeuristicDecision()
+        return TurnHeuristicDecision(
+            retry=RetryDirective(
+                category=retry_category,
+                instruction=self.routing_policy.tool_retry_instruction(retry_category),
+            )
+        )
+
+    def fallback_tool_selection(
+        self,
+        *,
+        retry_category: str,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        loop_result: LoopResult,
+    ) -> ForcedToolSelection | None:
+        return self.routing_policy.fallback_tool_selection(
+            retry_category=retry_category,
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            loop_result=loop_result,
+        )
+
+    def select_final_agent_reply(
+        self,
+        *,
+        last_execution: ToolExecutionTrace,
+        assistant_text: str | None,
+    ) -> str:
+        return self.reply_policy.select_final_agent_reply(
+            last_execution=last_execution,
+            assistant_text=assistant_text,
+        )
+
+
 __all__ = [
     "ForcedToolSelection",
     "NativeToolRoute",
+    "RetryDirective",
     "SkillIntentRoute",
+    "TurnDecisionPolicy",
+    "TurnHeuristicDecision",
     "ToolReplyPolicy",
     "ToolRoutingPolicy",
 ]

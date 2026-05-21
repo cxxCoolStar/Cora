@@ -10,6 +10,7 @@ from fastapi import UploadFile
 
 from core.agent.context_budget import ContextBudgetManager
 from core.agent.context_manager import SessionContextManager
+from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
@@ -23,6 +24,7 @@ from core.clawbot import RuntimeToolExecutor
 from core.clawbot.planner import ToolPlan
 from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import ToolExecutionResult
+from core.schemas.execution import ExecutionHints
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -249,6 +251,46 @@ def test_prompt_builder_includes_background_execution_policy_for_job_sessions() 
     assert "Background execution policy:" in messages[0].content
     assert "This turn is a background scheduled execution" in messages[0].content
     assert "reply exactly with `[SILENT]`" in messages[0].content
+    assert "- execution_mode=job_execution" in messages[0].content
+    assert "- background_execution=true" in messages[0].content
+    assert "- allow_clarification=false" in messages[0].content
+
+
+def test_execution_policy_resolver_supports_direct_tool_plan_mode_for_job_sessions() -> None:
+    resolver = ExecutionPolicyResolver()
+
+    policy = resolver.for_context(
+        {
+            "session_kind": "job_execution",
+            "execution_mode": DIRECT_TOOL_PLAN_MODE,
+        }
+    )
+
+    assert policy.mode == DIRECT_TOOL_PLAN_MODE
+    assert policy.background_execution is True
+    assert policy.allow_clarification is False
+    assert policy.allows_tool("skill_run") is True
+    assert policy.allows_tool("scheduled_tasks") is False
+    assert policy.clarify_suppressed_reply == "[SILENT]"
+
+
+def test_runtime_manager_context_includes_execution_policy_metadata_for_direct_tool_plan() -> None:
+    manager = AgentRuntimeManager(pending_state_repository=StubPendingStateRepository())
+    runtime = manager.build_runtime_state(
+        session_id="job-session-ctx",
+        context_snapshot=RuntimeContextSnapshot(session_kind="job_execution"),
+        source_message_id="msg-ctx-1",
+        raw_text="check the latest item",
+        upload=None,
+        execution_mode=DIRECT_TOOL_PLAN_MODE,
+    )
+
+    context = manager.runtime_to_context(runtime)
+
+    assert runtime.execution_mode == DIRECT_TOOL_PLAN_MODE
+    assert context["execution_mode"] == DIRECT_TOOL_PLAN_MODE
+    assert context["background_execution"] is True
+    assert context["allow_clarification"] is False
 
 
 def test_prompt_builder_includes_user_memory_when_present(tmp_path: Path) -> None:
@@ -553,6 +595,7 @@ async def test_runtime_tool_executor_executes_native_tool_calls_and_updates_runt
 
     assert calls[0]["plan"].tool == "archive"
     assert calls[0]["context"]["current_source_event_id"] == "event-1"
+    assert calls[0]["context"]["execution_mode"] == "conversation"
     assert result.metadata is not None
     next_runtime = result.metadata["runtime_state"]
     assert next_runtime.last_action == "capture"
@@ -589,6 +632,8 @@ async def test_runtime_tool_executor_blocks_scheduled_tasks_inside_job_execution
     )
 
     assert result.status == "failed"
+    assert result.hints.blocked_tool_name == "scheduled_tasks"
+    assert result.hints.policy_tag == "restricted_tools"
     assert result.metadata["job_execution_blocked_tool"] == "scheduled_tasks"
     assert "background scheduled execution" in result.reply
 
@@ -651,6 +696,10 @@ async def test_runtime_tool_executor_suppresses_pending_clarification_for_job_ex
     assert result.disposition == "clarify"
     assert result.needs_clarification is True
     assert result.reply == "[SILENT]"
+    assert result.hints.override_reply == "[SILENT]"
+    assert result.hints.policy_tag == "no_clarify"
+    assert result.hints.suppressed_pending is not None
+    assert result.hints.suppressed_pending.choices == ["prod", "staging"]
     assert result.metadata["background_policy"] == "no_clarify"
     assert result.metadata["suppressed_pending"]["choices"] == ["prod", "staging"]
     assert pending_state_repository.get_latest_pending(session_id="job-session-1") is None
@@ -676,7 +725,7 @@ def test_loop_result_to_turn_result_converts_background_clarify_into_respond() -
                 status="failed",
                 disposition="clarify",
                 content="[SILENT]",
-                metadata={"background_execution_reply": "[SILENT]"},
+                hints=ExecutionHints(override_reply="[SILENT]"),
             )
         ],
     )

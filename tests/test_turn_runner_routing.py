@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from core.agent.loop import ToolExecutionTrace
 from core.agent.skill_loader import SkillLoader
+from core.agent.turn_policies import TurnDecisionPolicy
 from core.agent.turn_runner import AgentTurnRunner
 
 
@@ -75,6 +76,23 @@ def test_delivery_retry_detection_matches_send_back_requests() -> None:
     )
 
     assert category == "deliver"
+
+
+def test_turn_decision_policy_returns_forced_tool_selection_as_a_structured_decision() -> None:
+    runner = object.__new__(AgentTurnRunner)
+
+    decision = TurnDecisionPolicy.from_runner(runner).initial_decision(
+        user_text="read `README.md`",
+        raw_text="read `README.md`",
+        upload=None,
+        loop_result=SimpleNamespace(tool_trace=[], exit_reason="assistant_text"),
+    )
+
+    assert decision.retry is None
+    assert decision.forced_tool_selection is not None
+    assert decision.forced_tool_selection.category == "file_read"
+    assert decision.forced_tool_selection.tool_call.tool_name == "read_file"
+    assert decision.forced_tool_selection.tool_call.arguments == {"path": "README.md"}
 
 
 def test_delete_retry_detection_prefers_skill_runtime_metadata() -> None:
@@ -166,6 +184,23 @@ def test_native_tool_route_skips_retry_when_tool_is_unavailable() -> None:
     assert scheduled_category is None
     assert memory_category is None
     assert session_search_category is None
+
+
+def test_turn_decision_policy_returns_retry_directive_for_native_tool_retries() -> None:
+    runner = object.__new__(AgentTurnRunner)
+    runner.loop = SimpleNamespace(tool_specs=[SimpleNamespace(name="search_sessions")])
+
+    decision = TurnDecisionPolicy.from_runner(runner).initial_decision(
+        user_text="What did I tell you before about the VPN profile?",
+        raw_text="What did I tell you before about the VPN profile?",
+        upload=None,
+        loop_result=SimpleNamespace(tool_trace=[], exit_reason="assistant_text"),
+    )
+
+    assert decision.forced_tool_selection is None
+    assert decision.retry is not None
+    assert decision.retry.category == "session_search"
+    assert "search_sessions tool" in decision.retry.instruction
 
 
 def test_fallback_tool_selection_uses_search_sessions_for_session_search() -> None:

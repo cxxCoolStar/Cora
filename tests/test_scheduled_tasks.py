@@ -717,6 +717,57 @@ def test_scheduled_task_worker_suppresses_clarifying_skill_without_pending_state
     assert execution_messages[1].content == "[SILENT]"
 
 
+def test_execute_tool_plan_outcome_suppresses_clarifying_skill_for_job_execution_direct_runs(tmp_path: Path) -> None:
+    container = _build_runtime_container(tmp_path)
+    origin_session = container.session_repository.create()
+    execution_session = container.clawbot_service.create_job_execution_session(
+        origin_session_id=origin_session.id,
+        scheduled_task_id="task-direct-skill",
+        task_name="Direct clarifying skill",
+        execution_mode="skill",
+        owner_external_user_id="wx-user-9",
+    )
+    container.tool_executor.skill_script_executor.run = lambda request: SkillExecutionResult(
+        message="Which workspace should I inspect?",
+        action="skill",
+        pending_state_delta=PendingStateDelta(
+            request=PendingRequest(
+                kind="choice",
+                question="Which workspace should I inspect?",
+                choices=["prod", "staging"],
+            )
+        ),
+    )
+
+    outcome = asyncio.run(
+        container.clawbot_service.execute_tool_plan_outcome(
+            session_id=execution_session.id,
+            text="Check the latest item and report back only if needed.",
+            plan=ToolPlan(
+                tool="skill_run",
+                arguments={
+                    "name": "archive-core",
+                    "script_path": "scripts/archive_dispatch.py",
+                    "input": {"query": "check the latest item"},
+                },
+                reason="test",
+                source="scheduled_task",
+            ),
+        )
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.disposition == "respond"
+    assert outcome.reply == "[SILENT]"
+    assert outcome.tool_trace[0]["hints"]["policy_tag"] == "no_clarify"
+    assert container.pending_state_repository.get_latest_pending(session_id=execution_session.id) is None
+
+    execution_messages = container.message_repository.list_by_session(session_id=execution_session.id)
+    assert [message.role for message in execution_messages] == ["user", "assistant"]
+    assert execution_messages[0].content == "Check the latest item and report back only if needed."
+    assert execution_messages[1].content == "[SILENT]"
+
+
 def test_scheduled_task_tool_coerces_one_shot_reminder_from_user_text() -> None:
     tmp_path = _temp_dir()
     database = _make_database(tmp_path)

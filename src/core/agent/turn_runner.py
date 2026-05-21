@@ -6,12 +6,16 @@ from typing import Any, Callable
 
 from fastapi import UploadFile
 
+from core.agent.execution_policy import ExecutionPolicy, ExecutionPolicyResolver
 from core.agent.loop import AgentLoop, LoopResult, ToolExecutionTrace
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.turn_policies import (
     ForcedToolSelection,
     NativeToolRoute,
+    RetryDirective,
     SkillIntentRoute,
+    TurnDecisionPolicy,
+    TurnHeuristicDecision,
     ToolReplyPolicy,
     ToolRoutingPolicy,
 )
@@ -20,6 +24,7 @@ from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSna
 from core.agent.skill_loader import SkillLoader
 from core.llm.base import ModelClient
 from core.schemas.message import Message
+from core.schemas.execution import ExecutionHints
 from core.schemas.tool import ToolCall, ToolResult
 from core.schemas.tool import ToolSpec as ModelToolSpec
 
@@ -28,6 +33,8 @@ from core.schemas.tool import ToolSpec as ModelToolSpec
 class PreparedTurn:
     context_snapshot: RuntimeContextSnapshot
     runtime: ConversationRuntimeState
+    execution_policy: ExecutionPolicy
+    decision_policy: TurnDecisionPolicy
     history: list[Message]
     tool_specs: list[ModelToolSpec]
     tool_names: set[str]
@@ -41,6 +48,7 @@ class ToolExecutionSummary:
     status: str
     disposition: str
     artifacts: list[dict[str, Any]]
+    hints: ExecutionHints
     metadata: dict[str, Any]
 
 
@@ -73,6 +81,7 @@ class AgentTurnRunner:
     delivery_available: Callable[[], bool]
     media_kind_resolver: Callable[[UploadFile | None], str | None]
     tool_specs_resolver: Callable[[ConversationRuntimeState], list[ModelToolSpec]]
+    execution_policy_resolver: ExecutionPolicyResolver
 
     def sync_model_client(self, model_client: ModelClient) -> None:
         self.loop.model_client = model_client
@@ -133,27 +142,20 @@ class AgentTurnRunner:
                 tool_specs=prepared_turn.tool_specs,
             )
         )
-        policy = self._tool_routing_policy(tool_names=prepared_turn.tool_names)
-        retry_category = policy.tool_retry_category(
+        decision = prepared_turn.decision_policy.initial_decision(
             user_text=user_text,
             raw_text=raw_text,
             upload=upload,
             loop_result=loop_result,
         )
-        forced_tool_selection = policy.forced_tool_selection(
-            user_text=user_text,
-            raw_text=raw_text,
-            upload=upload,
-            loop_result=loop_result,
-        )
-        if forced_tool_selection is not None:
+        if decision.forced_tool_selection is not None:
             loop_result = await self._forced_tool_loop_result(
-                selection=forced_tool_selection,
+                selection=decision.forced_tool_selection,
                 session_id=session_id,
                 prepared_turn=prepared_turn,
             )
-        elif retry_category is not None:
-            retry_instruction = policy.tool_retry_instruction(retry_category)
+        elif decision.retry is not None:
+            retry_instruction = decision.retry.instruction
             retry_messages = self.orchestrator.prompt_builder.build_messages(
                 session_id=session_id,
                 user_text=user_text,
@@ -173,8 +175,8 @@ class AgentTurnRunner:
                 runtime=prepared_turn.runtime,
                 tool_specs=prepared_turn.tool_specs,
             )
-            fallback_selection = policy.fallback_tool_selection(
-                retry_category=retry_category,
+            fallback_selection = prepared_turn.decision_policy.fallback_tool_selection(
+                retry_category=decision.retry.category,
                 user_text=user_text,
                 raw_text=raw_text,
                 upload=upload,
@@ -186,7 +188,10 @@ class AgentTurnRunner:
                     session_id=session_id,
                     prepared_turn=prepared_turn,
                 )
-        return self.loop_result_to_turn_result(loop_result)
+        return self.loop_result_to_turn_result(
+            loop_result,
+            execution_policy=prepared_turn.execution_policy,
+        )
 
     def prepare_turn(
         self,
@@ -205,13 +210,17 @@ class AgentTurnRunner:
             raw_text=raw_text,
             upload=upload,
         )
+        execution_policy = self._policy_resolver().for_runtime(runtime)
         tool_specs = list(self.tool_specs_resolver(runtime))
+        tool_names = {str(spec.name).strip() for spec in tool_specs if str(spec.name or "").strip()}
         return PreparedTurn(
             context_snapshot=context_snapshot,
             runtime=runtime,
+            execution_policy=execution_policy,
+            decision_policy=self._decision_policy(tool_names=tool_names),
             history=self.history_loader(session_id=session_id, user_text=user_text),
             tool_specs=tool_specs,
-            tool_names={str(spec.name).strip() for spec in tool_specs if str(spec.name or "").strip()},
+            tool_names=tool_names,
         )
 
     async def _forced_tool_loop_result(
@@ -245,6 +254,9 @@ class AgentTurnRunner:
     ) -> LoopResult:
         next_runtime = result.metadata.get("runtime_state")
         final_runtime = next_runtime if isinstance(next_runtime, ConversationRuntimeState) else runtime
+        execution_hints = result.hints.model_copy(deep=True)
+        if execution_hints.is_empty():
+            execution_hints = ExecutionHints.from_legacy_metadata(result.metadata)
         assistant_message = Message.assistant_tool_calls(
             session_id=session_id,
             content="",
@@ -275,6 +287,7 @@ class AgentTurnRunner:
             disposition=result.disposition,
             content=result.content,
             artifacts=list(result.artifacts),
+            hints=execution_hints,
             metadata=dict(result.metadata),
         )
         return LoopResult(
@@ -291,7 +304,10 @@ class AgentTurnRunner:
         )
 
     def _tool_routing_policy(self, *, tool_names: set[str] | None = None) -> ToolRoutingPolicy:
-        return ToolRoutingPolicy.from_runner(self, tool_names=tool_names)
+        return self._decision_policy(tool_names=tool_names).routing_policy
+
+    def _decision_policy(self, *, tool_names: set[str] | None = None) -> TurnDecisionPolicy:
+        return TurnDecisionPolicy.from_runner(self, tool_names=tool_names)
 
     def forced_tool_selection(
         self,
@@ -343,8 +359,14 @@ class AgentTurnRunner:
     def tool_retry_instruction(self, category: str) -> str:
         return self._tool_routing_policy().tool_retry_instruction(category)
 
-    def loop_result_to_turn_result(self, result: LoopResult) -> AgentTurnResult:
+    def loop_result_to_turn_result(
+        self,
+        result: LoopResult,
+        *,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> AgentTurnResult:
         runtime_context = self.runtime_manager.runtime_to_context(result.runtime)
+        active_execution_policy = execution_policy or self._policy_resolver().for_runtime(result.runtime)
         tool_trace = [self._tool_summary_from_loop_trace(entry) for entry in result.tool_trace]
         if not result.tool_trace:
             reply = result.final_response or "我暂时还不能理解这个请求，你可以换一种说法试试。"
@@ -352,7 +374,7 @@ class AgentTurnRunner:
             confidence = "medium" if result.exit_reason == "assistant_text" else "low"
         else:
             primary_tool = result.tool_trace[-1]
-            reply = self.select_final_agent_reply(
+            reply = self._decision_policy().select_final_agent_reply(
                 last_execution=primary_tool,
                 assistant_text=result.assistant_response,
             )
@@ -364,9 +386,13 @@ class AgentTurnRunner:
                 reason = "The model completed after repeated tool use."
             confidence = "high"
         disposition = result.disposition
-        if result.runtime.is_background_execution and disposition == "clarify":
-            disposition = "respond"
-            reply = self._background_execution_reply(result=result, fallback_reply=reply)
+        if active_execution_policy.normalize_disposition(disposition=disposition) != disposition:
+            disposition = active_execution_policy.normalize_disposition(disposition=disposition)
+            reply = self._suppressed_clarification_reply(
+                result=result,
+                fallback_reply=reply,
+                execution_policy=active_execution_policy,
+            )
             reason = "Background execution could not wait for clarification, so it stopped without leaving a pending question."
         return AgentTurnResult(
             reply=reply,
@@ -390,13 +416,26 @@ class AgentTurnRunner:
         )
 
     @staticmethod
-    def _background_execution_reply(*, result: LoopResult, fallback_reply: str) -> str:
+    def _suppressed_clarification_reply(
+        *,
+        result: LoopResult,
+        fallback_reply: str,
+        execution_policy: ExecutionPolicy,
+    ) -> str:
         if result.tool_trace:
+            hints = result.tool_trace[-1].hints
             metadata = dict(result.tool_trace[-1].metadata or {})
-            override = str(metadata.get("background_execution_reply") or "").strip()
-            if override:
-                return override
-        return fallback_reply
+            return execution_policy.suppressed_clarification_reply(
+                hints=hints,
+                metadata=metadata,
+                fallback_reply=fallback_reply,
+            )
+        return execution_policy.suppressed_clarification_reply(
+            fallback_reply=fallback_reply,
+        )
+
+    def _policy_resolver(self) -> ExecutionPolicyResolver:
+        return getattr(self, "execution_policy_resolver", ExecutionPolicyResolver())
 
     @staticmethod
     def _tool_summary_from_loop_trace(entry: ToolExecutionTrace) -> ToolExecutionSummary:
@@ -407,12 +446,15 @@ class AgentTurnRunner:
             status=entry.status,
             disposition=entry.disposition,
             artifacts=list(entry.artifacts),
+            hints=entry.hints.model_copy(deep=True),
             metadata=dict(entry.metadata),
         )
 
     @staticmethod
     def select_final_agent_reply(*, last_execution: ToolExecutionTrace, assistant_text: str | None) -> str:
-        return ToolReplyPolicy.select_final_agent_reply(
+        return TurnDecisionPolicy(
+            routing_policy=ToolRoutingPolicy(),
+        ).select_final_agent_reply(
             last_execution=last_execution,
             assistant_text=assistant_text,
         )

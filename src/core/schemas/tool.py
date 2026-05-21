@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from core.schemas.common import new_id
+from core.schemas.execution import ExecutionHints
 
 
 class ToolSpec(BaseModel):
@@ -27,5 +28,6 @@ class ToolResult(BaseModel):
     action: str | None = None
     state_delta: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    hints: ExecutionHints = Field(default_factory=ExecutionHints)
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

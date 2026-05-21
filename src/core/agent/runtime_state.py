@@ -31,6 +31,7 @@ class PendingSessionState:
 @dataclass(slots=True)
 class RuntimeContextSnapshot:
     session_kind: str = "conversation"
+    execution_mode: str | None = None
     session_metadata: dict[str, Any] = field(default_factory=dict)
     current_source_event_id: str | None = None
     recent_events: list[EventSnapshot] = field(default_factory=list)
@@ -51,6 +52,7 @@ class RuntimeStateDelta:
 class ConversationRuntimeState:
     session_id: str
     session_kind: str = "conversation"
+    execution_mode: str | None = None
     session_metadata: dict[str, Any] = field(default_factory=dict)
     current_source_event_id: str | None = None
     recent_events: list[EventSnapshot] = field(default_factory=list)
