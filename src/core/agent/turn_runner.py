@@ -72,6 +72,17 @@ class AgentTurnResult:
 
 
 @dataclass(slots=True)
+class TurnExecutionPlan:
+    session_id: str
+    user_text: str
+    raw_text: str | None
+    upload: UploadFile | None
+    prepared_turn: PreparedTurn
+    initial_loop_result: LoopResult
+    turn_decision: TurnHeuristicDecision
+
+
+@dataclass(slots=True)
 class AgentTurnRunner:
     orchestrator: AgentOrchestrator
     loop: AgentLoop
@@ -131,7 +142,29 @@ class AgentTurnRunner:
             upload=upload,
             context_snapshot=context_snapshot,
         )
-        loop_result = await self.orchestrator.handle_turn(
+        plan = await self._build_turn_execution_plan(
+            session_id=session_id,
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            prepared_turn=prepared_turn,
+        )
+        loop_result = await self._execute_turn_plan(plan)
+        return self.loop_result_to_turn_result(
+            loop_result,
+            execution_policy=prepared_turn.execution_policy,
+        )
+
+    async def _build_turn_execution_plan(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        raw_text: str | None,
+        upload: UploadFile | None,
+        prepared_turn: PreparedTurn,
+    ) -> TurnExecutionPlan:
+        initial_loop_result = await self.orchestrator.handle_turn(
             OrchestratorInput(
                 session_id=session_id,
                 user_text=user_text,
@@ -142,55 +175,75 @@ class AgentTurnRunner:
                 tool_specs=prepared_turn.tool_specs,
             )
         )
-        decision = prepared_turn.decision_policy.initial_decision(
+        turn_decision = prepared_turn.decision_policy.initial_decision(
             user_text=user_text,
             raw_text=raw_text,
             upload=upload,
-            loop_result=loop_result,
+            loop_result=initial_loop_result,
         )
+        return TurnExecutionPlan(
+            session_id=session_id,
+            user_text=user_text,
+            raw_text=raw_text,
+            upload=upload,
+            prepared_turn=prepared_turn,
+            initial_loop_result=initial_loop_result,
+            turn_decision=turn_decision,
+        )
+
+    async def _execute_turn_plan(self, plan: TurnExecutionPlan) -> LoopResult:
+        decision = plan.turn_decision
         if decision.forced_tool_selection is not None:
-            loop_result = await self._forced_tool_loop_result(
+            return await self._forced_tool_loop_result(
                 selection=decision.forced_tool_selection,
-                session_id=session_id,
-                prepared_turn=prepared_turn,
+                session_id=plan.session_id,
+                prepared_turn=plan.prepared_turn,
             )
-        elif decision.retry is not None:
-            retry_instruction = decision.retry.instruction
-            retry_messages = self.orchestrator.prompt_builder.build_messages(
-                session_id=session_id,
-                user_text=user_text,
-                runtime=prepared_turn.runtime,
-                skills=self.skill_loader.list_skills(),
-                history=prepared_turn.history,
-                upload_name=upload.filename if upload is not None else None,
-                delivery_available=self.delivery_available(),
+        if decision.retry is None:
+            return plan.initial_loop_result
+        retry_loop_result = await self._run_retry_loop(
+            retry=decision.retry,
+            plan=plan,
+        )
+        fallback_selection = plan.prepared_turn.decision_policy.fallback_tool_selection(
+            retry_category=decision.retry.category,
+            user_text=plan.user_text,
+            raw_text=plan.raw_text,
+            upload=plan.upload,
+            loop_result=retry_loop_result,
+        )
+        if fallback_selection is not None:
+            return await self._forced_tool_loop_result(
+                selection=fallback_selection,
+                session_id=plan.session_id,
+                prepared_turn=plan.prepared_turn,
             )
-            retry_messages.insert(
-                1,
-                Message.system(session_id=session_id, content=retry_instruction),
-            )
-            loop_result = await self.loop.run(
-                session_id=session_id,
-                initial_messages=retry_messages,
-                runtime=prepared_turn.runtime,
-                tool_specs=prepared_turn.tool_specs,
-            )
-            fallback_selection = prepared_turn.decision_policy.fallback_tool_selection(
-                retry_category=decision.retry.category,
-                user_text=user_text,
-                raw_text=raw_text,
-                upload=upload,
-                loop_result=loop_result,
-            )
-            if fallback_selection is not None:
-                loop_result = await self._forced_tool_loop_result(
-                    selection=fallback_selection,
-                    session_id=session_id,
-                    prepared_turn=prepared_turn,
-                )
-        return self.loop_result_to_turn_result(
-            loop_result,
-            execution_policy=prepared_turn.execution_policy,
+        return retry_loop_result
+
+    async def _run_retry_loop(
+        self,
+        *,
+        retry: RetryDirective,
+        plan: TurnExecutionPlan,
+    ) -> LoopResult:
+        retry_messages = self.orchestrator.prompt_builder.build_messages(
+            session_id=plan.session_id,
+            user_text=plan.user_text,
+            runtime=plan.prepared_turn.runtime,
+            skills=self.skill_loader.list_skills(),
+            history=plan.prepared_turn.history,
+            upload_name=plan.upload.filename if plan.upload is not None else None,
+            delivery_available=self.delivery_available(),
+        )
+        retry_messages.insert(
+            1,
+            Message.system(session_id=plan.session_id, content=retry.instruction),
+        )
+        return await self.loop.run(
+            session_id=plan.session_id,
+            initial_messages=retry_messages,
+            runtime=plan.prepared_turn.runtime,
+            tool_specs=plan.prepared_turn.tool_specs,
         )
 
     def prepare_turn(
