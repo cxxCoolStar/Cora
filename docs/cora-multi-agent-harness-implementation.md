@@ -1,123 +1,831 @@
-# Cora 生产级 Multi-Agent Harness 实施蓝图
+# Cora Production Multi-Agent Harness Design
 
-## 1. 背景与目标
-根据 `cora-general-agent-direction.md` 的规划，Cora 正从“文件归档助手”向“通用生产级智能 Agent”转型。结合《从零设计生产级 Multi-Agent Harness》的核心理念，仅仅依靠 Prompt 拼接和简单的工具调用无法满足生产级 Agent 对稳定性、安全性和可追溯性的要求。
+## 1. Purpose
 
-本文档详细规划了 Cora 在 **架构编排、工具治理、状态与记忆、评估体系、成本控制及 MCP 接入** 五大核心模块的演进与实施路径。
+This document redesigns Cora's multi-agent harness plan around the current
+general-agent direction in `docs/cora-general-agent-direction.md`.
 
----
+Cora is evolving from an archive-centered assistant into a general-purpose
+agent runtime. Multi-agent support should therefore not be a prompt trick or a
+single `spawn_agent` tool. It should be a controlled runtime layer that can run,
+limit, observe, resume, and evaluate agent work.
 
-## 2. 核心模块实施方案
+The north star is:
 
-### 2.1 架构编排：引入全局 Harness (Orchestrator)
-**当前痛点**：核心调度逻辑耦合在业务循环中，Agent 自主决定流程，容易失控或陷入死循环。
-**设计改造**：
-* **提取纯粹的 Orchestrator**：将 `src/core/agent/turn_runner.py` 升级为核心调度器，接管所有决策权（任务生命周期、执行计划裁决、失败处理）。
-* **引入声明式计划 (Declarative Planning)**：如果引入 Planner Agent，其输出必须是结构化的执行意图（如 JSON 格式的步骤和依赖），由 Orchestrator 负责解释和分配给 Worker Agents。
-* **设立四道硬终止网关**：强制配置 `max_steps`（最大步数）、`max_tokens`（最大消耗）、`max_duration`（最大耗时）、`max_tool_calls`（最大工具调用频次），防止资源黑洞。
+```text
+shell -> orchestrator -> harness lifecycle -> agent roles -> governed tools -> state / memory / evals
+```
 
-### 2.2 工具治理：建立 Tool Registry 安全边界
-**当前痛点**：工具调用相对自由，缺乏统一的安全校验、限流和审计拦截。
-**设计改造**：
-* **丰富 Tool Registry 元数据**：扩展现有的 `src/core/tools/registry.py`。每个工具除了基础的 Schema 和 Description，必须增加：
-  - **RBAC（权限管理）**：指定允许调用的子 Agent 列表。
-  - **风险分级**：标记高/中/低风险。
-  - **超时与速率限制 (Rate Limit)**。
-* **加入 Human-in-the-Loop (HITL)**：对于高风险操作（如 `shell_exec` 终端执行、`write_file` 危险写入），拦截调用并请求人工授权，避免“脱缰运行”。
+The first milestone is not "many agents". The first milestone is a reliable
+single-agent harness whose lifecycle, tool policy, state, budget, and trace
+contracts are explicit. Multi-agent behavior should be added only after that
+foundation exists.
 
-### 2.3 状态与记忆：状态与记忆分层解耦
-**当前痛点**：上下文容易膨胀，缺乏分层管理，有用信息与临时状态混合。
-**设计改造**：
-* **状态 (State)** 负责临时运行数据：
-  - **Working State**：当前步骤的临时上下文，任务结束即丢弃。
-  - **Session State**：一次会话内多个 Agent 共享的信息（如 Redis TTL 缓存）。
-* **记忆 (Memory)** 负责长期复用知识：
-  - **分离 Episodic Memory (事件/偏好) 与 Semantic Memory (业务规则/领域概念)**。
-  - **混合检索策略**：不直接塞满 Prompt。采用“前置注入核心高分记忆 + 提供 `memory_search` 工具供 Agent 按需检索”。
-  - **定期遗忘与修剪**：基于访问频次、时间、重要性计算保留分数（低分删除、中分压缩摘要、高分保留原文）。
+## 2. Reference Projects
 
-### 2.4 评估体系：落地四层 Eval Pipeline
-**当前痛点**：缺乏丰富的自动化回归和能力测试，尤其是非 Archive 场景的测试用例和中间轨迹审查。
-**设计改造**：在 `src/core/evals` 基础上完善四个层级：
-1. **Component Eval (组件评估)**：单 Agent 是否选对了工具、参数是否合规。
-2. **Trajectory Eval (轨迹评估)**：步骤是否必要、是否重复调用、有无陷入死循环（重点）。
-3. **Task Completion Eval (任务完成度)**：是否满足最终业务目标，是否存在幻觉。
-4. **End-to-End Eval (端到端业务效果)**：单位任务的 Token 成本和延迟是否在指标内。
-* **引入 Fixtures 机制**：建立标准化的测试沙箱，隔离数据库和缓存环境。
+The examples folder contains useful reference designs.
 
-### 2.5 成本控制：引入 Token Budget 调度
-**当前痛点**：缺乏实时成本意识，容易出现由于长历史或者重试导致的 Token 爆炸。
-**设计改造**：
-* **Model Routing (模型路由)**：低难度任务（摘要、意图分类）强制路由给低成本小模型，复杂推理分配给主力大模型。
-* **Budget 分级降级 (熔断保护)**：
-  - **黄区 (20%-50% 预算)**：触发 Context Compression（上下文压缩），折叠早期历史对话。
-  - **红区 (<20% 预算)**：切断思维链 (CoT)，仅允许核心工具调用。
-  - **熔断区 (<5% 预算)**：直接中止，返回 partial result（部分结果）给用户。
+### OpenClaw: Primary Reference
 
-### 2.6 MCP (Model Context Protocol) 接入安全
-* **规范接入**：第三方 MCP Server 绝不直接暴露给 Agent，必须挂载在 Cora 的 Tool Registry 之下。
-* **白名单与配额**：为每个 MCP Server 设置独立的限流配额。对 MCP 暴露的工具实行白名单机制，并保持对敏感 API 的 HITL 拦截机制。
-* **供应链与身份安全**：对 MCP Server 执行来源校验（版本、发布者、签名），防止未授权或被篡改的服务接入。
-* **最小权限凭据隔离**：按 `server/tool/session` 维度发放短期凭据，避免共享长期高权限密钥。
-* **数据出站治理**：定义字段级脱敏与禁止外发策略（如密钥、PII、内部策略），并将违规请求落审计。
+`examples/openclaw` is the best production-harness reference. It has:
 
-### 2.7 失败恢复与幂等：从“可终止”到“可恢复”
-**当前痛点**：已有硬终止网关，但缺少可恢复执行链路；重试时可能重复写入或产生副作用。
-**设计改造**：
-* **Step 幂等键机制**：为每个执行单元生成 `task_id + step_id + attempt_id`，对外部写操作附加幂等键，避免重复提交。
-* **Checkpoint 持久化**：Orchestrator 在计划确认、关键工具调用后、阶段产物完成后，持久化运行快照（状态、预算、工具结果索引）。
-* **可控重试策略**：区分可重试错误（网络抖动、限流）与不可重试错误（鉴权失败、参数非法），并按工具配置退避策略与最大重试次数。
-* **补偿与回滚策略**：对于不可逆工具调用，记录补偿动作模板（如撤销、反向更新、人工介入工单），并在失败后自动触发或升级。
-* **人工接管模式**：当连续失败或预算临界时，自动切换到 HITL，输出当前状态、失败原因和建议下一步动作。
+- an explicit `AgentHarness` abstraction
+- a V2 lifecycle: `prepare -> start -> send -> resolveOutcome -> cleanup`
+- harness selection and runtime fallback policy
+- subagent run records with requester, child session, timeout, outcome,
+  pending delivery, retry, suspension, and cleanup metadata
+- spawn policy, sandbox policy, inherited tool policy, and ACP/external-agent
+  integration
+- extensive tests around subagent lifecycle, sandbox restrictions, inherited
+  denies, delivery, and persistence
 
-### 2.8 Multi-Agent 协作 Contract：降低自由度，提升确定性
-**当前痛点**：Planner / Worker 边界未完全结构化，扩展后易出现职责重叠与结果冲突。
-**设计改造**：
-* **统一任务协议**：定义 `PlanSpec / TaskSpec / ResultSpec` 三类 schema，最小字段包含目标、依赖、约束、产物、置信度、风险等级。
-* **角色权限边界**：
-  - **Planner**：只负责拆解与排序，不直接执行高风险工具。
-  - **Worker**：只执行分配任务，不可私自修改全局依赖图。
-  - **Reviewer/Critic（可选）**：对高风险或低置信结果进行二次审查并给出裁决建议。
-* **冲突仲裁机制**：多个 Worker 结果冲突时，由 Orchestrator 按优先级规则（置信度、来源可信度、工具审计等级）进行裁决。
-* **并行与汇聚策略**：显式声明可并行步骤与汇聚节点，避免无边界 fan-out 导致 token/时延失控。
-* **跨 Agent 共享最小化**：共享“必要事实”而非完整上下文，防止上下文污染与成本膨胀。
+Cora should borrow the lifecycle shape and the durable subagent run model, but
+keep the first implementation smaller.
 
-### 2.9 可观测性与线上运营：从可运行到可运营
-**当前痛点**：缺少统一线上指标与故障分层，问题定位和迭代优化成本高。
-**设计改造**：
-* **全链路 Tracing**：以 `trace_id / task_id / step_id / tool_call_id` 贯穿日志、模型调用、工具执行和外部依赖。
-* **核心运营指标（SLO）**：
-  - 任务成功率、P95/P99 时延、单位任务成本（token/$）、平均工具调用次数。
-  - HITL 介入率、重试率、预算熔断率、任务中止率。
-* **失败分类 Taxonomy**：统一归因标签（规划错误、工具失败、权限拦截、外部超时、幻觉风险、策略拒绝），支持看板聚合分析。
-* **告警与 Runbook**：为高频失败类型配置告警阈值与处置手册（重试建议、降级路径、人工接管标准）。
-* **回放与审计能力**：支持按任务回放关键轨迹，满足问题复盘、合规审计与回归构造。
+### Codex: Security And Execution Policy Reference
 
----
+`examples/codex` is strongest in command execution safety:
 
-## 3. 实施路径 (Roadmap)
+- sandbox modes
+- approval policy
+- executable prefix rules
+- spawned thread graph storage
+- OpenTelemetry-style traces
 
-### Phase 1: MVP 闭环基础重构 (1-2周)
-* **目标**：跑通安全的端到端业务闭环。
-* **行动**：
-  1. 重构 `turn_runner.py` 为标准化的 Orchestrator。
-  2. 升级 `Tool Registry`，对现有的 `file`, `web`, `terminal` 等工具打上权限和风险标签。
-  3. 完善基础 Trace 与运行日志收集，为 Eval 铺垫。
+Cora should borrow the idea of an execution policy layer between tool request
+and tool execution, especially for terminal, file mutation, and network access.
 
-### Phase 2: 安全加固与预算控制 (2-3周)
-* **目标**：把 Demo 变成可控、可靠的系统。
-* **行动**：
-  1. 上线 Token Budget 控制模块和上下文压缩策略。
-  2. 落地高风险工具的 Human-in-the-Loop 审核机制。
-  3. 建设 Eval 体系的 Fixtures 沙箱，完善 Component 和 Trajectory 的回归测试。
-  4. 上线 Checkpoint + 幂等键 + 可控重试机制，打通失败恢复链路。
-  5. 建立失败分类看板与基础告警规则（成功率、时延、熔断率）。
+### OpenCode: Role And Permission Reference
 
-### Phase 3: 规模化扩展与通用融合 (长期)
-* **目标**：真正实现复杂 Multi-Agent 编排与外部生态对接。
-* **行动**：
-  1. 接入外部标准 MCP Server（如 Git, 数据库等）。
-  2. 上线动态记忆分层与检索修剪机制。
-  3. 引入多路路由和并行分布式规划机制（基于 Declarative Planning）。
-  4. 引入 Planner/Worker/Reviewer 协作 Contract 与冲突仲裁策略。
-  5. 建立模型路由 A/B 评估与策略自动调优机制（质量-成本联动）。
+`examples/opencode` has a clean role model:
+
+- primary agents such as `build` and `plan`
+- subagents such as `general`, `explore`, and `scout`
+- per-agent permission rules
+- explicit task and task-status tools
+
+Cora should borrow this for agent role definitions: roles are configuration
+plus permissions, not only prompt text.
+
+### Hermes Agent: Memory And Skill Reference
+
+`examples/hermes-agent` is useful for:
+
+- procedural skills
+- persistent memory
+- delegation
+- trajectory generation
+- scheduled work
+
+Cora should borrow memory and skill ideas later, but not let self-improvement
+or autonomous delegation outrun the harness safety model.
+
+## 3. Current Cora State
+
+Cora already has useful foundations:
+
+- `src/core/agent/turn_runner.py`
+  prepares runtime state, resolves tool specs, invokes the orchestrator, handles
+  forced tools and retry fallback.
+- `src/core/agent/orchestrator.py`
+  builds prompt messages and delegates to the loop.
+- `src/core/agent/loop.py`
+  implements the model/tool loop and has `max_steps`.
+- `src/core/agent/context_budget.py`
+  estimates prompt size and supports context slicing.
+- `src/core/tools/registry.py`
+  registers tools with basic metadata.
+- `src/core/evals`
+  already contains the beginning of an eval subsystem.
+
+The gap is that these pieces are still shaped like a single-agent tool loop.
+They do not yet define:
+
+- a harness lifecycle
+- structured agent roles
+- structured planning and result contracts
+- tool risk and permission policy
+- subagent run persistence
+- durable checkpoints
+- standardized trace and failure taxonomy
+- multi-agent eval cases
+
+## 4. Design Principles
+
+### 4.1 Harness First, Multi-Agent Second
+
+The runtime should first make a single agent run controllable. Only then should
+it add Planner, Worker, Reviewer, or external agents.
+
+### 4.2 Orchestrator Owns Control
+
+Agents may propose work. The orchestrator decides:
+
+- which role runs
+- which tools are exposed
+- whether a step can start
+- whether a result is accepted
+- whether to retry, review, ask the user, or abort
+
+### 4.3 Structured Contracts Over Free Text
+
+Planning, task dispatch, tool traces, and results must use typed schemas.
+Natural language can explain intent, but it must not be the only machine
+contract.
+
+### 4.4 Least Context Sharing
+
+Subagents should receive the smallest sufficient context:
+
+- task goal
+- relevant facts
+- explicit constraints
+- allowed tools
+- expected output schema
+
+They should not automatically receive the full parent conversation.
+
+### 4.5 Safety Is A Runtime Property
+
+Safety cannot live only in the prompt. Tool policy, sandbox policy, approval,
+rate limits, and audit logs must be enforced outside model text.
+
+### 4.6 Evals Are Part Of The Harness
+
+Every new harness behavior should be paired with eval coverage:
+
+- tool selection
+- trajectory quality
+- permission denial
+- retry behavior
+- budget cutoff
+- subagent result merging
+
+## 5. Target Architecture
+
+```text
+Shells
+  WeChat / CLI / HTTP API
+      |
+      v
+AgentTurnRunner
+  request normalization
+  runtime snapshot
+  platform preset
+      |
+      v
+AgentOrchestrator
+  state machine
+  harness selection
+  policy enforcement
+  trace emission
+      |
+      v
+AgentHarness
+  prepare
+  start
+  send
+  resolve
+  cleanup
+      |
+      v
+Agent Roles
+  Primary
+  Planner
+  Worker
+  Reviewer
+  Memory Curator
+      |
+      v
+Governed Tool Runtime
+  registry
+  permissions
+  risk levels
+  sandbox / HITL
+  retry / timeout
+      |
+      v
+State, Memory, Evals, Observability
+```
+
+## 6. Core Runtime Contracts
+
+### 6.1 AgentHarness
+
+Cora should introduce a small harness interface inspired by OpenClaw's V2
+lifecycle.
+
+```python
+class AgentHarness(Protocol):
+    id: str
+    label: str
+
+    async def prepare(self, params: HarnessAttemptParams) -> PreparedHarnessRun: ...
+    async def start(self, prepared: PreparedHarnessRun) -> HarnessSession: ...
+    async def send(self, session: HarnessSession) -> HarnessAttemptResult: ...
+    async def resolve(self, session: HarnessSession, result: HarnessAttemptResult) -> HarnessAttemptResult: ...
+    async def cleanup(self, params: HarnessCleanupParams) -> None: ...
+```
+
+Initial implementation can wrap the existing `AgentLoop`. The value is not a
+new model loop; the value is a standard lifecycle boundary.
+
+### 6.2 HarnessAttemptParams
+
+Minimum fields:
+
+- `run_id`
+- `session_id`
+- `source_message_id`
+- `user_text`
+- `agent_role`
+- `platform`
+- `tool_policy`
+- `budget`
+- `context_snapshot`
+- `memory_snapshot`
+- `trace_id`
+- `parent_run_id`
+- `spawn_depth`
+
+### 6.3 HarnessAttemptResult
+
+Minimum fields:
+
+- `status`: `completed | incomplete | failed | aborted | needs_user`
+- `disposition`: `respond | clarify | handoff | silent`
+- `reply`
+- `role`
+- `tool_trace`
+- `artifacts`
+- `usage`
+- `failure_category`
+- `confidence`
+- `state_patch`
+
+### 6.4 AgentRunRecord
+
+Every primary run and subagent run should have a durable record.
+
+Minimum fields:
+
+- `run_id`
+- `session_id`
+- `parent_run_id`
+- `requester_session_id`
+- `agent_role`
+- `task`
+- `status`
+- `created_at`
+- `started_at`
+- `ended_at`
+- `spawn_depth`
+- `run_timeout_seconds`
+- `budget_initial`
+- `budget_remaining`
+- `tool_policy_id`
+- `checkpoint_id`
+- `outcome`
+- `failure_category`
+- `pending_delivery`
+- `cleanup_status`
+
+For Phase 1 this may be persisted in SQLite or a small repository abstraction.
+Do not keep it only in memory.
+
+## 7. Agent Roles
+
+Cora should define roles as config plus permissions plus prompt contribution.
+
+### 7.1 Primary Agent
+
+Purpose:
+
+- handles ordinary user turns
+- may use normal tools according to platform preset
+- may request planning for complex work after Phase 2
+
+Default permissions:
+
+- `file.read`, `session_search`, `user_memory.read`, `skills.run`
+- `web.search` when platform allows
+- write/terminal tools require policy approval depending on shell
+
+### 7.2 Planner
+
+Purpose:
+
+- decomposes complex tasks into a structured `PlanSpec`
+- does not execute risky tools
+- does not mutate files, memory, or external systems
+
+Default permissions:
+
+- read-only context
+- optional search tools
+- no write tools
+- no terminal mutation
+
+### 7.3 Worker
+
+Purpose:
+
+- executes one assigned `TaskSpec`
+- returns a structured `ResultSpec`
+- cannot modify the global plan
+
+Default permissions:
+
+- only tools explicitly granted by the orchestrator
+- no subagent spawning by default
+- may use write/terminal only if task policy allows
+
+### 7.4 Reviewer
+
+Purpose:
+
+- reviews high-risk or low-confidence results
+- checks plan/result consistency
+- recommends accept, retry, ask user, or abort
+
+Default permissions:
+
+- read-only traces and artifacts
+- no external mutation
+
+### 7.5 Memory Curator
+
+Purpose:
+
+- decides whether a fact should enter durable memory
+- separates temporary session state from long-term memory
+- can summarize or prune memory
+
+Default permissions:
+
+- memory read/write through governed memory tools
+- no file/terminal mutation
+
+## 8. Planning And Result Schemas
+
+### 8.1 PlanSpec
+
+```json
+{
+  "goal": "string",
+  "assumptions": ["string"],
+  "steps": [
+    {
+      "id": "step-1",
+      "title": "string",
+      "role": "worker",
+      "task": "string",
+      "depends_on": [],
+      "allowed_tools": ["file.read"],
+      "risk": "low|medium|high",
+      "parallel_group": "group-a",
+      "expected_output": "summary|patch|data|decision",
+      "requires_review": false
+    }
+  ],
+  "stop_conditions": ["string"]
+}
+```
+
+### 8.2 TaskSpec
+
+```json
+{
+  "task_id": "string",
+  "goal": "string",
+  "context": ["necessary fact"],
+  "constraints": ["string"],
+  "allowed_tools": ["string"],
+  "forbidden_tools": ["string"],
+  "output_schema": "ResultSpec",
+  "timeout_seconds": 120,
+  "max_tool_calls": 8,
+  "risk": "low|medium|high"
+}
+```
+
+### 8.3 ResultSpec
+
+```json
+{
+  "task_id": "string",
+  "status": "completed|failed|needs_user|partial",
+  "summary": "string",
+  "artifacts": [],
+  "facts": ["string"],
+  "risks": ["string"],
+  "confidence": "low|medium|high",
+  "next_action": "accept|retry|review|ask_user|abort"
+}
+```
+
+### 8.4 ErrorSpec
+
+```json
+{
+  "category": "planning_error|tool_failure|permission_denied|timeout|budget_exhausted|invalid_result|safety_blocked|infrastructure_failure",
+  "message": "string",
+  "retryable": false,
+  "safe_user_message": "string",
+  "debug": {}
+}
+```
+
+## 9. Orchestrator State Machine
+
+The orchestrator should use an explicit state machine.
+
+```text
+received
+  -> prepare_context
+  -> select_role
+  -> build_or_reuse_plan
+  -> dispatch_step
+  -> execute_step
+  -> resolve_result
+  -> review_if_needed
+  -> merge_state
+  -> complete
+```
+
+Failure edges:
+
+```text
+execute_step -> retry_step
+execute_step -> ask_user
+execute_step -> abort
+resolve_result -> review_if_needed
+review_if_needed -> retry_step
+review_if_needed -> abort
+any_state -> budget_cutoff
+any_state -> timeout_cutoff
+```
+
+Phase 1 may skip planning and run:
+
+```text
+received -> prepare_context -> execute_primary -> resolve_result -> complete
+```
+
+The important point is that even the simple path should emit the same trace
+shape and run record shape as later multi-agent paths.
+
+## 10. Tool Governance
+
+### 10.1 Tool Metadata
+
+Extend the tool registry beyond schema and description.
+
+Recommended fields:
+
+- `toolset`
+- `read_only`
+- `risk`: `low | medium | high`
+- `allowed_roles`
+- `requires_confirmation`
+- `requires_sandbox`
+- `timeout_seconds`
+- `rate_limit`
+- `retry_policy`
+- `idempotency_required`
+- `audit_level`
+
+### 10.2 Policy Decision
+
+Every tool call should pass through a policy decision:
+
+```text
+allow -> execute
+ask -> create HITL request
+deny -> return policy error
+sandbox -> execute in restricted runtime
+```
+
+This decision should consider:
+
+- platform shell
+- agent role
+- sender/session trust
+- tool risk
+- file path or command target
+- sandbox status
+- user approvals
+- inherited parent policy
+
+### 10.3 Initial Risk Defaults
+
+- Low risk: search, read, list, summarize, memory read.
+- Medium risk: web fetch, browser navigation, memory write, file write in
+  workspace.
+- High risk: terminal execution, delete, external delivery, network mutation,
+  writing outside workspace, credential access.
+
+## 11. State And Memory
+
+### 11.1 Runtime State
+
+Short-lived operational data:
+
+- current run
+- current step
+- budget remaining
+- tool trace
+- pending clarification
+- active subagent runs
+
+### 11.2 Session State
+
+Conversation-scoped state:
+
+- session summary
+- active plan
+- unresolved user choices
+- run records for this session
+
+### 11.3 Durable Memory
+
+Long-lived user or domain knowledge:
+
+- user preferences
+- recurring project facts
+- stable domain rules
+- important prior outcomes
+
+Durable memory writes should be explicit and auditable. A Worker should not
+write durable memory directly unless granted a memory-curator role or tool.
+
+### 11.4 Memory Injection Policy
+
+Use a hybrid strategy:
+
+- inject only a small high-confidence memory snapshot into prompts
+- expose `memory_search` for explicit retrieval
+- write memory only through a governed tool
+- keep memory provenance and timestamps
+
+## 12. Budget And Limits
+
+Every run should have a budget object:
+
+- `max_steps`
+- `max_tool_calls`
+- `max_duration_seconds`
+- `max_prompt_tokens`
+- `max_completion_tokens`
+- `max_total_tokens`
+- `max_spawn_depth`
+- `max_child_runs`
+
+Budget zones:
+
+- Green: normal operation.
+- Yellow: compress context and prefer cheaper model/role.
+- Red: stop spawning and disallow nonessential tools.
+- Cutoff: return partial result or ask user to continue.
+
+Existing `context_budget.py` should become one component of this broader
+runtime budget, not the entire budget system.
+
+## 13. Failure Recovery
+
+### 13.1 Checkpoints
+
+Create checkpoints at:
+
+- run start
+- plan accepted
+- before high-risk tool execution
+- after external mutation
+- after each completed subagent result
+- before final response
+
+### 13.2 Idempotency
+
+Every mutating step should have an idempotency key:
+
+```text
+run_id + step_id + tool_name + semantic_target
+```
+
+For tools that cannot enforce idempotency, record the limitation and require
+review or approval for retries.
+
+### 13.3 Retry Policy
+
+Retry only when the error is classified as retryable:
+
+- transient network failure
+- timeout
+- rate limit with backoff
+- model transport failure
+
+Do not retry:
+
+- permission denial
+- invalid arguments after schema validation
+- user rejection
+- safety block
+- irreversible mutation failure without compensation
+
+## 14. Observability
+
+Every run should emit structured events:
+
+- `run.started`
+- `run.completed`
+- `run.failed`
+- `step.started`
+- `step.completed`
+- `tool.requested`
+- `tool.allowed`
+- `tool.denied`
+- `tool.completed`
+- `budget.warning`
+- `checkpoint.saved`
+- `subagent.spawned`
+- `subagent.completed`
+
+Trace identifiers:
+
+- `trace_id`
+- `run_id`
+- `parent_run_id`
+- `session_id`
+- `step_id`
+- `tool_call_id`
+
+Failure taxonomy should align with evals:
+
+- `planning_error`
+- `routing_failure`
+- `tool_failure`
+- `permission_denied`
+- `timeout`
+- `budget_exhausted`
+- `memory_failure`
+- `invalid_result`
+- `safety_blocked`
+- `infrastructure_failure`
+
+## 15. MCP And External Agent Integration
+
+MCP servers and external agent runtimes should never bypass Cora policy.
+
+Rules:
+
+- MCP tools are mounted through Cora's tool registry.
+- External agent runtimes are mounted as harnesses.
+- Third-party tools receive scoped credentials.
+- Tool allowlists and denylists apply before model exposure.
+- Sensitive outputs are redacted before being added to trace or memory.
+- Sandboxed sessions cannot call host-only external runtimes unless explicitly
+  approved.
+
+This mirrors the OpenClaw approach of putting plugin/ACP runtimes behind the
+same harness and tool policy boundary.
+
+## 16. Eval Requirements
+
+Extend `docs/cora-evaluation-module-design.md` with harness-specific cases.
+
+Minimum eval groups:
+
+- single-agent run completes with correct tool trace
+- `max_steps` cutoff returns incomplete result
+- denied tool is not executed
+- high-risk tool creates approval request
+- planner produces valid `PlanSpec`
+- invalid `PlanSpec` is rejected
+- worker receives only allowed context
+- subagent spawn depth is enforced
+- subagent result is merged only after schema validation
+- retryable tool failure retries once
+- non-retryable permission denial does not retry
+- budget cutoff stops additional tool calls
+
+Trajectory judges should inspect:
+
+- repeated tool calls
+- unnecessary fan-out
+- missing review for high-risk results
+- hallucinated success after tool failure
+
+## 17. Implementation Roadmap
+
+### Phase 0: Design Alignment
+
+Deliver:
+
+- this document
+- agreement that Cora builds single-agent harness first
+- no new archive-first assumptions in harness code
+
+### Phase 1: Single-Agent Harness Foundation
+
+Goal:
+
+- make current Cora loop run through a standard harness lifecycle.
+
+Actions:
+
+1. Introduce `AgentHarness` interfaces and dataclasses.
+2. Wrap current `AgentLoop` as `DefaultAgentHarness`.
+3. Add `AgentRunRecord` persistence.
+4. Move `max_steps` into a broader `RunBudget`.
+5. Emit structured run and tool trace events.
+6. Add evals for single-agent lifecycle, cutoff, and trace shape.
+
+### Phase 2: Tool Policy And Approval
+
+Goal:
+
+- make tool execution governed outside the model prompt.
+
+Actions:
+
+1. Extend `ToolSpec` metadata.
+2. Add `ToolPolicyDecision`.
+3. Enforce role/platform-based tool allowlists.
+4. Add HITL request objects for high-risk tools.
+5. Add sandbox-required markers for file and terminal tools.
+6. Add evals for allow, ask, deny, and sandbox decisions.
+
+### Phase 3: Structured Planning Without Parallelism
+
+Goal:
+
+- add Planner and structured plans, but execute steps sequentially first.
+
+Actions:
+
+1. Add `PlanSpec`, `TaskSpec`, `ResultSpec`, and `ErrorSpec`.
+2. Add Planner role with read-only permissions.
+3. Validate planner output before execution.
+4. Dispatch one Worker step at a time.
+5. Add Reviewer for high-risk or low-confidence results.
+6. Add evals for valid/invalid plans and result validation.
+
+### Phase 4: Controlled Subagents
+
+Goal:
+
+- allow bounded Worker subagents.
+
+Actions:
+
+1. Add `spawn_depth` and `max_child_runs`.
+2. Add durable subagent run records.
+3. Support isolated and forked context modes.
+4. Enforce inherited tool policy.
+5. Add completion delivery and cleanup.
+6. Add evals for spawn limits, inherited denies, and result merge.
+
+### Phase 5: Advanced Runtime Features
+
+Goal:
+
+- make the system operationally robust.
+
+Actions:
+
+1. Add checkpoints and resume.
+2. Add idempotency keys for mutating tools.
+3. Add retry backoff and compensation hooks.
+4. Add MCP tool mounting through registry.
+5. Add external harness selection.
+6. Add observability reports and run replay.
+
+## 18. Recommended First Code Changes
+
+The smallest useful first slice:
+
+1. Add `src/core/agent/harness.py`.
+2. Add `src/core/schemas/harness.py`.
+3. Add `src/core/agent/run_records.py`.
+4. Wrap existing `AgentLoop.run()` in `DefaultAgentHarness`.
+5. Change `AgentTurnRunner.run_turn()` to call the harness lifecycle.
+6. Keep behavior equivalent at first.
+7. Add tests that prove the new lifecycle preserves current behavior.
+
+This creates a stable seam before adding any new multi-agent behavior.
+
+## 19. Acceptance Criteria
+
+Cora's harness is moving in the right direction when:
+
+1. a turn has a durable run record and trace
+2. tool calls are governed by runtime policy, not only prompt guidance
+3. risky tools can be denied or approved without special-casing each caller
+4. a future Planner can only output structured plans
+5. Workers can be given narrow context and narrow tools
+6. subagent runs have bounded depth, timeout, budget, and cleanup
+7. evals can catch tool-policy, trajectory, and budget regressions
+8. archive remains a domain skill rather than the harness identity
+
+The immediate objective is a boring, controllable harness. Interesting
+multi-agent behavior should be built on top of that, not instead of it.
