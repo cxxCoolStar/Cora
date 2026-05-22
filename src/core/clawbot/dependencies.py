@@ -116,6 +116,8 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
             model=active_settings.model or "",
             base_url=active_settings.openai_base_url,
             timeout=float(max(10, active_settings.openai_timeout_seconds)),
+            trust_env=active_settings.openai_http_trust_env,
+            max_attempts=active_settings.openai_max_attempts,
         )
     if model_client is None:
         raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")

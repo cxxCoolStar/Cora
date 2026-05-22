@@ -19,6 +19,7 @@ class OrchestratorInput:
     delivery_available: bool = False
     history: list[Message] | None = None
     tool_specs: list[ToolSpec] | None = None
+    planner_mode: bool = False
 
 
 class AgentOrchestrator:
@@ -43,6 +44,7 @@ class AgentOrchestrator:
             history=turn.history or [],
             upload_name=turn.upload_name,
             delivery_available=turn.delivery_available,
+            planner_mode=turn.planner_mode,
         )
         return await self.loop.run(
             session_id=turn.session_id,

@@ -133,6 +133,7 @@ class DefaultAgentHarness:
             context_snapshot=run_input.context_snapshot,
         )
         original_tool_names = sorted(prepared_turn.tool_names)
+        self._apply_planner_tool_surface(run_input=run_input, prepared_turn=prepared_turn)
         self._apply_run_tool_policy(run_input=run_input, prepared_turn=prepared_turn)
         self.execution_policy = prepared_turn.execution_policy
         profile = get_harness_policy_profile(run_input.budget.policy_profile)
@@ -159,10 +160,11 @@ class DefaultAgentHarness:
         )
         plan = await self.runner._build_turn_execution_plan(
             session_id=run_input.session_id,
-            user_text=run_input.user_text,
+            user_text=planner_user_text,
             raw_text=run_input.raw_text,
             upload=run_input.upload,
             prepared_turn=prepared_turn,
+            planner_mode=run_input.agent_role == PLANNER_AGENT_ROLE,
         )
         self._emit(
             HarnessTraceEventType.START_COMPLETED,
@@ -331,6 +333,15 @@ class DefaultAgentHarness:
                     "policy_decision": policy_decision,
                 },
             )
+
+    def _apply_planner_tool_surface(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
+        if run_input.agent_role != PLANNER_AGENT_ROLE:
+            return
+        prepared_turn.tool_specs = []
+        prepared_turn.tool_names = set()
+        prepared_turn.decision_policy = self.runner._decision_policy(
+            tool_names=prepared_turn.tool_names,
+        )
 
     def _apply_run_tool_policy(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
         if not (

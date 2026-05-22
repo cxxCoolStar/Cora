@@ -39,6 +39,14 @@ MEMORY_GUIDANCE = (
     "Do not store temporary task progress, one-off requests, or speculative sensitive inferences as long-term memory."
 )
 
+PLANNER_GUIDANCE = (
+    "You are in PLANNER mode. Do not call any tools in this turn. "
+    "Respond with exactly one JSON object and no markdown prose before or after it. "
+    "The JSON must match the PlanSpec shape requested in the user message "
+    "(plan_id, session_id, goal, policy_profile, tasks with task_id, title, tool_names, instruction). "
+    "List only registered tool names that a later worker step may use; do not execute them now."
+)
+
 SKILLS_GUIDANCE = (
     "Skills are reusable workflow documents. If a skill matches or is even partially relevant, load it with skill_view and follow its instructions. "
     "Skills may also include supporting files under references, templates, assets, or scripts, which can be loaded with skill_view(name, file_path). "
@@ -78,12 +86,14 @@ class AgentPromptBuilder:
         history: list[Message] | None = None,
         upload_name: str | None = None,
         delivery_available: bool = False,
+        planner_mode: bool = False,
     ) -> list[Message]:
         system_parts = self._build_system_parts(
             runtime=runtime,
             skills=skills,
             upload_name=upload_name,
             delivery_available=delivery_available,
+            planner_mode=planner_mode,
         )
         messages = [Message.system(session_id=session_id, content="\n".join(system_parts))]
         if history:
@@ -98,14 +108,19 @@ class AgentPromptBuilder:
         skills: Iterable[SkillDefinition],
         upload_name: str | None,
         delivery_available: bool,
+        planner_mode: bool = False,
     ) -> list[str]:
         policy = self.execution_policy_resolver.for_runtime(runtime)
         system_parts = [self.agent_identity]
-        system_parts.extend(["", "Execution guidance:", EXECUTION_GUIDANCE])
+        if planner_mode:
+            system_parts.extend(["", "Planner guidance:", PLANNER_GUIDANCE])
+        else:
+            system_parts.extend(["", "Execution guidance:", EXECUTION_GUIDANCE])
         for title, body in policy.prompt_sections():
             system_parts.extend(["", f"{title}:", body])
-        system_parts.extend(["", "Memory guidance:", MEMORY_GUIDANCE])
-        system_parts.extend(["", "Skills guidance:", SKILLS_GUIDANCE])
+        if not planner_mode:
+            system_parts.extend(["", "Memory guidance:", MEMORY_GUIDANCE])
+            system_parts.extend(["", "Skills guidance:", SKILLS_GUIDANCE])
         platform_hint = self._platform_hint(runtime=runtime, delivery_available=delivery_available)
         if platform_hint:
             system_parts.extend(["", "Platform hints:", platform_hint])

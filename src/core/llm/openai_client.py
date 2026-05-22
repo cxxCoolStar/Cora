@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from core.llm.base import ModelClient
+from core.llm.http_utils import build_httpx_client, post_json_with_retries
 from core.schemas.message import Message
 from core.schemas.model import ModelResponse
 from core.schemas.tool import ToolCall, ToolSpec
@@ -22,6 +23,8 @@ class OpenAIChatModelClient(ModelClient):
         base_url: str = "https://api.openai.com/v1",
         timeout: float = 60.0,
         http_client: httpx.Client | None = None,
+        trust_env: bool = False,
+        max_attempts: int = 3,
     ) -> None:
         if not api_key:
             raise ValueError("`api_key` is required for OpenAIChatModelClient.")
@@ -31,7 +34,8 @@ class OpenAIChatModelClient(ModelClient):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._client = http_client or httpx.Client(timeout=timeout)
+        self.max_attempts = max(1, int(max_attempts))
+        self._client = http_client or build_httpx_client(timeout=timeout, trust_env=trust_env)
 
     def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
         payload = {
@@ -40,15 +44,16 @@ class OpenAIChatModelClient(ModelClient):
             "tools": [self._tool_to_payload(tool) for tool in tools],
             "tool_choice": "auto",
         }
-        response = self._client.post(
-            f"{self.base_url}/chat/completions",
+        response = post_json_with_retries(
+            self._client,
+            url=f"{self.base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json=payload,
+            json_payload=payload,
+            max_attempts=self.max_attempts,
         )
-        response.raise_for_status()
         data = response.json()
         return self._parse_response(data)
 

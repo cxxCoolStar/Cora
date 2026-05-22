@@ -172,6 +172,7 @@ class AgentTurnRunner:
         raw_text: str | None,
         upload: UploadFile | None,
         prepared_turn: PreparedTurn,
+        planner_mode: bool = False,
     ) -> TurnExecutionPlan:
         initial_loop_result = await self.orchestrator.handle_turn(
             OrchestratorInput(
@@ -182,6 +183,7 @@ class AgentTurnRunner:
                 delivery_available=self.delivery_available(),
                 history=prepared_turn.history,
                 tool_specs=prepared_turn.tool_specs,
+                planner_mode=planner_mode,
             )
         )
         turn_decision = prepared_turn.decision_policy.initial_decision(
@@ -430,7 +432,11 @@ class AgentTurnRunner:
         runtime_context = self.runtime_manager.runtime_to_context(result.runtime)
         active_execution_policy = execution_policy or self._policy_resolver().for_runtime(result.runtime)
         tool_trace = [self._tool_summary_from_loop_trace(entry) for entry in result.tool_trace]
-        if not result.tool_trace:
+        if result.exit_reason in {"plan_validated", "plan_validation_failed"}:
+            reply = result.final_response or "计划处理未完成，请重试 /plan。"
+            reason = "Planner produced a structured plan outcome."
+            confidence = "high"
+        elif not result.tool_trace:
             reply = result.final_response or "我暂时还不能理解这个请求，你可以换一种说法试试。"
             reason = "The model responded directly." if result.exit_reason == "assistant_text" else "Tool-calling loop produced no final answer."
             confidence = "medium" if result.exit_reason == "assistant_text" else "low"

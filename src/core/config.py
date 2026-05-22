@@ -22,6 +22,8 @@ class CoreSettings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: int = 60
+    openai_http_trust_env: bool = False
+    openai_max_attempts: int = 3
     tavily_api_key: str | None = None
     tavily_base_url: str = "https://api.tavily.com"
     context_length: int = 128000

@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.channels.base import ChannelTurnInput
+from core.channels.wechat.gateway_errors import build_gateway_model_error_reply
+from core.channels.wechat.plan_commands import parse_plan_command, plan_command_text
 from core.channels.wechat.hitl_commands import (
     build_wechat_hitl_approved_prefix,
     build_wechat_hitl_expired_message,
@@ -122,6 +124,36 @@ class WechatGatewayService:
             )
             return hitl_result
 
+        try:
+            plan_result = await self._try_handle_plan_command(
+                event=event,
+                session_id=session_id,
+                text=resolution.normalized_text,
+            )
+        except Exception as exc:
+            logger.exception(
+                "wechat gateway plan command failed session_id=%s event_id=%s",
+                session_id,
+                event.event_id,
+            )
+            plan_result = WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=build_gateway_model_error_reply(exc),
+                action="plan_failed",
+                disposition="error",
+            )
+        if plan_result is not None:
+            self.event_repository.create(
+                channel=self.CHANNEL_NAME,
+                external_event_id=event.event_id,
+                external_user_id=event.user_id,
+                status="processed",
+                session_id=session_id,
+                reply_preview=plan_result.reply[:300],
+            )
+            return plan_result
+
         upload = None
         try:
             source_created_at = self._source_created_at(event)
@@ -142,7 +174,29 @@ class WechatGatewayService:
                 source_created_at=source_created_at,
                 upload=upload,
             )
-            response = await self._ingest_turn_input(turn_input)
+            try:
+                response = await self._ingest_turn_input(turn_input)
+            except Exception as exc:
+                logger.exception(
+                    "wechat gateway ingest failed session_id=%s event_id=%s",
+                    session_id,
+                    event.event_id,
+                )
+                self.event_repository.create(
+                    channel=self.CHANNEL_NAME,
+                    external_event_id=event.event_id,
+                    external_user_id=event.user_id,
+                    status="processed",
+                    session_id=session_id,
+                    reply_preview=build_gateway_model_error_reply(exc)[:300],
+                )
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=build_gateway_model_error_reply(exc),
+                    action="ingest_failed",
+                    disposition="error",
+                )
             if event.media_download_failed and not event.file_path:
                 if response.reply.strip() == "I do not have a final answer yet.":
                     response.reply = "我收到了你发的文字，但这条消息里的图片下载失败了，所以这次还没有成功保存图片。你可以把图片再发一次，或者等我把这条微信图文接收链路修好后再试。"
@@ -258,6 +312,45 @@ class WechatGatewayService:
                 action="hitl_pending_blocked",
             )
         return None
+
+    async def _try_handle_plan_command(
+        self,
+        *,
+        event: WechatInboundEvent,
+        session_id: str,
+        text: str | None,
+    ) -> WechatHandleResult | None:
+        command = parse_plan_command(text)
+        if command is None:
+            return None
+        metadata = {"channel": self.CHANNEL_NAME, "platform": "wechat"}
+        if command == "plan":
+            response = await self.clawbot_service.plan_turn(
+                session_id=session_id,
+                text=plan_command_text(text),
+                source_metadata=metadata,
+            )
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=response.reply,
+                action="plan_created",
+                disposition=response.disposition,
+                needs_clarification=response.needs_clarification,
+            )
+        response = await self.clawbot_service.execute_plan_turn(
+            session_id=session_id,
+            text=str(text or "").strip() or "/execute",
+            source_metadata=metadata,
+        )
+        return WechatHandleResult(
+            deduplicated=False,
+            session_id=session_id,
+            reply=response.reply,
+            action="plan_executed",
+            disposition=response.disposition,
+            needs_clarification=response.needs_clarification,
+        )
 
     @staticmethod
     def _has_user_payload(*, text: str | None, event: WechatInboundEvent) -> bool:

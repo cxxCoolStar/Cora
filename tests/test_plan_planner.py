@@ -129,6 +129,42 @@ def test_finalize_planner_run_rejects_unknown_tool() -> None:
     assert HarnessTraceEventType.PLAN_VALIDATION_FAILED in events
 
 
+def test_loop_result_to_turn_result_prefers_plan_summary_over_tool_trace() -> None:
+    from core.agent.loop import LoopResult
+    from core.agent.turn_runner import AgentTurnRunner
+
+    policy = MagicMock()
+    policy.normalize_disposition.side_effect = lambda *, disposition: disposition
+    policy_resolver = MagicMock()
+    policy_resolver.for_runtime.return_value = policy
+    runner = AgentTurnRunner(
+        orchestrator=MagicMock(),
+        loop=MagicMock(),
+        runtime_manager=MagicMock(),
+        skill_loader=MagicMock(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda **kwargs: None,
+        tool_specs_resolver=lambda **kwargs: [],
+        execution_policy_resolver=policy_resolver,
+    )
+    loop_result = LoopResult(
+        final_response="Plan `plan-1` validated with 1 task(s).",
+        assistant_response="search hit",
+        exit_reason="plan_validated",
+        status="completed",
+        disposition="respond",
+        tool_trace=[MagicMock()],
+        trace=[],
+        artifacts=[],
+        steps=2,
+        runtime=MagicMock(),
+    )
+    turn_result = runner.loop_result_to_turn_result(loop_result)
+    assert "Plan `plan-1` validated" in turn_result.reply
+    assert "search hit" not in turn_result.reply
+
+
 def test_validation_options_include_registered_tools() -> None:
     options = resolve_planner_validation_options(registered_tool_names=_registered_tools())
     assert "scheduled_tasks" in options.registered_tool_names

@@ -41,7 +41,8 @@ def build_planner_user_text(*, user_text: str, session_id: str) -> str:
         "    }\n"
         "  ]\n"
         "}\n"
-        "Use only tools appropriate for each worker step. Do not execute worker tools yourself."
+        "Use only tools appropriate for each worker step.\n"
+        "Do NOT call any tools in this planner turn — output JSON only."
     )
 
 
@@ -49,7 +50,7 @@ def planner_run_budget(*, max_steps: int | None = 4) -> RunBudget:
     return RunBudget(
         policy_profile=PLANNER_POLICY_PROFILE,
         max_steps=max_steps,
-        max_tool_calls=8,
+        max_tool_calls=0,
     )
 
 
@@ -99,9 +100,11 @@ def finalize_planner_run(
         loop_result.exit_reason = "plan_validation_failed"
         loop_result.status = "failed"
         loop_result.disposition = "clarify"
-        loop_result.final_response = (
-            "I could not parse a valid execution plan from the planner output."
+        loop_result.final_response = _planner_parse_failure_reply(
+            run_input=run_input,
+            parse_error=str(exc),
         )
+        loop_result.tool_trace = []
         return PlannerFinalizeResult(
             loop_result=loop_result,
             validation=None,
@@ -135,6 +138,7 @@ def finalize_planner_run(
         loop_result.final_response = summary
         loop_result.disposition = "respond"
         loop_result.exit_reason = "plan_validated"
+        loop_result.tool_trace = []
     else:
         emit(
             HarnessTraceEventType.PLAN_VALIDATION_FAILED,
@@ -150,6 +154,7 @@ def finalize_planner_run(
         loop_result.status = "failed"
         loop_result.disposition = "clarify"
         loop_result.final_response = _planner_failure_reply(validation)
+        loop_result.tool_trace = []
     return PlannerFinalizeResult(
         loop_result=loop_result,
         validation=validation,
@@ -172,6 +177,22 @@ def _planner_success_reply(plan: PlanSpec | None) -> str:
     lines.append("")
     lines.append("Reply /execute to run these tasks with the worker harness.")
     return "\n".join(lines)
+
+
+def _planner_parse_failure_reply(*, run_input: HarnessRunInput, parse_error: str) -> str:
+    channel = str(
+        run_input.metadata.get("channel") or run_input.metadata.get("platform") or ""
+    ).strip().lower()
+    if channel in {"wechat", "weixin"}:
+        return (
+            "无法从 Planner 输出中解析有效的执行计划（JSON）。\n"
+            f"解析错误：{parse_error}\n\n"
+            "请重试 /plan，并确保模型只返回一个 JSON 对象。"
+        )
+    return (
+        "I could not parse a valid execution plan from the planner output.\n"
+        f"Parse error: {parse_error}"
+    )
 
 
 def _planner_failure_reply(validation: PlanValidationResult) -> str:
