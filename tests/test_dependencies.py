@@ -6,6 +6,7 @@ from core.clawbot import dependencies as deps
 from core.clawbot.dependencies import get_clawbot_container
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
+from core.llm.planner_aware_client import PlannerAwareModelClient
 
 
 def test_get_clawbot_container_prefers_dev_provider_over_openai_env(monkeypatch, tmp_path: Path) -> None:
@@ -24,7 +25,9 @@ def test_get_clawbot_container_prefers_dev_provider_over_openai_env(monkeypatch,
     finally:
         deps._container = None
 
-    assert isinstance(container.clawbot_service.model_client, DevelopmentModelClient)
+    client = container.clawbot_service.model_client
+    assert isinstance(client, PlannerAwareModelClient)
+    assert isinstance(client.delegate, DevelopmentModelClient)
 
 
 def test_get_clawbot_container_uses_configured_openai_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -44,8 +47,10 @@ def test_get_clawbot_container_uses_configured_openai_timeout(monkeypatch, tmp_p
     finally:
         deps._container = None
 
-    assert isinstance(container.clawbot_service.model_client, OpenAIChatModelClient)
-    assert container.clawbot_service.model_client.timeout == 123.0
+    client = container.clawbot_service.model_client
+    assert isinstance(client, PlannerAwareModelClient)
+    assert isinstance(client.delegate, OpenAIChatModelClient)
+    assert client.delegate.timeout == 123.0
 
 
 def test_get_clawbot_container_debug_does_not_override_openai_provider(monkeypatch, tmp_path: Path) -> None:
@@ -65,7 +70,9 @@ def test_get_clawbot_container_debug_does_not_override_openai_provider(monkeypat
     finally:
         deps._container = None
 
-    assert isinstance(container.clawbot_service.model_client, OpenAIChatModelClient)
+    client = container.clawbot_service.model_client
+    assert isinstance(client, PlannerAwareModelClient)
+    assert isinstance(client.delegate, OpenAIChatModelClient)
 
 
 def test_get_clawbot_container_uses_configured_toolset_preset(monkeypatch, tmp_path: Path) -> None:

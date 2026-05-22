@@ -188,6 +188,7 @@ class EvalSetup:
     harness_tool_delay_seconds: float | None = None
     harness_prepare_failure_message: str | None = None
     planner_stub_mode: str | None = None
+    model_mode: str | None = None
     web_search_results: dict[str, list[EvalWebSearchHit]] = field(default_factory=dict)
     web_pages: dict[str, EvalWebPage] = field(default_factory=dict)
 
@@ -200,6 +201,7 @@ class EvalSetup:
             harness_tool_delay_seconds=_maybe_float(payload.get("harness_tool_delay_seconds")),
             harness_prepare_failure_message=_maybe_str(payload.get("harness_prepare_failure_message")),
             planner_stub_mode=_maybe_str(payload.get("planner_stub_mode")),
+            model_mode=_maybe_str(payload.get("model_mode")),
             web_search_results=_web_search_results_map(payload.get("web_search_results")),
             web_pages=_web_pages_map(payload.get("web_pages")),
         )

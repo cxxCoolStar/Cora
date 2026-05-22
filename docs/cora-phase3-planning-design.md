@@ -174,6 +174,13 @@ v1 建议 **显式 + 启发式** 并存：
 - Planner prompt 借鉴 OpenCode：1–3 路并行探索、每路独立焦点、复杂任务先 search 再 worker
 - Eval：`plan_parallel_subagent_search_completes`、`plan_parallel_three_way_search_completes`
 
+### PR-3h：真实 LLM Planner 产出 `parallel_subagents` — **已完成**
+
+- OpenAI Planner turn 使用 `response_format=json_object`（`PlannerAwareModelClient` + `orchestrator`）
+- 系统与用户提示已包含 `parallel_subagents` 形状与选用规则（`PLANNER_GUIDANCE`、`build_planner_user_text`）
+- 集成测试：`tests/test_planner_llm_parallel.py`（`SimulatedLlmPlannerModelClient` 走完整 `plan_turn` 路径）
+- Live eval（可选）：`plan_llm_parallel_search_planner`；默认 harness 跳过 `live` tag，运行 `scripts/run_live_planner_evals.cmd`（需 `CORA_RUN_LIVE_EVALS=1` 与 `CORA_OPENAI_API_KEY`）
+
 ### PR-3d（暂停）：Reviewer + 失败策略细化
 
 ## 10. Eval 计划
@@ -185,6 +192,7 @@ v1 建议 **显式 + 启发式** 并存：
 | `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 — **已实现** |
 | `plan_parallel_subagent_search_completes` | `parallel_subagents` + `spawn_workers` 并发 search — **已实现** |
 | `plan_parallel_three_way_search_completes` | 三路 `parallel_subagents` 并行 search — **已实现** |
+| `plan_llm_parallel_search_planner` | Live OpenAI Planner 产出 `parallel_subagents` — **已实现（live tag，可选运行）** |
 
 ## 11. 验收标准
 

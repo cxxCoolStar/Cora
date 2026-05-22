@@ -164,3 +164,42 @@ def test_openai_client_sends_assistant_tool_call_messages():
     assert result.assistant_text == "done"
     assert captured_request["json"]["messages"][0]["tool_calls"][0]["function"]["name"] == "archive"
     assert captured_request["json"]["messages"][1]["tool_call_id"] == "call_123"
+
+
+def test_openai_client_sends_json_response_format_without_tools():
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["json"] = __import__("json").loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"plan_id\":\"plan-1\"}",
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    model = OpenAIChatModelClient(
+        api_key="test-key",
+        model="gpt-test",
+        base_url="https://example.com/v1",
+        http_client=client,
+    )
+
+    result = model.generate(
+        messages=[Message.user(session_id="session-1", content="[Planner mode]")],
+        tools=[],
+        response_format="json_object",
+    )
+
+    assert result.assistant_text == "{\"plan_id\":\"plan-1\"}"
+    assert captured_request["json"]["response_format"] == {"type": "json_object"}
+    assert "tools" not in captured_request["json"]

@@ -46,9 +46,11 @@ class AgentOrchestrator:
             delivery_available=turn.delivery_available,
             planner_mode=turn.planner_mode,
         )
+        response_format = "json_object" if turn.planner_mode else None
         return await self.loop.run(
             session_id=turn.session_id,
             initial_messages=messages,
             runtime=turn.runtime,
             tool_specs=turn.tool_specs,
+            response_format=response_format,
         )

@@ -1,0 +1,31 @@
+{
+  "id": "plan_llm_parallel_search_planner",
+  "type": "harness",
+  "description": "Live OpenAI planner should emit parallel_subagents for a broad parallel search request.",
+  "tags": ["harness", "planner", "planning", "subagent", "parallel", "live"],
+  "setup": {
+    "model_mode": "live",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n",
+      "tests/test_example.py": "def test_hello_agent():\n    assert hello_agent() == 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "live planner emits parallel search plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Before any edits, search the workspace for hello_agent in parallel across src and tests using separate focused searches."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "parallel_subagents"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    }
+  ]
+}

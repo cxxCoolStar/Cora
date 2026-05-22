@@ -195,8 +195,14 @@ def _planner_success_reply(plan: PlanSpec | None) -> str:
         "Tasks:",
     ]
     for task in plan.tasks:
-        tools = ", ".join(task.tool_names)
-        lines.append(f"- {task.task_id}: {task.title} (tools: {tools})")
+        if task.uses_parallel_subagents():
+            count = len(task.parallel_subagents)
+            lines.append(
+                f"- {task.task_id}: {task.title} (parallel_subagents: {count} concurrent search run(s))"
+            )
+        else:
+            tools = ", ".join(task.tool_names) or "(none)"
+            lines.append(f"- {task.task_id}: {task.title} (tools: {tools})")
     lines.append("")
     lines.append("Reply /execute to run these tasks with the worker harness.")
     return "\n".join(lines)

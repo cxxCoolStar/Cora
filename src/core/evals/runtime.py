@@ -57,6 +57,7 @@ class EvalRuntime:
                 sandbox_root=sandbox_root,
                 user_memory_path=user_memory_path,
                 workspace_root=workspace_root,
+                model_mode=case.setup.model_mode,
             ):
                 clawbot_dependencies._container = None
                 container = get_clawbot_container()
@@ -228,6 +229,9 @@ class EvalRuntime:
 
     @staticmethod
     def _configure_planner_stub(*, container, setup: EvalSetup) -> None:
+        if str(setup.model_mode or "").strip().lower() == "live":
+            os.environ.pop("CORA_EVAL_PLANNER_STUB", None)
+            return
         mode = str(setup.planner_stub_mode or "").strip().lower()
         if not mode:
             return
@@ -278,8 +282,22 @@ class EvalRuntime:
             container.clawbot_service._run_budget_for_turn = original_budget_for_turn
 
 
+def live_evals_enabled() -> bool:
+    flag = str(os.environ.get("CORA_RUN_LIVE_EVALS") or "").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    return bool(str(os.environ.get("CORA_OPENAI_API_KEY") or "").strip())
+
+
 @contextmanager
-def isolated_settings_env(*, project_root: Path, sandbox_root: Path, user_memory_path: Path, workspace_root: Path):
+def isolated_settings_env(
+    *,
+    project_root: Path,
+    sandbox_root: Path,
+    user_memory_path: Path,
+    workspace_root: Path,
+    model_mode: str | None = None,
+):
     original_cwd = Path.cwd()
     previous_values = {key: os.environ.get(key) for key in _OVERRIDDEN_ENV}
     sandbox_cora = sandbox_root / ".cora"
@@ -293,7 +311,14 @@ def isolated_settings_env(*, project_root: Path, sandbox_root: Path, user_memory
     os.environ["CORA_ARCHIVE_ROOT_DIR"] = str(sandbox_cora / "archive")
     os.environ["CORA_USER_MEMORY_PATH"] = str(user_memory_path)
     os.environ["CORA_FILE_TOOL_ROOT"] = str(workspace_root)
-    os.environ["CORA_MODEL_PROVIDER"] = "dev"
+    if str(model_mode or "").strip().lower() == "live":
+        provider = str(os.environ.get("CORA_MODEL_PROVIDER") or "openai").strip().lower()
+        if provider in {"dev", "development", ""}:
+            provider = "openai"
+        os.environ["CORA_MODEL_PROVIDER"] = provider
+        os.environ.pop("CORA_EVAL_PLANNER_STUB", None)
+    else:
+        os.environ["CORA_MODEL_PROVIDER"] = "dev"
     os.chdir(project_root)
     try:
         yield

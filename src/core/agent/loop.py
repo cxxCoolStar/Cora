@@ -65,6 +65,7 @@ class AgentLoop:
         initial_messages: list[Message],
         runtime: ConversationRuntimeState,
         tool_specs: list[ToolSpec] | None = None,
+        response_format: str | None = None,
     ) -> LoopResult:
         active_tool_specs = list(tool_specs or self.tool_specs)
         messages = list(initial_messages)
@@ -80,7 +81,11 @@ class AgentLoop:
                     tools=active_tool_specs,
                     calibrated=False,
                 )
-            response = self.model_client.generate(messages=messages, tools=active_tool_specs)
+            response = self.model_client.generate(
+                messages=messages,
+                tools=active_tool_specs,
+                response_format=response_format,
+            )
             self._record_prompt_usage(
                 response_usage=response.usage,
                 estimated_prompt_tokens=estimated_prompt_tokens,

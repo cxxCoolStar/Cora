@@ -37,13 +37,22 @@ class OpenAIChatModelClient(ModelClient):
         self.max_attempts = max(1, int(max_attempts))
         self._client = http_client or build_httpx_client(timeout=timeout, trust_env=trust_env)
 
-    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
-        payload = {
+    def generate(
+        self,
+        *,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        response_format: str | None = None,
+    ) -> ModelResponse:
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [self._message_to_payload(message) for message in messages],
-            "tools": [self._tool_to_payload(tool) for tool in tools],
-            "tool_choice": "auto",
         }
+        if tools:
+            payload["tools"] = [self._tool_to_payload(tool) for tool in tools]
+            payload["tool_choice"] = "auto"
+        if response_format:
+            payload["response_format"] = {"type": response_format}
         response = post_json_with_retries(
             self._client,
             url=f"{self.base_url}/chat/completions",

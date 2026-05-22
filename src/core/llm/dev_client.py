@@ -24,7 +24,13 @@ class DevelopmentModelClient(ModelClient):
                 return reply
         return content
 
-    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+    def generate(
+        self,
+        *,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        response_format: str | None = None,
+    ) -> ModelResponse:
         latest_user = next((message for message in reversed(messages) if message.role == "user"), None)
         latest_tool = messages[-1] if messages and messages[-1].role == "tool" else None
 

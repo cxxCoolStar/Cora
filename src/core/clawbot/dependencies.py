@@ -13,6 +13,7 @@ from core.ingestion.parsers.image_parser import ImageFileParser
 from core.ingestion.service import IngestionService
 from core.llm.dev_client import DevelopmentModelClient
 from core.llm.openai_client import OpenAIChatModelClient
+from core.llm.planner_aware_client import PlannerAwareModelClient
 from core.llm.openai_vision_client import OpenAIVisionClient
 from core.storage.db import DatabaseManager
 from core.storage.repositories import (
@@ -123,6 +124,8 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         )
     if model_client is None:
         raise RuntimeError("Cora requires a configured model client; heuristic routing and planning have been removed.")
+
+    model_client = PlannerAwareModelClient(model_client)
 
     topic_classifier = TopicClassifier(model_client=model_client)
     topic_selector = TopicSelector(

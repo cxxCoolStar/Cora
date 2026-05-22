@@ -13,7 +13,7 @@ from core.evals.models import (
     EvalStepResult,
 )
 from core.evals.report import write_report
-from core.evals.runtime import EvalRuntime
+from core.evals.runtime import EvalRuntime, live_evals_enabled
 
 
 class EvalRunner:
@@ -60,7 +60,10 @@ class EvalRunner:
         return run_result
 
     def load_cases(self) -> list[EvalCase]:
-        return load_cases(self.cases_dir, case_type=self.case_type)
+        cases = load_cases(self.cases_dir, case_type=self.case_type)
+        if live_evals_enabled():
+            return cases
+        return [case for case in cases if "live" not in case.tags]
 
     def evaluate_step(
         self,
