@@ -6,7 +6,13 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
+from core.agent.plan_execution_state import (
+    StoredPlanExecution,
+    stored_plan_execution_from_dict,
+)
+from core.agent.plan_store import StoredValidatedPlan
 from core.agent.hitl_expiry import default_hitl_expires_at, is_hitl_expired
+from core.schemas.plan import plan_spec_from_dict
 from core.schemas.hitl import HitlRequest
 from core.storage.models import (
     AgentRunRecordModel,
@@ -16,6 +22,7 @@ from core.storage.models import (
     PendingStateRecord,
     ItemRecord,
     MessageRecord,
+    SessionPlanRecord,
     SessionRecord,
     SessionSummaryRecord,
     SourceEventRecord,
@@ -1396,3 +1403,94 @@ class SqlHitlStore:
             resolved_at=record.resolved_at,
             metadata=dict(record.metadata_json or {}),
         )
+
+
+class SqlPlanStore:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def save(self, *, stored: StoredValidatedPlan) -> None:
+        normalized_session_id = str(stored.session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                record = SessionPlanRecord(
+                    session_id=normalized_session_id,
+                    plan_id=stored.plan.plan_id,
+                    planner_run_id=stored.planner_run_id,
+                    plan_json=stored.plan.to_dict(),
+                    execution_state_json=None,
+                )
+                session.add(record)
+            else:
+                record.plan_id = stored.plan.plan_id
+                record.planner_run_id = stored.planner_run_id
+                record.plan_json = stored.plan.to_dict()
+                record.execution_state_json = None
+                record.updated_at = utc_now()
+            session.commit()
+
+    def get_latest(self, *, session_id: str, plan_id: str | None = None) -> StoredValidatedPlan | None:
+        normalized_session_id = str(session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                return None
+            if plan_id and str(record.plan_id or "").strip() != str(plan_id).strip():
+                return None
+            return StoredValidatedPlan(
+                session_id=record.session_id,
+                plan=plan_spec_from_dict(dict(record.plan_json or {})),
+                planner_run_id=str(record.planner_run_id or ""),
+            )
+
+    def clear_session(self, *, session_id: str) -> None:
+        normalized_session_id = str(session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                return
+            session.delete(record)
+            session.commit()
+
+    def save_execution(self, *, execution: StoredPlanExecution) -> None:
+        normalized_session_id = str(execution.session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                record = SessionPlanRecord(
+                    session_id=normalized_session_id,
+                    plan_id=execution.plan.plan_id,
+                    planner_run_id=execution.planner_run_id,
+                    plan_json=execution.plan.to_dict(),
+                    execution_state_json=execution.to_dict(),
+                )
+                session.add(record)
+            else:
+                record.plan_id = execution.plan.plan_id
+                record.planner_run_id = execution.planner_run_id
+                record.plan_json = execution.plan.to_dict()
+                record.execution_state_json = execution.to_dict()
+                record.updated_at = utc_now()
+            session.commit()
+
+    def get_execution(self, *, session_id: str) -> StoredPlanExecution | None:
+        normalized_session_id = str(session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                return None
+            payload = record.execution_state_json
+            if not isinstance(payload, dict) or not payload:
+                return None
+            return stored_plan_execution_from_dict(payload)
+
+    def clear_execution(self, *, session_id: str) -> None:
+        normalized_session_id = str(session_id or "").strip()
+        with self.database.session() as session:
+            record = session.get(SessionPlanRecord, normalized_session_id)
+            if record is None:
+                return
+            record.execution_state_json = None
+            record.updated_at = utc_now()
+            session.commit()

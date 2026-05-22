@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：PR-3a/3b/3c 已落地（schema + Planner + 顺序 Worker 执行）；PR-3d 可选。前置：Phase 2 + harness 17/17。
+> 状态：PR-3a–3e、PR-3f 已落地；PR-3d Reviewer 可选。前置：Phase 2 + harness 18/18。
 
 ## 1. 目标
 
@@ -143,11 +143,27 @@ v1 建议 **显式 + 启发式** 并存：
 ### PR-3c：顺序 Worker dispatch — **已完成**
 
 - `src/core/agent/plan_executor.py` — `PlanExecutor`、Worker budget、`build_worker_user_text`
-- `src/core/agent/plan_store.py` — `InMemoryPlanStore`（session 级 validated plan）
+- `src/core/agent/plan_store.py` — `PlanStore` 协议；生产 `SqlPlanStore`，测试/无 DB 时 `InMemoryPlanStore`
 - `ClawBotService.execute_plan_turn()`；`/execute` 触发顺序 Worker harness run
 - Planner 成功后写入 plan store；Worker `parent_run_id` 指向 planner run
 - Eval：`plan_single_task_worker_completes`（plan + execute 两步）
 - 测试：`tests/test_plan_executor.py`
+
+### PR-3e：Plan 执行中 HITL 暂停与续跑 — **已完成**
+
+- `StoredPlanExecution` + `PlanStore.save_execution` / `get_execution`
+- `PlanExecutor.resume_task_after_hitl` + `execute(start_task_index=…)`
+- `ClawBotService.approve_plan_execution_hitl_and_resume`；`approve_hitl_and_resume` 自动路由
+- 微信「确认」在 plan 暂停时继续当前 task，不重跑 Planner
+- Eval：`plan_worker_hitl_pause_and_resume`；stub `CORA_EVAL_PLANNER_STUB=hitl`
+- 测试：`tests/test_plan_execution_hitl.py`
+
+### PR-3f：Plan 持久化（SQL）— **已完成**
+
+- `clawbot_session_plans`（`SessionPlanRecord`）：`plan_json` + 可选 `execution_state_json`（HITL 暂停续跑）
+- `SqlPlanStore` in `src/core/storage/repositories.py`；`build_clawbot_container()` 注入 `ClawBotService`
+- 新 validated plan 写入时清除陈旧 execution 状态（与内存 store 一致）
+- 测试：`tests/test_sql_plan_store.py`
 
 ### PR-3d（可选）：Reviewer + 失败策略细化
 
@@ -157,7 +173,7 @@ v1 建议 **显式 + 启发式** 并存：
 |---------|--------|
 | `plan_validation_rejects_unknown_tool` | 非法 plan 不执行 Worker |
 | `plan_single_task_worker_completes` | 一步 plan + tool 成功 |
-| `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 |
+| `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 — **已实现** |
 
 ## 11. 验收标准
 

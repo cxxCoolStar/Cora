@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from core.agent.plan_execution_state import StoredPlanExecution
 from core.schemas.plan import PlanSpec, plan_spec_from_dict
 
 
@@ -30,13 +31,24 @@ class PlanStore(Protocol):
     def clear_session(self, *, session_id: str) -> None:
         ...
 
+    def save_execution(self, *, execution: StoredPlanExecution) -> None:
+        ...
+
+    def get_execution(self, *, session_id: str) -> StoredPlanExecution | None:
+        ...
+
+    def clear_execution(self, *, session_id: str) -> None:
+        ...
+
 
 class InMemoryPlanStore:
     def __init__(self) -> None:
         self._by_session: dict[str, StoredValidatedPlan] = {}
+        self._execution_by_session: dict[str, StoredPlanExecution] = {}
 
     def save(self, *, stored: StoredValidatedPlan) -> None:
         self._by_session[stored.session_id] = stored
+        self._execution_by_session.pop(stored.session_id, None)
 
     def get_latest(self, *, session_id: str, plan_id: str | None = None) -> StoredValidatedPlan | None:
         stored = self._by_session.get(session_id)
@@ -48,6 +60,16 @@ class InMemoryPlanStore:
 
     def clear_session(self, *, session_id: str) -> None:
         self._by_session.pop(session_id, None)
+        self._execution_by_session.pop(session_id, None)
+
+    def save_execution(self, *, execution: StoredPlanExecution) -> None:
+        self._execution_by_session[execution.session_id] = execution
+
+    def get_execution(self, *, session_id: str) -> StoredPlanExecution | None:
+        return self._execution_by_session.get(session_id)
+
+    def clear_execution(self, *, session_id: str) -> None:
+        self._execution_by_session.pop(session_id, None)
 
 
 def stored_plan_from_metadata(
@@ -66,6 +88,7 @@ def stored_plan_from_metadata(
 __all__ = [
     "InMemoryPlanStore",
     "PlanStore",
+    "StoredPlanExecution",
     "StoredValidatedPlan",
     "stored_plan_from_metadata",
 ]

@@ -187,6 +187,20 @@ class ChannelEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class SessionPlanRecord(Base):
+    __tablename__ = "clawbot_session_plans"
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("clawbot_sessions.id"),
+        primary_key=True,
+    )
+    plan_id: Mapped[str] = mapped_column(String(128), index=True)
+    planner_run_id: Mapped[str] = mapped_column(String, index=True)
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    execution_state_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 class HitlRequestModel(Base):
     __tablename__ = "clawbot_hitl_requests"
 

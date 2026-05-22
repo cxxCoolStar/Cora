@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
+import httpx
 
 from core.channels.base import ChannelTurnInput
 from core.channels.wechat.gateway_errors import build_gateway_model_error_reply
@@ -176,7 +177,7 @@ class WechatGatewayService:
             )
             try:
                 response = await self._ingest_turn_input(turn_input)
-            except Exception as exc:
+            except httpx.HTTPError as exc:
                 logger.exception(
                     "wechat gateway ingest failed session_id=%s event_id=%s",
                     session_id,

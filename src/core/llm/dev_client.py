@@ -69,6 +69,22 @@ class DevelopmentModelClient(ModelClient):
         goal = user_text[5:].strip() if user_text.startswith("/plan") else user_text
         goal = goal or "Execute the requested work."
         stub_mode = str(os.environ.get("CORA_EVAL_PLANNER_STUB") or "valid").strip().lower()
+        if stub_mode in {"hitl", "scheduled_tasks", "scheduled"}:
+            payload = {
+                "plan_id": "plan-dev-hitl",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "title": "List scheduled tasks",
+                        "tool_names": ["scheduled_tasks"],
+                        "instruction": "List all scheduled tasks for the user.",
+                    }
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode == "invalid":
             payload = {
                 "plan_id": "plan-dev-invalid",

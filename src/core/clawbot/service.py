@@ -9,8 +9,13 @@ from fastapi import UploadFile
 
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.harness import DefaultAgentHarness
-from core.agent.plan_executor import PlanExecutor, PlanExecutionResult
+from core.agent.plan_executor import (
+    PlanExecutionResult,
+    PlanExecutor,
+    format_plan_execution_reply,
+)
 from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
+from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
@@ -343,6 +348,17 @@ class ClawBotService:
         run_budget: RunBudget | None = None,
         source_metadata: dict[str, Any] | None = None,
     ) -> TurnResponse:
+        execution_state = self.plan_store.get_execution(session_id=session_id)
+        if execution_state is not None and (
+            not hitl_id or execution_state.pending_hitl_id == hitl_id
+        ):
+            outcome = await self.approve_plan_execution_hitl_and_resume(
+                session_id=session_id,
+                hitl_id=hitl_id or execution_state.pending_hitl_id,
+                text=text,
+                source_metadata=source_metadata,
+            )
+            return self._session_shell.to_turn_response(outcome=outcome)
         request = self.hitl_store.approve(hitl_id=hitl_id)
         if request.session_id != session_id:
             raise ValueError(
@@ -375,6 +391,7 @@ class ClawBotService:
             raise ValueError(
                 f"HITL request {hitl_id} belongs to session {request.session_id}, not {session_id}"
             )
+        self.plan_store.clear_execution(session_id=session_id)
         return request
 
     def get_latest_pending_hitl(self, *, session_id: str):
@@ -563,14 +580,33 @@ class ClawBotService:
         )
         context_snapshot = self.load_context_snapshot(session_id=session_id)
         context_snapshot.current_source_event_id = inbound_turn.source_event_id
+        run_metadata = dict(source_metadata or {})
         execution = await self._plan_executor().execute(
             session_id=session_id,
             plan=stored.plan,
             planner_run_id=stored.planner_run_id,
             source_message_id=inbound_turn.source_message_id,
             context_snapshot=context_snapshot,
-            run_metadata=dict(source_metadata or {}),
+            run_metadata=run_metadata,
         )
+        if execution.waiting_hitl:
+            pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
+            if pending is not None and execution.paused_task_index is not None:
+                self.plan_store.save_execution(
+                    execution=StoredPlanExecution(
+                        session_id=session_id,
+                        plan=stored.plan,
+                        planner_run_id=stored.planner_run_id,
+                        source_message_id=inbound_turn.source_message_id,
+                        task_index=execution.paused_task_index,
+                        task_results=list(execution.plan_run.task_results),
+                        pending_hitl_id=pending.hitl_id,
+                        run_metadata=run_metadata,
+                    )
+                )
+                execution.pending_hitl_id = pending.hitl_id
+        else:
+            self.plan_store.clear_execution(session_id=session_id)
         outcome = self._outcome_from_plan_execution(execution)
         self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
         logger.info(
@@ -615,6 +651,109 @@ class ClawBotService:
             ],
             tool_trace=list(execution.tool_trace),
         )
+
+    async def approve_plan_execution_hitl_and_resume(
+        self,
+        *,
+        session_id: str,
+        hitl_id: str,
+        text: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
+    ):
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+
+        state = self.plan_store.get_execution(session_id=session_id)
+        if state is None:
+            raise KeyError(f"No paused plan execution for session {session_id}")
+        if state.pending_hitl_id and state.pending_hitl_id != hitl_id:
+            raise ValueError(
+                f"Paused plan execution expects HITL {state.pending_hitl_id}, not {hitl_id}"
+            )
+        request = self.hitl_store.approve(hitl_id=hitl_id)
+        if request.session_id != session_id:
+            raise ValueError(
+                f"HITL request {hitl_id} belongs to session {request.session_id}, not {session_id}"
+            )
+        task_index = max(0, int(state.task_index))
+        if task_index >= len(state.plan.tasks):
+            raise ValueError(f"Plan execution task index out of range: {task_index}")
+        task = state.plan.tasks[task_index]
+        resume_metadata = dict(state.run_metadata)
+        resume_metadata.update(dict(source_metadata or {}))
+        if text and str(text).strip():
+            resume_metadata["resume_text"] = str(text).strip()
+        else:
+            payload = json.dumps(request.tool_arguments, ensure_ascii=False)
+            resume_metadata["resume_text"] = f"/tool {request.tool_name} {payload}"
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        executor = self._plan_executor()
+        completed_result, resume_trace, _turn_result = await executor.resume_task_after_hitl(
+            session_id=session_id,
+            plan=state.plan,
+            task=task,
+            planner_run_id=state.planner_run_id,
+            source_message_id=state.source_message_id,
+            context_snapshot=context_snapshot,
+            run_metadata=resume_metadata,
+            hitl_id=hitl_id,
+            approved_tool_name=request.tool_name,
+        )
+        prior_results = [
+            result
+            for result in state.task_results
+            if result.task_id != task.task_id
+        ]
+        if completed_result.status != "completed":
+            self.plan_store.clear_execution(session_id=session_id)
+            partial_run = PlanRunSpec(plan_id=state.plan.plan_id, status="failed")
+            partial_run.task_results = [*prior_results, completed_result]
+            execution = PlanExecutionResult(
+                plan_run=partial_run,
+                reply=format_plan_execution_reply(plan=state.plan, plan_run=partial_run),
+                status="failed",
+                disposition="clarify",
+                tool_trace=resume_trace,
+            )
+            outcome = self._outcome_from_plan_execution(execution)
+            self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+            return outcome
+
+        continued = await executor.execute(
+            session_id=session_id,
+            plan=state.plan,
+            planner_run_id=state.planner_run_id,
+            source_message_id=state.source_message_id,
+            context_snapshot=context_snapshot,
+            run_metadata=resume_metadata,
+            start_task_index=task_index + 1,
+            initial_task_results=[*prior_results, completed_result],
+            initial_tool_trace=resume_trace,
+        )
+        self.plan_store.clear_execution(session_id=session_id)
+        if continued.waiting_hitl:
+            pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
+            if pending is not None and continued.paused_task_index is not None:
+                self.plan_store.save_execution(
+                    execution=StoredPlanExecution(
+                        session_id=session_id,
+                        plan=state.plan,
+                        planner_run_id=state.planner_run_id,
+                        source_message_id=state.source_message_id,
+                        task_index=continued.paused_task_index,
+                        task_results=list(continued.plan_run.task_results),
+                        pending_hitl_id=pending.hitl_id,
+                        run_metadata=resume_metadata,
+                    )
+                )
+        outcome = self._outcome_from_plan_execution(continued)
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        logger.info(
+            "clawbot approve_plan_execution_resume_done session_id=%s plan_id=%s status=%s",
+            session_id,
+            state.plan.plan_id,
+            outcome.status,
+        )
+        return outcome
 
     def _persist_validated_plan(self, *, session_id: str) -> None:
         if self.agent_run_record_repository is None:

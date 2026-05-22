@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,8 @@ class PlanExecutionResult:
     status: str
     disposition: str
     waiting_hitl: bool = False
+    pending_hitl_id: str | None = None
+    paused_task_index: int | None = None
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -64,13 +67,20 @@ class PlanExecutor:
         source_message_id: str,
         context_snapshot: RuntimeContextSnapshot,
         run_metadata: dict[str, Any] | None = None,
+        start_task_index: int = 0,
+        initial_task_results: list[TaskResultSpec] | None = None,
+        initial_tool_trace: list[dict[str, Any]] | None = None,
     ) -> PlanExecutionResult:
         plan_run = PlanRunSpec(plan_id=plan.plan_id, status="executing")
         metadata_base = dict(run_metadata or {})
         metadata_base.setdefault("plan_id", plan.plan_id)
-        aggregated_tool_trace: list[dict[str, Any]] = []
+        aggregated_tool_trace: list[dict[str, Any]] = list(initial_tool_trace or [])
+        if initial_task_results:
+            plan_run.task_results.extend(initial_task_results)
 
-        for task in plan.tasks:
+        tasks = list(plan.tasks)
+        for index in range(max(0, int(start_task_index)), len(tasks)):
+            task = tasks[index]
             task_result, task_tool_trace = await self._run_task(
                 session_id=session_id,
                 plan=plan,
@@ -99,6 +109,7 @@ class PlanExecutor:
                     status="failed",
                     disposition="clarify",
                     waiting_hitl=True,
+                    paused_task_index=index,
                     tool_trace=aggregated_tool_trace,
                 )
 
@@ -109,6 +120,77 @@ class PlanExecutor:
             status="completed",
             disposition="respond",
             tool_trace=aggregated_tool_trace,
+        )
+
+    async def resume_task_after_hitl(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        context_snapshot: RuntimeContextSnapshot,
+        run_metadata: dict[str, Any],
+        hitl_id: str,
+        approved_tool_name: str,
+    ) -> tuple[TaskResultSpec, list[dict[str, Any]], AgentTurnResult]:
+        metadata = {
+            **dict(run_metadata or {}),
+            "agent_role": WORKER_AGENT_ROLE,
+            "task_id": task.task_id,
+            "parent_run_id": planner_run_id,
+            "resume_hitl_id": hitl_id,
+            "plan_id": plan.plan_id,
+        }
+        resume_text = str(run_metadata.get("resume_text") or "").strip()
+        if not resume_text:
+            resume_text = f"/tool {approved_tool_name} {{}}"
+        budget = worker_run_budget(plan=plan, task=task)
+        approved_names = list(budget.approved_tool_names)
+        if approved_tool_name not in approved_names:
+            approved_names.append(approved_tool_name)
+        budget = RunBudget(
+            policy_profile=budget.policy_profile,
+            allowed_tool_names=approved_names,
+            max_steps=budget.max_steps,
+            max_tool_calls=budget.max_tool_calls,
+            approved_tool_names=[approved_tool_name],
+        )
+        turn_result = await self._turn_runner.run_turn(
+            session_id=session_id,
+            source_message_id=f"{source_message_id}:{task.task_id}:resume",
+            user_text=resume_text,
+            raw_text=resume_text,
+            upload=None,
+            context_snapshot=context_snapshot,
+            run_budget=budget,
+            run_metadata=metadata,
+        )
+        run_id = self._resolve_worker_run_id(session_id=session_id, task_id=task.task_id)
+        trace_entries = _tool_trace_entries(turn_result)
+        if _task_waiting_hitl(turn_result) or _task_failed(turn_result):
+            return (
+                TaskResultSpec(
+                    task_id=task.task_id,
+                    run_id=run_id or "",
+                    status="failed",
+                    summary=_task_summary_from_turn(turn_result),
+                    tool_trace_count=len(turn_result.tool_trace),
+                ),
+                trace_entries,
+                turn_result,
+            )
+        return (
+            TaskResultSpec(
+                task_id=task.task_id,
+                run_id=run_id or "",
+                status="completed",
+                summary=_task_summary_from_turn(turn_result),
+                tool_trace_count=len(turn_result.tool_trace),
+            ),
+            trace_entries,
+            turn_result,
         )
 
     async def _run_task(
@@ -187,7 +269,7 @@ class PlanExecutor:
 def _task_failed(turn_result: AgentTurnResult) -> bool:
     if str(turn_result.status or "").strip() == "failed":
         return True
-    return any(trace.action in {"policy_denied", "policy_ask"} for trace in turn_result.tool_trace)
+    return any(trace.action == "policy_denied" for trace in turn_result.tool_trace)
 
 
 def _task_waiting_hitl(turn_result: AgentTurnResult) -> bool:
@@ -239,7 +321,7 @@ def format_plan_execution_reply(*, plan: PlanSpec, plan_run: PlanRunSpec) -> str
         lines.append(f"- {result.task_id} [{result.status}]: {result.summary}")
     if plan_run.status == "waiting_hitl":
         lines.append("")
-        lines.append("Approve or reject the pending tool request, then run /execute again to continue.")
+        lines.append("Reply 确认 to approve the pending tool and continue this plan, or 拒绝 to cancel.")
     return "\n".join(lines)
 
 

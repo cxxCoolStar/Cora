@@ -1,0 +1,84 @@
+{
+  "id": "plan_worker_hitl_pause_and_resume",
+  "type": "harness",
+  "description": "Plan worker steps that require HITL should pause and continue after approval without replanning.",
+  "tags": ["harness", "planner", "worker", "hitl", "planning"],
+  "setup": {
+    "planner_stub_mode": "hitl"
+  },
+  "steps": [
+    {
+      "label": "planner creates plan with scheduled_tasks step",
+      "input": {
+        "agent_role": "planner",
+        "text": "List scheduled reminders"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute pauses on scheduled_tasks confirmation",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute",
+        "platform": "api",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "clarify",
+        "reply_contains_all": [
+          "paused for human approval",
+          "scheduled_tasks",
+          "确认"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-1"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "tool.requested"
+          ]
+        }
+      }
+    },
+    {
+      "label": "approve and resume plan worker",
+      "input": {
+        "hitl_action": "approve",
+        "platform": "api",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_trace_contains_all": [
+            "tool.hitl.approved",
+            "tool.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

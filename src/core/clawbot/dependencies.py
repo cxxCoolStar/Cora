@@ -25,6 +25,7 @@ from core.storage.repositories import (
     SessionSummaryRepository,
     SqlAgentRunRecordRepository,
     SqlHitlStore,
+    SqlPlanStore,
     SourceEventRepository,
     TopicActivityRepository,
     TopicItemRepository,
@@ -81,6 +82,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
     topic_repository = TopicRepository(database)
     agent_run_record_repository = SqlAgentRunRecordRepository(database)
     hitl_store = SqlHitlStore(database)
+    plan_store = SqlPlanStore(database)
     scheduled_task_repository = ScheduledTaskRepository(database)
     session_map_repository = ChannelSessionMapRepository(database)
     topic_item_repository = TopicItemRepository(database)
@@ -186,6 +188,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         job_harness_policy_profile=active_settings.job_harness_policy_profile,
         agent_run_record_repository=agent_run_record_repository,
         hitl_store=hitl_store,
+        plan_store=plan_store,
     )
     return ClawBotContainer(
         settings=active_settings,

@@ -329,10 +329,13 @@ def _failed_turn_response(exc: Exception):
 
 
 def _turn_response_from_wechat_result(result) -> TurnResponse:
+    action = str(getattr(result, "action", "") or "")
+    disposition = getattr(result, "disposition", None) or "respond"
+    status = "failed" if action.endswith("_failed") or disposition == "error" else "completed"
     return TurnResponse(
         reply=result.reply,
-        status="completed",
-        disposition=getattr(result, "disposition", None) or "respond",
+        status=status,
+        disposition=disposition,
         action=result.action,
         item_id=None,
         needs_clarification=bool(getattr(result, "needs_clarification", False)),
