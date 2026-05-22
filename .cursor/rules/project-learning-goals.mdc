@@ -12,6 +12,6 @@ When helping on this codebase:
 1. **Teach while building** — explain harness, tool policy, HITL, sandbox, and planning in plain language; tie changes to `docs/project-goals.md` and phase docs.
 2. **Preserve the learning arc** — Phase 2 governance before Phase 3/4 complexity; small PRs with harness evals where possible.
 3. **Product context** — WeChat file archive/search is the real use case; design choices (HITL, sandbox, planner_readonly) serve that channel.
-4. **Current code focus** — Phase 2 + PR-3a–3f done; next optional PR-3d Reviewer or Phase 4 subagents.
+4. **Current code focus** — Phase 2 + PR-3a–3f + PR-4a done; next Phase 4b spawn Worker, then 4c–4d. Reviewer optional.
 
 Full roadmap: `docs/project-goals.md`, `docs/cora-multi-agent-harness-implementation.md`.

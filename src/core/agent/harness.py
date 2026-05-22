@@ -36,6 +36,7 @@ from core.agent.tool_policy_engine import (
 from core.schemas.tool_policy import ToolPolicyContext
 from core.schemas.message import Message
 from core.schemas.tool import ToolResult
+from core.agent.spawn_depth import SpawnDepthDenial, check_spawn_depth_allowed
 from core.schemas.harness import HarnessRunInput, HarnessTraceEventType, RunBudget, RunTraceEvent
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ class AgentHarness(Protocol):
 class DefaultAgentHarness:
     runner: AgentTurnRunner
     id: str = "default-single-agent"
+    default_max_spawn_depth: int = 1
     trace_events: list[RunTraceEvent] = field(default_factory=list)
     execution_policy: ExecutionPolicy | None = None
     run_record_repository: AgentRunRecordRepository | None = None
@@ -75,8 +77,31 @@ class DefaultAgentHarness:
             metadata={
                 "harness_id": self.id,
                 "phase": "run",
+                "spawn_depth": run_input.spawn_depth,
+                "max_spawn_depth": run_input.budget.max_spawn_depth,
             },
         )
+        spawn_denial = check_spawn_depth_allowed(
+            spawn_depth=run_input.spawn_depth,
+            budget=run_input.budget,
+            default_max_spawn_depth=self.default_max_spawn_depth,
+        )
+        if spawn_denial is not None:
+            loop_result = self._spawn_depth_denied_loop_result(
+                run_input=run_input,
+                denial=spawn_denial,
+            )
+            self._emit(
+                HarnessTraceEventType.CLEANUP_COMPLETED,
+                run_input=run_input,
+                metadata={
+                    "harness_id": self.id,
+                    "phase": "cleanup",
+                    "spawn_depth_denied": True,
+                },
+            )
+            self._mark_run_completed(run_input=run_input, loop_result=loop_result)
+            return loop_result
         previous_max_steps = self.runner.loop.max_steps
         self.runner.loop.max_steps = self._resolved_max_steps(
             run_input.budget,
@@ -216,6 +241,38 @@ class DefaultAgentHarness:
             },
         )
         return loop_result
+
+    def _spawn_depth_denied_loop_result(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        denial: SpawnDepthDenial,
+    ) -> LoopResult:
+        self._emit(
+            HarnessTraceEventType.SUBAGENT_SPAWN_DENIED,
+            run_input=run_input,
+            severity="warning",
+            metadata={
+                "harness_id": self.id,
+                "phase": "spawn",
+                "spawn_depth": denial.spawn_depth,
+                "max_spawn_depth": denial.max_spawn_depth,
+                "parent_run_id": run_input.parent_run_id,
+            },
+        )
+        message = Message.assistant(
+            session_id=run_input.session_id,
+            content=denial.message,
+        )
+        return LoopResult(
+            final_response=message.content,
+            trace=[message],
+            runtime=ConversationRuntimeState(session_id=run_input.session_id),
+            exit_reason="error",
+            steps=0,
+            status="failed",
+            disposition="error",
+        )
 
     def _timeout_loop_result(self, *, run_input: HarnessRunInput) -> LoopResult:
         self._emit(
@@ -694,6 +751,12 @@ class DefaultAgentHarness:
             return "timeout"
         if loop_result.exit_reason in {"plan_validation_failed"}:
             return "plan_validation_failed"
+        if loop_result.exit_reason == "error" and loop_result.steps == 0:
+            if any(
+                event.event_type == HarnessTraceEventType.SUBAGENT_SPAWN_DENIED
+                for event in self.trace_events
+            ):
+                return "spawn_depth_exceeded"
         if any(trace.action == "policy_ask" for trace in loop_result.tool_trace):
             return "needs_confirmation"
         if any(trace.action == "policy_denied" for trace in loop_result.tool_trace):
@@ -720,6 +783,7 @@ def new_run_input(
     metadata: dict[str, Any] | None = None,
     trace_id: str | None = None,
     parent_run_id: str | None = None,
+    spawn_depth: int = 0,
     agent_role: str = "primary",
 ) -> HarnessRunInput:
     run_id = f"run-{uuid4().hex}"
@@ -735,5 +799,6 @@ def new_run_input(
         metadata=dict(metadata or {}),
         trace_id=trace_id or run_id,
         parent_run_id=parent_run_id,
+        spawn_depth=max(0, int(spawn_depth)),
         agent_role=agent_role,
     )

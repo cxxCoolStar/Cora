@@ -100,6 +100,7 @@ class EvalInput:
     external_user_id: str | None = None
     external_event_id: str | None = None
     run_budget: RunBudget = field(default_factory=RunBudget)
+    spawn_depth: int | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvalInput":
@@ -117,6 +118,7 @@ class EvalInput:
             external_user_id=_maybe_str(payload.get("external_user_id")),
             external_event_id=_maybe_str(payload.get("external_event_id")),
             run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),
+            spawn_depth=_maybe_int(payload.get("spawn_depth")),
         )
 
 
@@ -314,6 +316,8 @@ def _run_budget(value: Any) -> RunBudget:
         max_steps=_maybe_int(value.get("max_steps")),
         timeout_seconds=_maybe_float(value.get("timeout_seconds")),
         max_tool_calls=_maybe_int(value.get("max_tool_calls")),
+        max_spawn_depth=_maybe_int(value.get("max_spawn_depth")),
+        max_child_runs=_maybe_int(value.get("max_child_runs")),
         allowed_tool_names=_string_list(value.get("allowed_tool_names")),
         denied_tool_names=_string_list(value.get("denied_tool_names")),
         approved_tool_names=_string_list(value.get("approved_tool_names")),

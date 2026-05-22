@@ -97,6 +97,7 @@ class ClawBotService:
         agent_run_record_repository: AgentRunRecordRepository | None = None,
         hitl_store: HitlStore | None = None,
         plan_store: PlanStore | None = None,
+        harness_max_spawn_depth: int = 1,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -115,6 +116,7 @@ class ClawBotService:
         self.harness_policy_profile = str(harness_policy_profile or "").strip() or None
         self.wechat_harness_policy_profile = str(wechat_harness_policy_profile or "").strip() or None
         self.job_harness_policy_profile = str(job_harness_policy_profile or "").strip() or None
+        self.harness_max_spawn_depth = max(0, int(harness_max_spawn_depth))
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         preconfigured_policy_resolver = (
@@ -203,6 +205,7 @@ class ClawBotService:
             runner=self._agent_turn_runner,
             run_record_repository=agent_run_record_repository,
             hitl_store=self.hitl_store,
+            default_max_spawn_depth=self.harness_max_spawn_depth,
         )
 
     def create_session(
@@ -314,6 +317,8 @@ class ClawBotService:
             max_steps=budget.max_steps,
             timeout_seconds=budget.timeout_seconds,
             max_tool_calls=budget.max_tool_calls,
+            max_spawn_depth=budget.max_spawn_depth,
+            max_child_runs=budget.max_child_runs,
             allowed_tool_names=list(budget.allowed_tool_names),
             denied_tool_names=list(budget.denied_tool_names),
             approved_tool_names=list(budget.approved_tool_names),
@@ -334,6 +339,8 @@ class ClawBotService:
             max_steps=budget.max_steps,
             timeout_seconds=budget.timeout_seconds,
             max_tool_calls=budget.max_tool_calls,
+            max_spawn_depth=budget.max_spawn_depth,
+            max_child_runs=budget.max_child_runs,
             allowed_tool_names=list(budget.allowed_tool_names),
             denied_tool_names=list(budget.denied_tool_names),
             approved_tool_names=approved_names,

@@ -189,6 +189,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         agent_run_record_repository=agent_run_record_repository,
         hitl_store=hitl_store,
         plan_store=plan_store,
+        harness_max_spawn_depth=active_settings.harness_max_spawn_depth,
     )
     return ClawBotContainer(
         settings=active_settings,

@@ -142,6 +142,7 @@ class AgentTurnRunner:
         run_metadata_payload = dict(run_metadata or {})
         parent_run_id = str(run_metadata_payload.get("parent_run_id") or "").strip() or None
         agent_role = str(run_metadata_payload.get("agent_role") or "primary").strip() or "primary"
+        spawn_depth = max(0, int(run_metadata_payload.get("spawn_depth") or 0))
         run_input = new_run_input(
             session_id=session_id,
             source_message_id=source_message_id,
@@ -152,6 +153,7 @@ class AgentTurnRunner:
             budget=run_budget,
             metadata=run_metadata_payload,
             parent_run_id=parent_run_id,
+            spawn_depth=spawn_depth,
             agent_role=agent_role,
         )
         harness = self.harness or DefaultAgentHarness(runner=self)

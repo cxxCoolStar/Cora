@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from html import escape
@@ -87,9 +88,7 @@ class EvalRuntime:
                                 database=container.database,
                                 session_id=session.id,
                             )
-                            source_metadata: dict[str, str] = {}
-                            if step.input.platform:
-                                source_metadata["platform"] = step.input.platform
+                            source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(
                                 container.clawbot_service.approve_hitl_and_resume(
                                     session_id=session.id,
@@ -100,9 +99,7 @@ class EvalRuntime:
                                 )
                             )
                         elif str(step.input.agent_role or "").strip() == "execute":
-                            source_metadata = {}
-                            if step.input.platform:
-                                source_metadata["platform"] = step.input.platform
+                            source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(
                                 container.clawbot_service.execute_plan_turn(
                                     session_id=session.id,
@@ -111,9 +108,7 @@ class EvalRuntime:
                                 )
                             )
                         elif str(step.input.agent_role or "").strip() == "planner":
-                            source_metadata = {}
-                            if step.input.platform:
-                                source_metadata["platform"] = step.input.platform
+                            source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(
                                 container.clawbot_service.plan_turn(
                                     session_id=session.id,
@@ -123,9 +118,7 @@ class EvalRuntime:
                                 )
                             )
                         else:
-                            source_metadata = {}
-                            if step.input.platform:
-                                source_metadata["platform"] = step.input.platform
+                            source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(
                                 container.clawbot_service.reply(
                                     session_id=session.id,
@@ -350,12 +343,23 @@ def _session_id_for_wechat_user(*, database, external_user_id: str) -> str | Non
     return binding.session_id if binding is not None else None
 
 
+def _eval_step_source_metadata(step_input) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if step_input.platform:
+        metadata["platform"] = step_input.platform
+    if step_input.spawn_depth is not None:
+        metadata["spawn_depth"] = int(step_input.spawn_depth)
+    return metadata
+
+
 def _run_budget_has_values(budget) -> bool:
     return bool(
         getattr(budget, "policy_profile", None)
         or getattr(budget, "max_steps", None) is not None
         or getattr(budget, "timeout_seconds", None) is not None
         or getattr(budget, "max_tool_calls", None) is not None
+        or getattr(budget, "max_spawn_depth", None) is not None
+        or getattr(budget, "max_child_runs", None) is not None
         or list(getattr(budget, "allowed_tool_names", []) or [])
         or list(getattr(budget, "denied_tool_names", []) or [])
         or list(getattr(budget, "approved_tool_names", []) or [])

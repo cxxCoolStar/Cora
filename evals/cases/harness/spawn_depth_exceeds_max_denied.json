@@ -1,0 +1,35 @@
+{
+  "id": "spawn_depth_exceeds_max_denied",
+  "type": "harness",
+  "description": "Harness should deny runs whose spawn_depth exceeds max_spawn_depth before prepare.",
+  "tags": ["harness", "single-agent", "subagent", "spawn-depth", "budget"],
+  "steps": [
+    {
+      "label": "depth 2 exceeds max 1",
+      "input": {
+        "text": "Hello",
+        "spawn_depth": 2,
+        "run_budget": {
+          "max_spawn_depth": 1
+        }
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "error",
+        "reply_contains_all": [
+          "Subagent spawn depth exceeded"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "failed",
+          "latest_agent_run_outcome": "error",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "subagent.spawn.denied",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

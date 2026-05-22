@@ -16,6 +16,8 @@ class RunBudget:
     max_steps: int | None = None
     timeout_seconds: float | None = None
     max_tool_calls: int | None = None
+    max_spawn_depth: int | None = None
+    max_child_runs: int | None = None
     allowed_tool_names: list[str] = field(default_factory=list)
     denied_tool_names: list[str] = field(default_factory=list)
     approved_tool_names: list[str] = field(default_factory=list)
@@ -26,6 +28,8 @@ class RunBudget:
             "max_steps": self.max_steps,
             "timeout_seconds": self.timeout_seconds,
             "max_tool_calls": self.max_tool_calls,
+            "max_spawn_depth": self.max_spawn_depth,
+            "max_child_runs": self.max_child_runs,
             "allowed_tool_names": list(self.allowed_tool_names),
             "denied_tool_names": list(self.denied_tool_names),
             "approved_tool_names": list(self.approved_tool_names),
@@ -47,6 +51,7 @@ class HarnessTraceEventType(StrEnum):
     PLAN_CREATED = "plan.created"
     PLAN_VALIDATION_COMPLETED = "plan.validation.completed"
     PLAN_VALIDATION_FAILED = "plan.validation.failed"
+    SUBAGENT_SPAWN_DENIED = "subagent.spawn.denied"
     BUDGET_TIMEOUT = "budget.timeout"
     RUN_FAILED = "run.failed"
 
@@ -74,6 +79,7 @@ class HarnessRunInput:
     metadata: dict[str, Any] = field(default_factory=dict)
     trace_id: str | None = None
     parent_run_id: str | None = None
+    spawn_depth: int = 0
     agent_role: str = "primary"
 
 
