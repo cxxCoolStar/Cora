@@ -8,6 +8,7 @@ from core.agent.harness import new_run_input
 from core.agent.run_records import AgentRunRecord
 from core.agent.runtime_state import RuntimeContextSnapshot
 from core.agent.spawn_depth import check_spawn_depth_allowed, effective_max_spawn_depth
+from core.agent.subagent_context import normalize_context_mode
 from core.agent.subagent_policy import (
     parent_effective_allow_set,
     resolve_child_allowed_tool_names,
@@ -77,6 +78,7 @@ class SubagentSpawner:
     ) -> SpawnWorkerResult:
         budget = run_budget or RunBudget()
         parent_budget = request.parent_budget or budget
+        context_mode = normalize_context_mode(request.context_mode)
         parent_run_id = self._resolve_parent_run_id(
             parent_session_id=request.parent_session_id,
             explicit_parent_run_id=request.parent_run_id,
@@ -204,7 +206,7 @@ class SubagentSpawner:
             max_child_runs=max_child_runs,
             budget=budget,
             parent_budget=parent_budget,
-            context_mode=request.context_mode,
+            context_mode=context_mode,
             source_suffix="subagent",
         )
         parent_trace.append(HarnessTraceEventType.SUBAGENT_COMPLETED)
@@ -219,6 +221,7 @@ class SubagentSpawner:
             child_run_id=child_result.child_run_id,
             child_status=child_result.child_status,
             child_result=child_result.child_result,
+            context_mode=context_mode,
         )
         return SpawnWorkerResult(
             parent_run_id=parent_run_id,
@@ -385,7 +388,9 @@ class SubagentSpawner:
                     max_child_runs=max_child_runs,
                     budget=budget,
                     parent_budget=parent_budget,
-                    context_mode=str(task.context_mode or request.context_mode),
+                    context_mode=normalize_context_mode(
+                        str(task.context_mode or request.context_mode)
+                    ),
                     source_suffix=f"subagent-{index}",
                 )
 
@@ -677,16 +682,20 @@ class SubagentSpawner:
         child_run_id: str | None,
         child_status: str | None,
         child_result: SubagentResultSpec | None = None,
+        context_mode: str | None = None,
     ) -> None:
         if self._run_record_repository is None:
             return
+        spawn_metadata = {"phase": "spawn"}
+        if context_mode:
+            spawn_metadata["context_mode"] = normalize_context_mode(context_mode)
         trace_events = [
             RunTraceEvent(
                 event_type=event_type,
                 run_id=parent_run_id,
                 session_id=parent_session_id,
                 sequence=index,
-                metadata={"phase": "spawn"},
+                metadata=dict(spawn_metadata),
             )
             for index, event_type in enumerate(trace_event_types)
         ]
@@ -701,22 +710,26 @@ class SubagentSpawner:
                     "child_status": child_status,
                     "child_result": child_result.to_dict() if child_result is not None else None,
                     "spawn_reply_preview": reply[:240],
+                    "context_mode": normalize_context_mode(context_mode) if context_mode else None,
                 },
             )
             return
+        completion_metadata = {
+            "child_session_id": child_session_id,
+            "child_run_id": child_run_id,
+            "child_status": child_status,
+            "child_result": child_result.to_dict() if child_result is not None else None,
+            "spawn_reply_preview": reply[:240],
+        }
+        if context_mode:
+            completion_metadata["context_mode"] = normalize_context_mode(context_mode)
         self._run_record_repository.mark_completed(
             run_id=parent_run_id,
             status=status,
             outcome="spawn_completed" if status == "completed" else "error",
             steps=0,
             trace_events=trace_events,
-            metadata={
-                "child_session_id": child_session_id,
-                "child_run_id": child_run_id,
-                "child_status": child_status,
-                "child_result": child_result.to_dict() if child_result is not None else None,
-                "spawn_reply_preview": reply[:240],
-            },
+            metadata=completion_metadata,
         )
 
     def _latest_run_id_for_session(self, *, session_id: str) -> str | None:
@@ -734,7 +747,7 @@ class SubagentSpawner:
         parent_snapshot: RuntimeContextSnapshot,
         context_mode: str,
     ) -> RuntimeContextSnapshot:
-        mode = str(context_mode or "isolated").strip().lower()
+        mode = normalize_context_mode(context_mode)
         if mode == "forked":
             return RuntimeContextSnapshot(
                 session_kind=SUBAGENT_SESSION_KIND,

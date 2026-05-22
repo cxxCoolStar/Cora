@@ -1,6 +1,6 @@
 # Phase 4：受控 Subagent 设计草案
 
-> 状态：PR-4a–4g + 4e eval 已落地；Reviewer (PR-3d) 暂停。  
+> 状态：PR-4a–4g + 4e + PR-4h（context modes）已落地。  
 > 前置：Phase 3（Planner / Worker / HITL / plan SQL）+ harness 18/18。
 
 ## 1. 目标
@@ -38,6 +38,7 @@
 | **4e** | eval：spawn 超限、policy 继承 deny、merge 失败（含 tool 路径） | ✅ |
 | **4f** | 主 agent `spawn_worker` 工具（同步子 run + 结构化合并） | ✅ |
 | **4g** | 主 agent `spawn_workers` 并行工具（`asyncio.gather` + 并发上限） | ✅ |
+| **4h** | Subagent `context_mode`：`isolated` vs `forked`（父会话历史继承） | ✅ |
 
 ## 4. Harness 行为（4a）
 
@@ -63,7 +64,7 @@ sequenceDiagram
 ## 5. 与 Phase 3 的关系
 
 - Plan Worker 已设 `parent_run_id`；**不**自动提高 `spawn_depth`（仍为 0），直到 4b 显式 spawn。
-- Reviewer（PR-3d）继续可选，不阻塞 Phase 4。
+- `context_mode`：`isolated`（默认，子 session 无父聊天历史）与 `forked`（子 run 通过 `_load_agent_history` 读父 session 消息）；工具参数别名 `shared` → `forked`。
 
 ## 6. 验收
 
@@ -112,7 +113,8 @@ sequenceDiagram
 
 **验收**
 
-- `.\scripts\run_harness_evals.cmd` 全绿（28 cases）
+- `spawn_worker_forked_context_completes`、`spawn_worker_isolated_context_completes`
+- `.\scripts\run_harness_evals.cmd` 全绿（34 cases）
 
 ## 7. 参考
 

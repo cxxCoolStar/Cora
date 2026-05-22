@@ -49,6 +49,10 @@ class DevelopmentModelClient(ModelClient):
         if "[Reviewer mode]" in text:
             return ModelResponse(assistant_text=self._reviewer_verdict_json())
 
+        subagent_text_reply = self._subagent_text_reply_from_messages(messages=messages, latest_user=text)
+        if subagent_text_reply is not None:
+            return ModelResponse(assistant_text=subagent_text_reply)
+
         worker_tool_call = self._worker_tool_call_from_text(text)
         if worker_tool_call is not None:
             return ModelResponse(tool_calls=[worker_tool_call])
@@ -220,6 +224,27 @@ class DevelopmentModelClient(ModelClient):
             "confidence": "high",
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @classmethod
+    def _subagent_text_reply_from_messages(
+        cls,
+        *,
+        messages: list[Message],
+        latest_user: str,
+    ) -> str | None:
+        if "[Subagent task]" not in latest_user:
+            return None
+        lowered = latest_user.lower()
+        if "codeword" not in lowered:
+            return None
+        transcript = "\n".join(
+            str(message.content or "")
+            for message in messages
+            if str(message.role or "") in {"user", "assistant", "system"}
+        )
+        if "ALPHA" in transcript.upper():
+            return "ALPHA"
+        return "UNKNOWN"
 
     @classmethod
     def _worker_tool_call_from_text(cls, text: str) -> ToolCall | None:

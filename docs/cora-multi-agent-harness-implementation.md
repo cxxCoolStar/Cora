@@ -867,14 +867,7 @@ Goal:
 `spawn_depth > max_spawn_depth` with trace `subagent.spawn.denied`; eval
 `spawn_depth_exceeds_max_denied`. See [cora-phase4-subagents-design.md](./cora-phase4-subagents-design.md).
 
-Actions (remaining):
-
-1. Add `spawn_worker` API and durable child run records (4b).
-2. Add `max_child_runs` enforcement per parent run (4b).
-3. Support isolated and forked context modes.
-4. Enforce inherited tool policy.
-5. Add completion delivery and cleanup.
-6. Add evals for spawn limits, inherited denies, and result merge.
+**4h (done):** `context_mode` `isolated` | `forked` on `spawn_worker` / `spawn_workers`; forked loads parent session message history via `resolve_subagent_history_session_id`; eval `spawn_worker_forked_context_completes`, `spawn_worker_isolated_context_completes`.
 
 ### Phase 5: Advanced Runtime Features
 

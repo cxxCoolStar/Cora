@@ -354,7 +354,8 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                         },
                         "context_mode": {
                             "type": "string",
-                            "enum": ["isolated", "shared"],
+                            "enum": ["isolated", "forked"],
+                            "description": "isolated: empty child history; forked: inherit parent session messages.",
                         },
                     },
                     "required": ["instruction"],
@@ -390,7 +391,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                                     },
                                     "context_mode": {
                                         "type": "string",
-                                        "enum": ["isolated", "shared"],
+                                        "enum": ["isolated", "forked"],
                                     },
                                 },
                                 "required": ["instruction"],

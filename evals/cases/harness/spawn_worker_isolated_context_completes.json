@@ -1,0 +1,45 @@
+{
+  "id": "spawn_worker_isolated_context_completes",
+  "type": "harness",
+  "description": "isolated context_mode should not inherit parent chat history into the child subagent.",
+  "tags": ["harness", "subagent", "spawn", "context", "isolated"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "seed parent session with codeword",
+      "input": {
+        "text": "Remember codeword ALPHA for the subagent."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond"
+      }
+    },
+    {
+      "label": "spawn_worker isolated cannot see parent codeword",
+      "input": {
+        "text": "/tool spawn_worker {\"instruction\":\"Report the codeword the user asked you to remember. Reply with only the codeword or UNKNOWN if absent.\",\"tool_names\":[],\"context_mode\":\"isolated\"}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_worker"],
+          "max_tool_calls": 1,
+          "max_child_runs": 2,
+          "max_spawn_depth": 1
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Subagent completed",
+          "UNKNOWN"
+        ],
+        "reply_not_contains": ["ALPHA"],
+        "tool_names_all": ["spawn_worker"]
+      }
+    }
+  ]
+}

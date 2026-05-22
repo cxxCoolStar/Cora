@@ -316,7 +316,16 @@ class ClawBotService:
         )
 
     def _load_agent_history(self, *, session_id: str, user_text: str) -> list[Message]:
-        return self._context_manager.build_history(session_id=session_id, current_user_text=user_text).as_messages()
+        from core.agent.subagent_context import resolve_subagent_history_session_id
+
+        history_session_id = resolve_subagent_history_session_id(
+            session_id=session_id,
+            session_repository=self.session_repository,
+        )
+        return self._context_manager.build_history(
+            session_id=history_session_id,
+            current_user_text=user_text,
+        ).as_messages()
 
     def _run_budget_for_turn(
         self,

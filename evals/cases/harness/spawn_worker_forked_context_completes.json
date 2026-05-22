@@ -1,0 +1,51 @@
+{
+  "id": "spawn_worker_forked_context_completes",
+  "type": "harness",
+  "description": "forked context_mode should load parent session history into the child subagent run.",
+  "tags": ["harness", "subagent", "spawn", "context", "forked"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "seed parent session with codeword",
+      "input": {
+        "text": "Remember codeword ALPHA for the subagent."
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond"
+      }
+    },
+    {
+      "label": "spawn_worker with forked context reads parent history",
+      "input": {
+        "text": "/tool spawn_worker {\"instruction\":\"Report the codeword the user asked you to remember. Reply with only the codeword.\",\"tool_names\":[],\"context_mode\":\"forked\"}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_worker"],
+          "max_tool_calls": 1,
+          "max_child_runs": 2,
+          "max_spawn_depth": 1
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Subagent completed",
+          "ALPHA"
+        ],
+        "reply_not_contains": ["UNKNOWN"],
+        "tool_names_all": ["spawn_worker"],
+        "state": {
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawned",
+            "subagent.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -455,7 +455,9 @@ class RuntimeToolExecutor:
                 status="failed",
             )
         tool_names = _string_list_argument(arguments.get("tool_names"))
-        context_mode = str(arguments.get("context_mode") or "isolated").strip() or "isolated"
+        from core.agent.subagent_context import normalize_context_mode
+
+        context_mode = normalize_context_mode(str(arguments.get("context_mode") or "isolated"))
         parent_run_id, spawn_depth, parent_budget = self._spawn_context_from_invocation(invocation)
         spawn_result = await self._clawbot_service.spawn_worker_for_tool(
             session_id=invocation.session_id,
