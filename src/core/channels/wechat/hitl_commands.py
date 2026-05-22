@@ -89,6 +89,14 @@ def build_wechat_hitl_no_pending_message() -> str:
     return "当前没有待确认的操作。"
 
 
+def build_wechat_hitl_expired_message(*, tool_name: str) -> str:
+    display = tool_display_name(tool_name)
+    return (
+        f"待确认操作「{display}」已超时（约 10 分钟）。\n"
+        "未执行该操作。如需继续，请重新发起一次请求。"
+    )
+
+
 def build_wechat_hitl_rejected_message(*, tool_name: str) -> str:
     display = tool_display_name(tool_name)
     return f"已取消，未执行「{display}」。"
@@ -103,6 +111,7 @@ __all__ = [
     "HitlCommand",
     "build_wechat_hitl_approved_prefix",
     "build_wechat_hitl_confirmation_message",
+    "build_wechat_hitl_expired_message",
     "build_wechat_hitl_no_pending_message",
     "build_wechat_hitl_pending_reminder",
     "build_wechat_hitl_rejected_message",

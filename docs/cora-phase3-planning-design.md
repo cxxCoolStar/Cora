@@ -1,0 +1,164 @@
+# Phase 3：结构化计划（单线程执行）设计草案
+
+> 状态：设计稿，待实现。前置条件：Phase 2 工具治理与 WeChat HITL 已落地（harness 14/14）。
+
+## 1. 目标
+
+在**不引入并行 subagent** 的前提下，让 Cora 对复杂请求先产出**可校验的结构化计划**，再**按步执行**，每一步仍走现有 `DefaultAgentHarness` + `ToolPolicyEngine`。
+
+用户可感知变化：
+
+- 复杂任务不再依赖模型「一口气」调多个 tool
+- 每步有明确任务描述、tool 边界、trace 可审计
+
+## 2. 非目标（本阶段不做）
+
+- Planner / Worker 并行
+- `spawn`、子 run 树（Phase 4）
+- Checkpoint / 长时 resume（Phase 5）
+- 替换现有微信文件检索主路径
+
+## 3. 核心对象
+
+```python
+# 示意 — 实现时放入 core/schemas/plan.py
+
+@dataclass
+class TaskSpec:
+    task_id: str
+    title: str
+    tool_names: list[str]          # Worker 本步允许暴露的 tool 子集
+    instruction: str               # 给 Worker 的用户/系统任务描述
+    requires_review: bool = False
+
+@dataclass
+class PlanSpec:
+    plan_id: str
+    session_id: str
+    goal: str
+    tasks: list[TaskSpec]
+    policy_profile: str | None = None
+
+@dataclass
+class TaskResultSpec:
+    task_id: str
+    run_id: str
+    status: str                    # completed | failed | skipped
+    summary: str
+    tool_trace_count: int = 0
+
+@dataclass
+class PlanRunSpec:
+    plan_id: str
+    status: str                    # planning | executing | completed | failed
+    task_results: list[TaskResultSpec]
+```
+
+## 4. 角色与工具边界
+
+| 角色 | agent_role | 工具策略 | 说明 |
+|------|------------|----------|------|
+| **Planner** | `planner` | 只读 profile（`background_readonly` 或专用 `planner_readonly`） | 仅 `read_file`、`search_*`、`web_search` 等；**禁止** `write_file`、`shell_exec`、`scheduled_tasks` |
+| **Worker** | `worker` | 每步 `RunBudget.allowed_tool_names = task.tool_names` | 继承 `ToolPolicyEngine`；HITL / sandbox 规则不变 |
+| **Reviewer**（可选 v1.1） | `reviewer` | 只读 | 仅在高风险步或低 confidence 后触发 |
+
+Planner 输出必须是 **JSON PlanSpec**（或 YAML 子集），由 `PlanValidator` 校验：
+
+- `task_id` 唯一
+- `tool_names` 非空且均为 registry 已注册名
+- 不允许 Planner 步包含 `shell_exec`（微信场景）
+
+## 5. 执行流程
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant O as Orchestrator
+    participant P as Planner run
+    participant V as PlanValidator
+    participant W as Worker run
+
+    U->>O: 复杂请求
+    O->>P: harness run（planner_readonly）
+    P-->>O: PlanSpec JSON
+    O->>V: validate
+    alt invalid
+        V-->>U: 说明计划无效，请重试
+    else valid
+        loop 每个 TaskSpec（顺序）
+            O->>W: harness run（窄 tool + instruction）
+            W-->>O: TaskResultSpec
+        end
+        O-->>U: 汇总回复
+    end
+```
+
+**与现有组件关系：**
+
+- 每个 Planner / Worker 步 = 一次 `HarnessRunInput`（独立 `run_id`，可选 `parent_run_id=plan_run_id`）
+- Worker 步 `metadata` 带 `plan_id`、`task_id`
+- 不新增 parallel harness；`max_child_runs` 留到 Phase 4
+
+## 6. 触发条件（何时走 Planner）
+
+v1 建议 **显式 + 启发式** 并存：
+
+1. **显式**：用户消息以 `/plan` 开头，或 session metadata `force_planning=true`
+2. **启发式**（可选）：单轮预估需 2+ 次 mutating tool，或模型在 planner 模式下输出 plan
+
+默认微信文件助手路径**不自动**走 Planner，避免打断「找文件 / 发文件」体验。
+
+## 7. 失败与 HITL
+
+- Worker 步触发 `policy_ask`：行为与现网一致（微信 `确认` / `拒绝`）；`PlanRun` 状态置 `waiting_hitl`，批准后继续**当前 task**，不重做 Planner
+- Worker 步 `policy_denied`：记 `TaskResultSpec.failed`，可选 abort 整个 plan 或 skip 该步（v1 建议 **abort plan**）
+- Planner 无效 JSON：不创建 Worker run，trace `plan.validation_failed`
+
+## 8. 持久化（建议）
+
+| 表 / 字段 | 内容 |
+|-----------|------|
+| `clawbot_plans` | plan_id, session_id, plan_json, status, created_at |
+| `clawbot_agent_runs.parent_run_id` | 已有；Worker 指向 plan 根 run |
+
+也可 v1 仅写入 `agent_runs.metadata_json.plan_id` 降低 schema 面。
+
+## 9. 实现切片（推荐 PR 顺序）
+
+### PR-3a：Schema + Validator（无模型）
+
+- `PlanSpec` / `TaskSpec` / `PlanValidator`
+- 单元测试：合法 plan、非法 tool、重复 task_id
+
+### PR-3b：Planner harness 步
+
+- `agent_role=planner` + readonly profile
+- Dev model stub 返回固定 plan JSON（eval）
+- Trace：`plan.created`、`plan.validation_completed`
+
+### PR-3c：顺序 Worker dispatch
+
+- `PlanExecutor`：for task in plan.tasks → `new_run_input` + Worker budget
+- 汇总 `TaskResultSpec` 为最终用户回复
+- Eval：`plan_valid_single_task_completes`
+
+### PR-3d（可选）：Reviewer + 失败策略细化
+
+## 10. Eval 计划
+
+| Case ID | 验证点 |
+|---------|--------|
+| `plan_validation_rejects_unknown_tool` | 非法 plan 不执行 Worker |
+| `plan_single_task_worker_completes` | 一步 plan + tool 成功 |
+| `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 |
+
+## 11. 验收标准
+
+- `.\scripts\run_harness_evals.cmd` 在 Phase 3 slice 合并后仍全绿（只增 case，不破坏既有 14 case）
+- Planner 步 **零次** mutating tool 调用（trace 审计）
+- Worker 步 tool 仅来自 `TaskSpec.tool_names` 交集
+
+## 12. 参考
+
+- [cora-multi-agent-harness-implementation.md](./cora-multi-agent-harness-implementation.md) — Phase 3 总览
+- [wechat-hitl.md](./wechat-hitl.md) — WeChat 确认交互

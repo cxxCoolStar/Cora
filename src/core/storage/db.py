@@ -46,6 +46,7 @@ class DatabaseManager:
             self._ensure_column(raw, "clawbot_agent_runs", "failure_category", "VARCHAR(64)")
             self._ensure_column(raw, "clawbot_agent_runs", "cleanup_status", "VARCHAR(32)")
             self._ensure_column(raw, "clawbot_agent_runs", "budget_json", "JSON NOT NULL DEFAULT '{}'")
+            self._ensure_column(raw, "clawbot_hitl_requests", "expires_at", "DATETIME")
 
     @staticmethod
     def _unwrap_sqlite_connection(raw: object) -> sqlite3.Connection | None:

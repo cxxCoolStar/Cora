@@ -40,6 +40,7 @@
 - 对同一文档做版本识别，默认只展示当前版本
 - 提供微信 iLink 轮询链路，支持把微信消息/文件接入同一套会话
 - 在微信链路已配置时，支持把原始文件回发给用户
+- 对高风险工具支持人工确认（HITL）：微信里回复「确认」或「拒绝」后再执行（见 [docs/wechat-hitl.md](docs/wechat-hitl.md)）
 
 ## 一个典型用法
 
@@ -459,13 +460,16 @@ This is equivalent to:
 python -B -m core.cli.main eval-run --case-type harness --report-path .cora/evals/harness-latest.json
 ```
 
-The harness smoke gate currently covers:
+The harness smoke gate currently covers **14 cases / 16 steps**, including:
 
 - normal single-agent completion
 - tool-using turns and `tool.completed` trace events
 - timeout budget handling and `budget.timeout`
 - expected harness failure handling and `run.failed`
 - per-run allow/deny tool policy and named policy profiles
+- WeChat HITL confirm flow (`wechat_hitl_confirm_command`) — see [docs/wechat-hitl.md](docs/wechat-hitl.md)
+
+Phase 3 planning design draft: [docs/cora-phase3-planning-design.md](docs/cora-phase3-planning-design.md).
 
 ### Harness policy profiles
 

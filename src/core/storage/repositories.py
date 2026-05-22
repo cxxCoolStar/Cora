@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
+from core.agent.hitl_expiry import default_hitl_expires_at, is_hitl_expired
 from core.schemas.hitl import HitlRequest
 from core.storage.models import (
     AgentRunRecordModel,
@@ -1289,6 +1290,7 @@ class SqlHitlStore:
         from uuid import uuid4
 
         hitl_id = f"hitl-{uuid4().hex}"
+        created_at = utc_now()
         with self.database.session() as session:
             record = HitlRequestModel(
                 hitl_id=hitl_id,
@@ -1301,6 +1303,8 @@ class SqlHitlStore:
                 tool_risk=tool_risk,
                 tool_arguments_json=dict(tool_arguments or {}),
                 metadata_json=dict(metadata or {}),
+                created_at=created_at,
+                expires_at=default_hitl_expires_at(created_at=created_at),
             )
             session.add(record)
             session.commit()
@@ -1320,6 +1324,21 @@ class SqlHitlStore:
     def reject(self, *, hitl_id: str) -> HitlRequest:
         return self._resolve(hitl_id=hitl_id, status="rejected")
 
+    def expire(self, *, hitl_id: str) -> HitlRequest:
+        with self.database.session() as session:
+            record = session.get(HitlRequestModel, hitl_id)
+            if record is None:
+                raise KeyError(f"HITL request not found: {hitl_id}")
+            if record.status == "expired":
+                return self._to_hitl_request(record)
+            if record.status != "pending":
+                raise ValueError(f"HITL request is not pending: {hitl_id}")
+            record.status = "expired"
+            record.resolved_at = utc_now()
+            session.commit()
+            session.refresh(record)
+            return self._to_hitl_request(record)
+
     def get_latest_pending_for_session(self, *, session_id: str) -> HitlRequest | None:
         normalized_session_id = str(session_id or "").strip()
         with self.database.session() as session:
@@ -1333,13 +1352,25 @@ class SqlHitlStore:
             record = session.scalars(stmt).first()
             if record is None:
                 return None
-            return self._to_hitl_request(record)
+            request = self._to_hitl_request(record)
+            if is_hitl_expired(request):
+                self.expire(hitl_id=request.hitl_id)
+                return None
+            return request
 
     def _resolve(self, *, hitl_id: str, status: str) -> HitlRequest:
         with self.database.session() as session:
             record = session.get(HitlRequestModel, hitl_id)
             if record is None:
                 raise KeyError(f"HITL request not found: {hitl_id}")
+            request = self._to_hitl_request(record)
+            if request.status == "expired":
+                raise ValueError(f"HITL request expired: {hitl_id}")
+            if is_hitl_expired(request):
+                record.status = "expired"
+                record.resolved_at = utc_now()
+                session.commit()
+                raise ValueError(f"HITL request expired: {hitl_id}")
             if record.status != "pending":
                 raise ValueError(f"HITL request is not pending: {hitl_id}")
             record.status = status
@@ -1361,6 +1392,7 @@ class SqlHitlStore:
             tool_risk=record.tool_risk,
             tool_arguments=dict(record.tool_arguments_json or {}),
             created_at=record.created_at,
+            expires_at=record.expires_at,
             resolved_at=record.resolved_at,
             metadata=dict(record.metadata_json or {}),
         )

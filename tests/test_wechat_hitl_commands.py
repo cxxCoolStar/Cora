@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from core.agent.hitl_expiry import DEFAULT_HITL_TTL_MINUTES, is_hitl_expired
+from core.agent.hitl_store import InMemoryHitlStore
 from core.channels.wechat.hitl_commands import (
     build_wechat_hitl_confirmation_message,
     build_wechat_hitl_pending_reminder,
@@ -34,3 +38,34 @@ def test_build_wechat_hitl_pending_reminder() -> None:
     reminder = build_wechat_hitl_pending_reminder(tool_name="scheduled_tasks")
     assert "定时提醒" in reminder
     assert "确认" in reminder
+
+
+def test_hitl_expires_after_ttl() -> None:
+    store = InMemoryHitlStore()
+    request = store.create_pending(
+        run_id="run-expire",
+        session_id="session-expire",
+        tool_name="scheduled_tasks",
+        reason="confirmation_required",
+    )
+    assert request.expires_at is not None
+    request.created_at = datetime.now(UTC) - timedelta(minutes=DEFAULT_HITL_TTL_MINUTES, seconds=30)
+    request.expires_at = request.created_at + timedelta(minutes=DEFAULT_HITL_TTL_MINUTES)
+    assert is_hitl_expired(request) is True
+    assert store.get_latest_pending_for_session(session_id="session-expire") is None
+    assert store.get(hitl_id=request.hitl_id).status == "expired"
+
+
+def test_hitl_approve_raises_when_expired() -> None:
+    store = InMemoryHitlStore()
+    request = store.create_pending(
+        run_id="run-expire-2",
+        session_id="session-expire-2",
+        tool_name="scheduled_tasks",
+        reason="confirmation_required",
+    )
+    request.created_at = datetime.now(UTC) - timedelta(minutes=DEFAULT_HITL_TTL_MINUTES, seconds=30)
+    request.expires_at = request.created_at + timedelta(minutes=DEFAULT_HITL_TTL_MINUTES)
+    assert is_hitl_expired(request) is True
+    with pytest.raises(ValueError, match="expired"):
+        store.approve(hitl_id=request.hitl_id)

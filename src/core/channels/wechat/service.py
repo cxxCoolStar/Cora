@@ -11,6 +11,7 @@ from fastapi import UploadFile
 from core.channels.base import ChannelTurnInput
 from core.channels.wechat.hitl_commands import (
     build_wechat_hitl_approved_prefix,
+    build_wechat_hitl_expired_message,
     build_wechat_hitl_no_pending_message,
     build_wechat_hitl_pending_reminder,
     build_wechat_hitl_rejected_message,
@@ -191,7 +192,21 @@ class WechatGatewayService:
                     hitl_id=pending.hitl_id,
                     source_metadata={"channel": self.CHANNEL_NAME, "platform": "wechat"},
                 )
-            except (KeyError, ValueError) as exc:
+            except ValueError as exc:
+                if "expired" in str(exc).lower():
+                    return WechatHandleResult(
+                        deduplicated=False,
+                        session_id=session_id,
+                        reply=build_wechat_hitl_expired_message(tool_name=pending.tool_name),
+                        action="hitl_expired",
+                    )
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=f"无法完成确认：{exc}",
+                    action="hitl_approve_failed",
+                )
+            except KeyError as exc:
                 return WechatHandleResult(
                     deduplicated=False,
                     session_id=session_id,

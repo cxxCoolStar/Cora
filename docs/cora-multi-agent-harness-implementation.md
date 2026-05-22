@@ -837,6 +837,9 @@ Phase 2 current status:
   `tool.hitl.approved`; harness eval `hitl_approve_and_resume` passes.
 - WeChat HITL UX: 中文确认卡；Gateway 解析「确认/拒绝」；有待确认时拦截其它消息；
   harness eval `wechat_hitl_confirm_command` passes.
+- HITL 默认 **10 分钟** 过期（`expires_at`）；超时自动 `expired`，用户文档见
+  [wechat-hitl.md](./wechat-hitl.md)。
+- Phase 3 设计草案：[cora-phase3-planning-design.md](./cora-phase3-planning-design.md)。
 
 ### Phase 3: Structured Planning Without Parallelism
 
