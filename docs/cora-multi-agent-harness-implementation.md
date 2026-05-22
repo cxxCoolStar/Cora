@@ -26,7 +26,7 @@ Current baseline:
 - Phase 1 is implemented for the WeChat production path and the current
   single-agent loop.
 - The harness smoke gate is `.\scripts\run_harness_evals.cmd`.
-- The current smoke baseline is `10/10` harness cases passing, including
+- The current smoke baseline is `12/12` harness cases passing, including
   WeChat entry-path success, permission denial, timeout, and failure records.
 - Phase 2/3 work should not start by adding Planner, Worker, Reviewer, spawn,
   or direct tool-plan behavior. It should start by designing the unified tool
@@ -827,8 +827,13 @@ Phase 2 current status:
   with medium/high risk (CLI auto-allows); `HitlRequest` persisted in-memory;
   trace emits `tool.requested`; harness eval `high_risk_tool_requests_confirmation`
   passes.
-- PR-2 still pending: `sandbox` execution routing, durable HITL approval flow,
-  and approval API for WeChat/HTTP shells.
+- PR-3 (sandbox) landed: per-run workspace under `.cora/sandboxes/{run_id}/workspace/`;
+  `ToolPolicyEngine` returns `sandbox` for `requires_sandbox` tools and WeChat
+  mutating tools; harness emits `tool.sandbox.applied` and injects
+  `sandbox_workspace_root` into runtime context; harness eval
+  `wechat_write_file_runs_in_sandbox` passes.
+- PR-2 still pending: durable HITL approval flow and approval API for
+  WeChat/HTTP shells.
 
 ### Phase 3: Structured Planning Without Parallelism
 

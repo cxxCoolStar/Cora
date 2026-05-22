@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -11,6 +12,7 @@ from core.agent.execution_policy import ExecutionPolicy
 from core.agent.loop import LoopResult
 from core.agent.policy_profiles import get_harness_policy_profile
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
+from core.agent.sandbox_runtime import SandboxContext, SandboxWorkspaceManager
 from core.agent.run_records import AgentRunRecordRepository
 from core.agent.runtime_state import ConversationRuntimeState
 from core.agent.tool_policy import ToolPolicyDecision
@@ -360,6 +362,9 @@ class DefaultAgentHarness:
         original_execute_tool_call = executor.execute_tool_call
         tool_metadata = self._tool_metadata_by_name()
         counter = {"count": 0}
+        sandbox_state: dict[str, SandboxWorkspaceManager | None] = {
+            "manager": self._resolve_sandbox_manager(run_input=run_input),
+        }
 
         async def guarded_execute_tool_call(inner_self, *, session_id, tool_call, runtime):
             tool_name = str(tool_call.tool_name or "").strip()
@@ -394,6 +399,14 @@ class DefaultAgentHarness:
                     tool_name=tool_name,
                     decision=decision,
                 )
+            if decision.decision == "sandbox":
+                runtime = self._apply_sandbox_runtime(
+                    run_input=run_input,
+                    tool_name=tool_name,
+                    decision=decision,
+                    runtime=runtime,
+                    sandbox_manager=sandbox_state["manager"],
+                )
             counter["count"] += 1
             result = await original_execute_tool_call(
                 session_id=session_id,
@@ -408,6 +421,9 @@ class DefaultAgentHarness:
             yield
         finally:
             executor.execute_tool_call = original_execute_tool_call
+            manager = sandbox_state.get("manager")
+            if manager is not None:
+                manager.cleanup(run_id=run_input.run_id)
 
     def _emit_tool_denied(
         self,
@@ -437,6 +453,54 @@ class DefaultAgentHarness:
 
     def _resolve_hitl_store(self) -> HitlStore:
         return self.hitl_store or InMemoryHitlStore()
+
+    def _resolve_sandbox_manager(self, *, run_input: HarnessRunInput) -> SandboxWorkspaceManager:
+        cora_home = str(run_input.metadata.get("cora_home_dir") or "").strip()
+        if cora_home:
+            return SandboxWorkspaceManager.from_cora_home(Path(cora_home))
+        return SandboxWorkspaceManager(base_dir=Path(".cora") / "sandboxes")
+
+    def _apply_sandbox_runtime(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        tool_name: str,
+        decision: ToolPolicyDecision,
+        runtime: ConversationRuntimeState,
+        sandbox_manager: SandboxWorkspaceManager,
+    ) -> ConversationRuntimeState:
+        ctx = sandbox_manager.ensure(run_id=run_input.run_id)
+        runtime.metadata = dict(runtime.metadata)
+        runtime.metadata["sandbox_workspace_root"] = str(ctx.workspace_root)
+        runtime.metadata["execution_mode"] = "sandbox"
+        runtime.execution_mode = "sandbox"
+        self._emit_sandbox_applied(
+            run_input=run_input,
+            tool_name=tool_name,
+            decision=decision,
+            sandbox_context=ctx,
+        )
+        return runtime
+
+    def _emit_sandbox_applied(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        tool_name: str,
+        decision: ToolPolicyDecision,
+        sandbox_context: SandboxContext,
+    ) -> None:
+        self._emit(
+            HarnessTraceEventType.TOOL_SANDBOX_APPLIED,
+            run_input=run_input,
+            metadata={
+                "harness_id": self.id,
+                "phase": "policy",
+                "attempted_tool_name": tool_name,
+                "policy_decision": decision.to_dict(),
+                "sandbox": sandbox_context.to_dict(),
+            },
+        )
 
     def _policy_ask_tool_result(
         self,

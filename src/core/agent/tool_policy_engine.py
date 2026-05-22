@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.agent.policy_profiles import get_harness_policy_profile
+from core.agent.sandbox_runtime import MUTATING_TOOLS_IN_SANDBOX
 from core.agent.tool_policy import (
     ToolPolicyDecision,
     ToolRisk,
@@ -8,6 +9,7 @@ from core.agent.tool_policy import (
     ask_tool_policy_decision,
     deny_tool_policy_decision,
     deny_max_tool_calls_decision,
+    sandbox_tool_policy_decision,
 )
 from core.schemas.harness import RunBudget
 from core.schemas.tool_policy import ToolPolicyContext
@@ -76,6 +78,15 @@ def resolve_platform_name(value: object) -> str | None:
     if text in {"cli", "api", "http", "tui"}:
         return text
     return text
+
+
+def requires_sandbox_execution(context: ToolPolicyContext) -> bool:
+    if context.requires_sandbox:
+        return True
+    platform = resolve_platform_name(context.platform)
+    if platform == "wechat" and context.tool_name in MUTATING_TOOLS_IN_SANDBOX:
+        return True
+    return False
 
 
 def requires_hitl_confirmation(context: ToolPolicyContext) -> bool:
@@ -178,6 +189,18 @@ class ToolPolicyEngine:
                 },
             )
 
+        if requires_sandbox_execution(context):
+            return sandbox_tool_policy_decision(
+                tool_name=context.tool_name,
+                policy_profile=context.policy_profile,
+                risk=normalize_tool_risk(context.tool_risk),
+                requires_sandbox=True,
+                audit_metadata={
+                    **audit_metadata,
+                    "platform": resolve_platform_name(context.platform),
+                },
+            )
+
         return allow_tool_policy_decision(
             tool_name=context.tool_name,
             policy_profile=context.policy_profile,
@@ -197,6 +220,7 @@ __all__ = [
     "normalize_tool_risk",
     "normalize_tool_names",
     "requires_hitl_confirmation",
+    "requires_sandbox_execution",
     "resolve_platform_name",
     "should_expose_tool",
 ]

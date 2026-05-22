@@ -93,6 +93,7 @@ class EvalExpectation:
 class EvalInput:
     text: str
     channel: str | None = None
+    platform: str | None = None
     external_user_id: str | None = None
     external_event_id: str | None = None
     run_budget: RunBudget = field(default_factory=RunBudget)
@@ -105,6 +106,7 @@ class EvalInput:
         return cls(
             text=text,
             channel=_maybe_str(payload.get("channel")),
+            platform=_maybe_str(payload.get("platform")),
             external_user_id=_maybe_str(payload.get("external_user_id")),
             external_event_id=_maybe_str(payload.get("external_event_id")),
             run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),

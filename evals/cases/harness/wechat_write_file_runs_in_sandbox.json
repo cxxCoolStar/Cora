@@ -1,0 +1,36 @@
+{
+  "id": "wechat_write_file_runs_in_sandbox",
+  "type": "harness",
+  "description": "Mutating file tools on WeChat should execute inside a per-run sandbox workspace.",
+  "tags": ["harness", "single-agent", "tool-governance", "sandbox"],
+  "steps": [
+    {
+      "label": "wechat write_file uses sandbox workspace",
+      "input": {
+        "text": "/tool write_file {\"path\":\"sandbox-marker.txt\",\"content\":\"isolated\\n\"}",
+        "platform": "wechat",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "tool.policy.applied",
+            "tool.sandbox.applied",
+            "tool.completed",
+            "cleanup.completed"
+          ],
+          "workspace_files_not_exist": [
+            "sandbox-marker.txt"
+          ]
+        }
+      }
+    }
+  ]
+}

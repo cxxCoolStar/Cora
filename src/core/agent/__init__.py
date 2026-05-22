@@ -19,11 +19,14 @@ from core.agent.tool_policy import (
     ask_tool_policy_decision,
     deny_max_tool_calls_decision,
     deny_tool_policy_decision,
+    sandbox_tool_policy_decision,
 )
+from core.agent.sandbox_runtime import SandboxContext, SandboxWorkspaceManager
 from core.agent.tool_policy_engine import (
     ToolPolicyEngine,
     has_runtime_tool_governance,
     requires_hitl_confirmation,
+    requires_sandbox_execution,
     resolve_platform_name,
 )
 from core.agent.run_records import AgentRunRecord, AgentRunRecordRepository, InMemoryAgentRunRecordRepository

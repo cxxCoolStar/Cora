@@ -222,7 +222,7 @@ class RuntimeToolExecutor:
             plan=request.to_plan(),
             text=request.raw_text,
             upload=request.upload,
-            context=self.runtime_manager.runtime_to_context(runtime),
+            context=self._tool_context_for_runtime(runtime),
         )
         next_runtime = self._apply_runtime_update(runtime=runtime, execution=execution)
         result_metadata = {
@@ -344,28 +344,43 @@ class RuntimeToolExecutor:
             upload=request_upload(runtime),
         )
 
+    def _tool_context_for_runtime(self, runtime: ConversationRuntimeState) -> dict[str, Any]:
+        return self.runtime_manager.runtime_to_context(runtime)
+
+    def _file_tools_for(self, context: dict[str, Any]) -> FileToolHandler:
+        sandbox_root = str(context.get("sandbox_workspace_root") or "").strip()
+        if sandbox_root:
+            return FileToolHandler.from_root(Path(sandbox_root))
+        return self.file_tools
+
+    def _terminal_tools_for(self, context: dict[str, Any]) -> TerminalToolHandler:
+        sandbox_root = str(context.get("sandbox_workspace_root") or "").strip()
+        if sandbox_root:
+            return TerminalToolHandler.from_root(Path(sandbox_root))
+        return self.terminal_tools
+
     def _tool_user_memory(self, invocation: ToolInvocation) -> ToolExecutionResult:
         result = self.user_memory_tools.execute(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_list_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        result = self.file_tools.list_files(invocation)
+        result = self._file_tools_for(invocation.context).list_files(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_search_files(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        result = self.file_tools.search_files(invocation)
+        result = self._file_tools_for(invocation.context).search_files(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_read_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        result = self.file_tools.read_file(invocation)
+        result = self._file_tools_for(invocation.context).read_file(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_write_file(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        result = self.file_tools.write_file(invocation)
+        result = self._file_tools_for(invocation.context).write_file(invocation)
         return ToolExecutionResult(reply=result.reply, action=result.action)
 
     def _tool_shell_exec(self, invocation: ToolInvocation) -> ToolExecutionResult:
-        result = self.terminal_tools.execute(invocation)
+        result = self._terminal_tools_for(invocation.context).execute(invocation)
         return ToolExecutionResult(
             reply=result.reply,
             action=result.action,

@@ -65,6 +65,12 @@ class AgentRuntimeManager:
         }
         if runtime.current_source_event_id:
             context["current_source_event_id"] = runtime.current_source_event_id
+        sandbox_workspace_root = str(runtime.metadata.get("sandbox_workspace_root") or "").strip()
+        if sandbox_workspace_root:
+            context["sandbox_workspace_root"] = sandbox_workspace_root
+            context["execution_mode"] = str(runtime.metadata.get("execution_mode") or "sandbox")
+        elif runtime.execution_mode:
+            context["execution_mode"] = runtime.execution_mode
         return context
 
     @staticmethod

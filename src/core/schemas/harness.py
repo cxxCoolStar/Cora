@@ -37,6 +37,7 @@ class HarnessTraceEventType(StrEnum):
     RESOLVE_COMPLETED = "resolve.completed"
     TOOL_POLICY_APPLIED = "tool.policy.applied"
     TOOL_REQUESTED = "tool.requested"
+    TOOL_SANDBOX_APPLIED = "tool.sandbox.applied"
     TOOL_COMPLETED = "tool.completed"
     TOOL_DENIED = "tool.denied"
     CLEANUP_COMPLETED = "cleanup.completed"

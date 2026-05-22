@@ -82,11 +82,15 @@ class EvalRuntime:
                             observed_session_id = wechat_result.session_id
                             response = _turn_response_from_wechat_result(wechat_result)
                         else:
+                            source_metadata: dict[str, str] = {}
+                            if step.input.platform:
+                                source_metadata["platform"] = step.input.platform
                             response = asyncio.run(
                                 container.clawbot_service.reply(
                                     session_id=session.id,
                                     text=step.input.text,
                                     run_budget=step.input.run_budget,
+                                    source_metadata=source_metadata or None,
                                 )
                             )
                     except Exception as exc:

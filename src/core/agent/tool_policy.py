@@ -75,6 +75,27 @@ def deny_tool_policy_decision(
     )
 
 
+def sandbox_tool_policy_decision(
+    *,
+    tool_name: str,
+    reason: str = "sandbox_required",
+    policy_profile: str | None = None,
+    risk: ToolRisk = "medium",
+    requires_sandbox: bool = True,
+    audit_metadata: dict[str, object] | None = None,
+) -> ToolPolicyDecision:
+    return ToolPolicyDecision(
+        decision="sandbox",
+        reason=reason,
+        tool_name=tool_name,
+        risk=risk,
+        policy_profile=policy_profile,
+        requires_sandbox=requires_sandbox,
+        safe_user_message="",
+        audit_metadata=dict(audit_metadata or {}),
+    )
+
+
 def ask_tool_policy_decision(
     *,
     tool_name: str,
@@ -128,6 +149,7 @@ __all__ = [
     "ToolRisk",
     "allow_tool_policy_decision",
     "ask_tool_policy_decision",
+    "sandbox_tool_policy_decision",
     "deny_tool_policy_decision",
     "deny_max_tool_calls_decision",
 ]

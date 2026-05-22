@@ -30,6 +30,7 @@ from core.agent.tool_policy_engine import (
     effective_denied_tool_names,
     has_runtime_tool_governance,
     requires_hitl_confirmation,
+    requires_sandbox_execution,
     resolve_platform_name,
 )
 from core.schemas.tool_policy import ToolPolicyContext
@@ -72,6 +73,23 @@ class StubExecutor:
         if not self.results:
             raise AssertionError("No stub tool results left")
         return self.results.pop(0)
+
+
+class SandboxCapturingExecutor:
+    captured_metadata: list[dict[str, object]]
+
+    def __init__(self) -> None:
+        self.captured_metadata = []
+
+    async def execute_tool_call(
+        self,
+        *,
+        session_id: str,
+        tool_call: ToolCall,
+        runtime: ConversationRuntimeState,
+    ) -> ToolResult:
+        self.captured_metadata.append(dict(runtime.metadata))
+        return ToolResult(success=True, content="sandbox ok")
 
 
 class SlowExecutor:
@@ -1112,6 +1130,96 @@ def test_tool_policy_engine_skips_confirmation_on_cli() -> None:
     assert requires_hitl_confirmation(context) is False
     decision = ToolPolicyEngine().evaluate(context)
     assert decision.decision == "allow"
+
+
+def test_tool_policy_engine_routes_shell_exec_to_sandbox_on_cli() -> None:
+    context = ToolPolicyContext(
+        tool_name="shell_exec",
+        requires_sandbox=True,
+        platform="cli",
+    )
+
+    assert requires_sandbox_execution(context) is True
+    decision = ToolPolicyEngine().evaluate(context)
+    assert decision.decision == "sandbox"
+    assert decision.reason == "sandbox_required"
+
+
+def test_tool_policy_engine_routes_wechat_write_file_to_sandbox() -> None:
+    context = ToolPolicyContext(
+        tool_name="write_file",
+        platform="wechat",
+    )
+
+    assert requires_sandbox_execution(context) is True
+    decision = ToolPolicyEngine().evaluate(context)
+    assert decision.decision == "sandbox"
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_applies_sandbox_before_tool_execution(tmp_path) -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="shell_exec", arguments={"command": "pwd"})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = SandboxCapturingExecutor()
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(
+                name="shell_exec",
+                description="shell",
+                input_schema={},
+                risk="high",
+                requires_confirmation=True,
+                requires_sandbox=True,
+            ),
+        ],
+        max_steps=2,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(runner=runner, run_record_repository=repository)
+    cora_home = tmp_path / ".cora"
+    run_input = new_run_input(
+        session_id="session-sandbox",
+        source_message_id="msg-sandbox",
+        user_text="/tool shell_exec {\"command\":\"pwd\"}",
+        raw_text="/tool shell_exec {\"command\":\"pwd\"}",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(policy_profile="coding_full"),
+        metadata={"platform": "cli", "cora_home_dir": str(cora_home)},
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    sandbox_event = next(
+        event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_SANDBOX_APPLIED
+    )
+    assert sandbox_event.metadata["attempted_tool_name"] == "shell_exec"
+    assert sandbox_event.metadata["sandbox"]["run_id"] == run_input.run_id
+    assert executor.captured_metadata
+    assert str(executor.captured_metadata[0]["sandbox_workspace_root"]).endswith("workspace")
+    assert result.status == "completed"
+    assert not (cora_home / "sandboxes" / run_input.run_id).exists()
 
 
 @pytest.mark.anyio
