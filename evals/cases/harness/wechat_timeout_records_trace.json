@@ -1,0 +1,43 @@
+{
+  "id": "wechat_timeout_records_trace",
+  "type": "harness",
+  "description": "WeChat turns should expose timeout outcomes in agent run records.",
+  "tags": ["harness", "wechat", "timeout"],
+  "setup": {
+    "harness_tool_delay_seconds": 0.05,
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "wechat tool turn exceeds timeout",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-timeout",
+        "external_event_id": "wx-eval-timeout-1",
+        "text": "/tool search_files {\"query\":\"hello_agent\",\"path\":\"src\"}",
+        "run_budget": {
+          "timeout_seconds": 0.001
+        }
+      },
+      "expect": {
+        "reply_contains_all": ["I reached the run timeout before finishing."],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "incomplete",
+          "latest_agent_run_outcome": "timeout",
+          "latest_agent_run_failure_category": "timeout",
+          "latest_agent_run_cleanup_status": "skipped",
+          "latest_agent_run_input_metadata_contains": {
+            "channel": "wechat"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "budget.timeout"
+          ]
+        }
+      }
+    }
+  ]
+}

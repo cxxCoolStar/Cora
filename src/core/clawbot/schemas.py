@@ -57,12 +57,18 @@ class AgentRunSummaryResponse(BaseModel):
     harness_id: str
     status: str
     outcome: str | None = None
+    trace_id: str | None = None
+    parent_run_id: str | None = None
+    agent_role: str | None = None
+    failure_category: str | None = None
+    cleanup_status: str | None = None
     steps: int | None = None
     started_at: datetime
     completed_at: datetime | None = None
 
 
 class AgentRunDetailResponse(AgentRunSummaryResponse):
+    budget: dict = Field(default_factory=dict)
     input_metadata: dict = Field(default_factory=dict)
     metadata: dict = Field(default_factory=dict)
     error: str | None = None

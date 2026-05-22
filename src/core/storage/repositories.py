@@ -841,6 +841,11 @@ class SqlAgentRunRecordRepository:
                 source_message_id=run_input.source_message_id,
                 harness_id=harness_id,
                 status="running",
+                trace_id=run_input.trace_id,
+                parent_run_id=run_input.parent_run_id,
+                agent_role=run_input.agent_role,
+                cleanup_status="pending",
+                budget_json=run_input.budget.to_dict(),
                 input_metadata_json=dict(input_metadata or {}),
             )
             session.add(record)
@@ -864,6 +869,8 @@ class SqlAgentRunRecordRepository:
                 raise KeyError(f"Agent run record not found: {run_id}")
             record.status = status
             record.outcome = outcome
+            record.failure_category = self._failure_category_for_outcome(status=status, outcome=outcome, metadata=metadata)
+            record.cleanup_status = self._cleanup_status_from_metadata(metadata=metadata, fallback="completed")
             record.steps = steps
             record.completed_at = utc_now()
             record.trace_events_json = [self._trace_event_to_json(event) for event in trace_events]
@@ -887,6 +894,8 @@ class SqlAgentRunRecordRepository:
                 raise KeyError(f"Agent run record not found: {run_id}")
             record.status = "failed"
             record.outcome = "error"
+            record.failure_category = self._failure_category_from_metadata(metadata=metadata) or "infrastructure_failure"
+            record.cleanup_status = self._cleanup_status_from_metadata(metadata=metadata, fallback="failed")
             record.completed_at = utc_now()
             record.trace_events_json = [self._trace_event_to_json(event) for event in trace_events]
             record.error = error
@@ -933,6 +942,34 @@ class SqlAgentRunRecordRepository:
             metadata=dict(payload.get("metadata") or {}),
         )
 
+    @staticmethod
+    def _failure_category_from_metadata(*, metadata: dict[str, Any] | None) -> str | None:
+        value = (metadata or {}).get("failure_category")
+        text = str(value or "").strip()
+        return text or None
+
+    @classmethod
+    def _failure_category_for_outcome(
+        cls,
+        *,
+        status: str,
+        outcome: str,
+        metadata: dict[str, Any] | None,
+    ) -> str | None:
+        category = cls._failure_category_from_metadata(metadata=metadata)
+        if category:
+            return category
+        if outcome == "timeout":
+            return "timeout"
+        if status == "failed":
+            return "infrastructure_failure"
+        return None
+
+    @staticmethod
+    def _cleanup_status_from_metadata(*, metadata: dict[str, Any] | None, fallback: str) -> str:
+        text = str((metadata or {}).get("cleanup_status") or "").strip()
+        return text or fallback
+
     @classmethod
     def _to_agent_run_record(cls, record: AgentRunRecordModel) -> AgentRunRecord:
         return AgentRunRecord(
@@ -942,9 +979,15 @@ class SqlAgentRunRecordRepository:
             harness_id=record.harness_id,
             status=record.status,
             outcome=record.outcome,
+            trace_id=record.trace_id,
+            parent_run_id=record.parent_run_id,
+            agent_role=record.agent_role,
+            failure_category=record.failure_category,
+            cleanup_status=record.cleanup_status,
             started_at=record.started_at,
             completed_at=record.completed_at,
             steps=record.steps,
+            budget=dict(record.budget_json or {}),
             input_metadata=dict(record.input_metadata_json or {}),
             trace_events=[
                 cls._trace_event_from_json(payload)

@@ -596,6 +596,11 @@ class ClawBotService:
             harness_id=record.harness_id,
             status=record.status,
             outcome=record.outcome,
+            trace_id=record.trace_id,
+            parent_run_id=record.parent_run_id,
+            agent_role=record.agent_role,
+            failure_category=record.failure_category,
+            cleanup_status=record.cleanup_status,
             steps=record.steps,
             started_at=record.started_at,
             completed_at=record.completed_at,
@@ -605,6 +610,7 @@ class ClawBotService:
     def _agent_run_detail(cls, record) -> AgentRunDetailResponse:
         return AgentRunDetailResponse(
             **cls._agent_run_summary(record).model_dump(),
+            budget=dict(record.budget or {}),
             input_metadata=dict(record.input_metadata or {}),
             metadata=dict(record.metadata or {}),
             error=record.error,

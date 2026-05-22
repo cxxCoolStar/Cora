@@ -21,6 +21,17 @@ single-agent harness whose lifecycle, tool policy, state, budget, and trace
 contracts are explicit. Multi-agent behavior should be added only after that
 foundation exists.
 
+Current baseline:
+
+- Phase 1 is implemented for the WeChat production path and the current
+  single-agent loop.
+- The harness smoke gate is `.\scripts\run_harness_evals.cmd`.
+- The current smoke baseline is `10/10` harness cases passing, including
+  WeChat entry-path success, permission denial, timeout, and failure records.
+- Phase 2/3 work should not start by adding Planner, Worker, Reviewer, spawn,
+  or direct tool-plan behavior. It should start by designing the unified tool
+  policy decision layer.
+
 ## 2. Reference Projects
 
 The examples folder contains useful reference designs.
@@ -740,6 +751,29 @@ Actions:
 5. Emit structured run and tool trace events.
 6. Add evals for single-agent lifecycle, cutoff, and trace shape.
 
+Current status:
+
+- Implemented for the WeChat path and the current primary single-agent loop.
+- `AgentTurnRunner.run_turn()` now runs through `DefaultAgentHarness`.
+- `AgentRunRecord` is persisted in SQLite and exposed through the session run
+  query API.
+- Run records include `trace_id`, `agent_role`, `budget`,
+  `failure_category`, `cleanup_status`, input metadata, and trace events.
+- `RunBudget` covers `max_steps`, `timeout_seconds`, `max_tool_calls`,
+  allowlists, denylists, and named policy profiles.
+- Harness trace events cover lifecycle, tool policy, tool completion,
+  tool denial, timeout, and failure.
+- The smoke gate covers normal completion, tool trace, timeout, failure,
+  allow/deny governance, named profiles, and WeChat entry-path behavior.
+
+Phase 1 non-goals:
+
+- No Planner, Worker, Reviewer, or subagent execution.
+- No direct tool-plan harnessification.
+- No complete HITL approval workflow.
+- No sandbox decision engine.
+- No checkpoint/resume or run replay.
+
 ### Phase 2: Tool Policy And Approval
 
 Goal:
@@ -754,6 +788,36 @@ Actions:
 4. Add HITL request objects for high-risk tools.
 5. Add sandbox-required markers for file and terminal tools.
 6. Add evals for allow, ask, deny, and sandbox decisions.
+
+Phase 2 first slice:
+
+Do not start Phase 2 by adding more per-entry special cases. Start with a
+small design and test slice for a single policy decision object:
+
+```python
+class ToolPolicyDecision:
+    decision: Literal["allow", "ask", "deny", "sandbox"]
+    reason: str
+    tool_name: str
+    risk: Literal["low", "medium", "high"]
+    policy_profile: str | None
+    requires_confirmation: bool
+    requires_sandbox: bool
+    safe_user_message: str
+    audit_metadata: dict[str, object]
+```
+
+The first implementation should only wrap existing WeChat-path behavior:
+
+- convert current profile allow/deny checks into `ToolPolicyDecision`
+- preserve existing `wechat_safe` behavior
+- emit the decision into trace metadata
+- keep the current tool result text stable
+- add evals for `allow` and `deny`
+
+Only after this object is stable should Phase 2 add `ask`/HITL and `sandbox`.
+Phase 3 must wait until tool policy decisions can reliably grant a Worker a
+narrow tool set.
 
 ### Phase 3: Structured Planning Without Parallelism
 
@@ -800,7 +864,39 @@ Actions:
 5. Add external harness selection.
 6. Add observability reports and run replay.
 
-## 18. Recommended First Code Changes
+## 18. Current Phase 1 Baseline
+
+Phase 1 is considered complete when this command passes:
+
+```powershell
+.\scripts\run_harness_evals.cmd
+```
+
+The expected baseline is:
+
+```text
+Cases: 10/10 passed
+Steps: 10/10 passed
+```
+
+The harness smoke gate currently includes:
+
+- single-agent lifecycle and durable run records
+- tool trace recording
+- timeout cutoff
+- expected failure recording
+- per-run allow policy denial
+- max tool call budget denial
+- named policy profile denial
+- WeChat entry-path policy denial
+- WeChat entry-path timeout recording
+- WeChat entry-path failure recording
+
+This baseline is intentionally narrow. It proves that the production WeChat
+path and the current single-agent loop are controllable and observable before
+Cora adds planners, workers, reviewers, or subagents.
+
+## 19. Recommended First Code Changes
 
 The smallest useful first slice:
 
@@ -814,7 +910,9 @@ The smallest useful first slice:
 
 This creates a stable seam before adding any new multi-agent behavior.
 
-## 19. Acceptance Criteria
+Status: complete for Phase 1.
+
+## 20. Acceptance Criteria
 
 Cora's harness is moving in the right direction when:
 

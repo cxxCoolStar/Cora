@@ -108,6 +108,31 @@ def evaluate_step(
                     f"expected state.latest_agent_run_outcome={state_expect.latest_agent_run_outcome!r}, got {actual!r}"
                 )
             )
+    if state_expect.latest_agent_run_failure_category is not None:
+        actual = observed_state.latest_agent_run_failure_category if observed_state is not None else None
+        if actual != state_expect.latest_agent_run_failure_category:
+            failures.append(
+                EvalAssertionFailure(
+                    f"expected state.latest_agent_run_failure_category={state_expect.latest_agent_run_failure_category!r}, got {actual!r}"
+                )
+            )
+    if state_expect.latest_agent_run_cleanup_status is not None:
+        actual = observed_state.latest_agent_run_cleanup_status if observed_state is not None else None
+        if actual != state_expect.latest_agent_run_cleanup_status:
+            failures.append(
+                EvalAssertionFailure(
+                    f"expected state.latest_agent_run_cleanup_status={state_expect.latest_agent_run_cleanup_status!r}, got {actual!r}"
+                )
+            )
+    latest_input_metadata = observed_state.latest_agent_run_input_metadata if observed_state is not None else {}
+    for key, expected_value in state_expect.latest_agent_run_input_metadata_contains.items():
+        actual = latest_input_metadata.get(key)
+        if str(actual or "") != expected_value:
+            failures.append(
+                EvalAssertionFailure(
+                    f"expected state.latest_agent_run_input_metadata_contains[{key!r}]={expected_value!r}, got {actual!r}"
+                )
+            )
     latest_agent_run_error = observed_state.latest_agent_run_error if observed_state is not None else ""
     for token in state_expect.latest_agent_run_error_contains_all:
         if token not in str(latest_agent_run_error or ""):

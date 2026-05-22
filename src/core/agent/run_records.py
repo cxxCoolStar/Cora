@@ -19,9 +19,15 @@ class AgentRunRecord:
     harness_id: str
     status: str
     outcome: str | None = None
+    trace_id: str | None = None
+    parent_run_id: str | None = None
+    agent_role: str | None = None
+    failure_category: str | None = None
+    cleanup_status: str | None = None
     started_at: datetime = field(default_factory=_utc_now)
     completed_at: datetime | None = None
     steps: int | None = None
+    budget: dict[str, Any] = field(default_factory=dict)
     input_metadata: dict[str, Any] = field(default_factory=dict)
     trace_events: list[RunTraceEvent] = field(default_factory=list)
     error: str | None = None
@@ -84,6 +90,11 @@ class InMemoryAgentRunRecordRepository:
             source_message_id=run_input.source_message_id,
             harness_id=harness_id,
             status="running",
+            trace_id=run_input.trace_id,
+            parent_run_id=run_input.parent_run_id,
+            agent_role=run_input.agent_role,
+            cleanup_status="pending",
+            budget=run_input.budget.to_dict(),
             input_metadata=dict(input_metadata or {}),
         )
         self._records[record.run_id] = record
@@ -102,6 +113,11 @@ class InMemoryAgentRunRecordRepository:
         record = self.get(run_id=run_id)
         record.status = status
         record.outcome = outcome
+        record.failure_category = _failure_category_from_metadata(metadata) or _failure_category_for_outcome(
+            status=status,
+            outcome=outcome,
+        )
+        record.cleanup_status = _cleanup_status_from_metadata(metadata, fallback="completed")
         record.completed_at = _utc_now()
         record.steps = steps
         record.trace_events = list(trace_events)
@@ -120,6 +136,8 @@ class InMemoryAgentRunRecordRepository:
         record = self.get(run_id=run_id)
         record.status = "failed"
         record.outcome = "error"
+        record.failure_category = _failure_category_from_metadata(metadata) or "infrastructure_failure"
+        record.cleanup_status = _cleanup_status_from_metadata(metadata, fallback="failed")
         record.completed_at = _utc_now()
         record.trace_events = list(trace_events)
         record.error = error
@@ -138,3 +156,21 @@ class InMemoryAgentRunRecordRepository:
             for record in self._records.values()
             if record.session_id == session_id
         ]
+
+
+def _failure_category_for_outcome(*, status: str, outcome: str) -> str | None:
+    if outcome == "timeout":
+        return "timeout"
+    if status == "failed":
+        return "infrastructure_failure"
+    return None
+
+
+def _failure_category_from_metadata(metadata: dict[str, Any] | None) -> str | None:
+    text = str((metadata or {}).get("failure_category") or "").strip()
+    return text or None
+
+
+def _cleanup_status_from_metadata(metadata: dict[str, Any] | None, *, fallback: str) -> str:
+    text = str((metadata or {}).get("cleanup_status") or "").strip()
+    return text or fallback

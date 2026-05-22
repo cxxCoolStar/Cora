@@ -65,6 +65,12 @@ class ToolManager:
                     name=registered.name,
                     description=registered.description,
                     input_schema=input_schema,
+                    toolset=registered.toolset,
+                    read_only=registered.read_only,
+                    risk=registered.risk,
+                    allowed_roles=list(registered.allowed_roles),
+                    requires_confirmation=registered.requires_confirmation,
+                    requires_sandbox=registered.requires_sandbox,
                 )
             )
         return specs

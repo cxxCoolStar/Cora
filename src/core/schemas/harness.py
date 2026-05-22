@@ -19,6 +19,16 @@ class RunBudget:
     allowed_tool_names: list[str] = field(default_factory=list)
     denied_tool_names: list[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_profile": self.policy_profile,
+            "max_steps": self.max_steps,
+            "timeout_seconds": self.timeout_seconds,
+            "max_tool_calls": self.max_tool_calls,
+            "allowed_tool_names": list(self.allowed_tool_names),
+            "denied_tool_names": list(self.denied_tool_names),
+        }
+
 
 class HarnessTraceEventType(StrEnum):
     RUN_STARTED = "run.started"
@@ -54,6 +64,9 @@ class HarnessRunInput:
     context_snapshot: RuntimeContextSnapshot
     budget: RunBudget = field(default_factory=RunBudget)
     metadata: dict[str, Any] = field(default_factory=dict)
+    trace_id: str | None = None
+    parent_run_id: str | None = None
+    agent_role: str = "primary"
 
 
 @dataclass(slots=True)

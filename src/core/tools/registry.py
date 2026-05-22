@@ -33,7 +33,10 @@ class ToolSpec:
     handler: ToolHandler
     is_agent_stateful: bool = False
     read_only: bool = False
+    risk: str = "medium"
+    allowed_roles: tuple[str, ...] = ()
     requires_confirmation: bool = False
+    requires_sandbox: bool = False
 
 
 class ToolRegistry:

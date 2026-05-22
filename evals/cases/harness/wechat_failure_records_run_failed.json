@@ -1,0 +1,44 @@
+{
+  "id": "wechat_failure_records_run_failed",
+  "type": "harness",
+  "description": "WeChat turns should record expected harness failures.",
+  "tags": ["harness", "wechat", "failure"],
+  "setup": {
+    "harness_prepare_failure_message": "eval injected wechat prepare failure"
+  },
+  "steps": [
+    {
+      "label": "wechat prepare failure",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-failure",
+        "external_event_id": "wx-eval-failure-1",
+        "text": "hello"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "error",
+        "action": "error",
+        "error_contains_all": ["RuntimeError", "eval injected wechat prepare failure"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "failed",
+          "latest_agent_run_outcome": "error",
+          "latest_agent_run_failure_category": "infrastructure_failure",
+          "latest_agent_run_cleanup_status": "skipped",
+          "latest_agent_run_error_contains_all": [
+            "RuntimeError",
+            "eval injected wechat prepare failure"
+          ],
+          "latest_agent_run_input_metadata_contains": {
+            "channel": "wechat"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "run.failed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -18,7 +18,7 @@ if str(SRC) not in sys.path:
 from core.api.app import create_app  # noqa: E402
 from core.agent.context_budget import ContextBudgetManager  # noqa: E402
 from core.agent.runtime_state import ConversationRuntimeState, RuntimeContextSnapshot  # noqa: E402
-from core.schemas.harness import HarnessTraceEventType  # noqa: E402
+from core.schemas.harness import HarnessTraceEventType, RunBudget  # noqa: E402
 from core.cli.main import _build_wechat_runtime  # noqa: E402
 from core.channels.wechat.poller import WechatPoller  # noqa: E402
 from core.channels.wechat.service import WechatGatewayService  # noqa: E402
@@ -241,6 +241,18 @@ class StubWriteFileToolModelClient(ModelClient):
                 )
             ]
         )
+
+
+class StubShellToolModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        if messages and messages[-1].role == "tool":
+            return ModelResponse(assistant_text="done")
+        return ModelResponse(tool_calls=[ToolCall(tool_name="shell_exec", arguments={"command": "pwd"})])
+
+
+class StubFailingModelClient(ModelClient):
+    def generate(self, *, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+        raise RuntimeError("wechat model exploded")
 
 
 class FakeVisionDescriber:
@@ -1864,6 +1876,123 @@ def test_wechat_gateway_turn_runs_through_harness_with_wechat_profile(tmp_path):
     policy_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_POLICY_APPLIED)
     assert record.input_metadata["channel"] == "wechat"
     assert policy_event.metadata["policy_profile"] == "wechat_safe"
+
+
+def test_wechat_gateway_policy_denial_records_permission_category(tmp_path):
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = StubShellToolModelClient()
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    result = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-policy-denied-1", user_id="wx-user-policy", text="run shell")
+        )
+    )
+
+    record = container.agent_run_record_repository.list_by_session(session_id=result.session_id)[0]
+    denied_event = next(event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_DENIED)
+    assert result.reply == "Tool `shell_exec` is not allowed by this run's harness policy."
+    assert record.failure_category == "permission_denied"
+    assert record.cleanup_status == "completed"
+    assert denied_event.metadata["attempted_tool_name"] == "shell_exec"
+    assert denied_event.metadata["policy_decision"]["decision"] == "deny"
+    assert denied_event.metadata["policy_decision"]["policy_profile"] == "wechat_safe"
+    assert denied_event.metadata["policy_decision"]["reason"] == "tool_denied"
+
+
+def test_wechat_gateway_timeout_records_timeout_category(tmp_path):
+    container = build_test_container(tmp_path)
+    original_budget_for_turn = container.clawbot_service._run_budget_for_turn
+
+    def tiny_timeout_budget(**kwargs):
+        budget = original_budget_for_turn(**kwargs)
+        return RunBudget(
+            policy_profile=budget.policy_profile,
+            max_steps=budget.max_steps,
+            timeout_seconds=0.001,
+            max_tool_calls=budget.max_tool_calls,
+            allowed_tool_names=list(budget.allowed_tool_names),
+            denied_tool_names=list(budget.denied_tool_names),
+        )
+
+    container.clawbot_service._run_budget_for_turn = tiny_timeout_budget
+    original_execute_tool_call = container.tool_executor.execute_tool_call
+
+    async def delayed_execute_tool_call(**kwargs):
+        await asyncio.sleep(0.05)
+        return await original_execute_tool_call(**kwargs)
+
+    container.tool_executor.execute_tool_call = delayed_execute_tool_call
+    container.clawbot_service.model_client = StubWriteFileToolModelClient()
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    result = asyncio.run(
+        gateway.handle_inbound_event(
+            event=WechatInboundEvent(event_id="wx-timeout-1", user_id="wx-user-timeout", text="write slowly")
+        )
+    )
+
+    record = container.agent_run_record_repository.list_by_session(session_id=result.session_id)[0]
+    assert result.reply == "I reached the run timeout before finishing."
+    assert record.status == "incomplete"
+    assert record.outcome == "timeout"
+    assert record.failure_category == "timeout"
+    assert record.cleanup_status == "skipped"
+    assert record.trace_events[-1].event_type == HarnessTraceEventType.BUDGET_TIMEOUT
+
+
+def test_wechat_gateway_model_exception_records_failed_run(tmp_path):
+    container = build_test_container(tmp_path)
+    container.clawbot_service.model_client = StubFailingModelClient()
+    gateway = WechatGatewayService(
+        clawbot_service=container.clawbot_service,
+        event_repository=ChannelEventRepository(container.database),
+        session_map_repository=ChannelSessionMapRepository(container.database),
+        session_idle_minutes=container.settings.wechat_session_idle_minutes,
+        session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+        session_timezone=container.settings.wechat_session_timezone,
+        enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+    )
+
+    try:
+        asyncio.run(
+            gateway.handle_inbound_event(
+                event=WechatInboundEvent(event_id="wx-failed-1", user_id="wx-user-failed", text="boom")
+            )
+        )
+    except RuntimeError as exc:
+        assert "wechat model exploded" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    session_map = ChannelSessionMapRepository(container.database).get_binding(
+        channel="wechat",
+        external_user_id="wx-user-failed",
+    )
+    assert session_map is not None
+    record = container.agent_run_record_repository.list_by_session(session_id=session_map.session_id)[0]
+    assert record.status == "failed"
+    assert record.outcome == "error"
+    assert record.failure_category == "infrastructure_failure"
+    assert record.cleanup_status == "skipped"
+    assert record.error == "RuntimeError: wechat model exploded"
+    assert record.trace_events[-1].event_type == HarnessTraceEventType.RUN_FAILED
 
 
 def test_wechat_gateway_manual_new_command_starts_fresh_session(tmp_path):

@@ -22,6 +22,14 @@ from core.agent.runtime_state import ConversationRuntimeState, EventSnapshot, Ru
 from core.agent.skill_protocol import PendingRequest, PendingStateDelta, SkillExecutionResult
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillLoader
+from core.agent.tool_policy import allow_tool_policy_decision, deny_tool_policy_decision
+from core.agent.tool_policy_engine import (
+    ToolPolicyEngine,
+    effective_allowed_tool_names,
+    effective_denied_tool_names,
+    has_runtime_tool_governance,
+)
+from core.schemas.tool_policy import ToolPolicyContext
 from core.agent.turn_runner import AgentTurnRunner
 from core.clawbot import RuntimeToolExecutor
 from core.clawbot.planner import ToolPlan
@@ -663,6 +671,8 @@ async def test_default_agent_harness_records_incomplete_outcome() -> None:
     assert tool_event.metadata["tool_name"] == "read_file"
     assert tool_event.metadata["status"] == "completed"
     assert tool_event.metadata["tool_index"] == 1
+    assert tool_event.metadata["policy_decision"]["decision"] == "allow"
+    assert tool_event.metadata["policy_decision"]["tool_name"] == "read_file"
 
 
 @pytest.mark.anyio
@@ -973,6 +983,99 @@ async def test_default_agent_harness_applies_policy_profile() -> None:
     assert result.tool_trace[0].metadata["policy_reason"] == "tool_not_allowed"
     assert denied_event.metadata["attempted_tool_name"] == "write_file"
     assert len(executor.results) == 1
+
+
+def test_tool_policy_decision_serializes_deny_metadata() -> None:
+    decision = deny_tool_policy_decision(
+        tool_name="shell_exec",
+        reason="tool_denied",
+        policy_profile="wechat_safe",
+        audit_metadata={"channel": "wechat"},
+    )
+
+    assert decision.decision == "deny"
+    assert decision.tool_name == "shell_exec"
+    assert decision.safe_user_message == "Tool `shell_exec` is not allowed by this run's harness policy."
+    assert decision.to_dict()["audit_metadata"] == {"channel": "wechat"}
+
+
+def test_tool_policy_decision_serializes_allow_metadata() -> None:
+    decision = allow_tool_policy_decision(
+        tool_name="read_file",
+        policy_profile="wechat_safe",
+        risk="low",
+        audit_metadata={"channel": "wechat"},
+    )
+
+    assert decision.decision == "allow"
+    assert decision.risk == "low"
+    assert decision.requires_confirmation is False
+    assert decision.to_dict()["policy_profile"] == "wechat_safe"
+    assert decision.to_dict()["audit_metadata"] == {"channel": "wechat"}
+
+
+def test_tool_policy_engine_denies_unlisted_tool() -> None:
+    engine = ToolPolicyEngine()
+    decision = engine.evaluate(
+        ToolPolicyContext(
+            tool_name="write_file",
+            allowed_tool_names=frozenset({"read_file"}),
+        )
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason == "tool_not_allowed"
+
+
+def test_tool_policy_engine_denies_exceeded_tool_budget() -> None:
+    engine = ToolPolicyEngine()
+    decision = engine.evaluate(
+        ToolPolicyContext(
+            tool_name="read_file",
+            max_tool_calls=1,
+            tool_calls_so_far=1,
+        )
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason == "max_tool_calls_exceeded"
+    assert "Tool call budget exceeded" in decision.safe_user_message
+
+
+def test_tool_policy_engine_denies_disallowed_role() -> None:
+    engine = ToolPolicyEngine()
+    decision = engine.evaluate(
+        ToolPolicyContext(
+            tool_name="shell_exec",
+            agent_role="worker",
+            allowed_roles=frozenset({"primary"}),
+        )
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason == "role_not_allowed"
+
+
+def test_tool_policy_engine_allows_when_unrestricted() -> None:
+    engine = ToolPolicyEngine()
+    decision = engine.evaluate(ToolPolicyContext(tool_name="read_file"))
+
+    assert decision.decision == "allow"
+    assert decision.reason == "tool_allowed"
+
+
+def test_effective_allowed_tool_names_intersects_profile_and_budget() -> None:
+    budget = RunBudget(
+        policy_profile="background_readonly",
+        allowed_tool_names=["read_file", "write_file"],
+    )
+
+    assert effective_allowed_tool_names(budget) == frozenset({"read_file"})
+
+
+def test_has_runtime_tool_governance_detects_budget_only() -> None:
+    assert has_runtime_tool_governance(RunBudget(max_tool_calls=2)) is True
+    assert has_runtime_tool_governance(RunBudget()) is False
 
 
 @pytest.mark.anyio

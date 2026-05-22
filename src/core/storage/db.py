@@ -40,6 +40,12 @@ class DatabaseManager:
             self._ensure_column(raw, "clawbot_channel_session_map", "session_started_at", "DATETIME")
             self._ensure_column(raw, "clawbot_channel_session_map", "last_interaction_at", "DATETIME")
             self._ensure_column(raw, "clawbot_channel_session_map", "last_reset_reason", "VARCHAR(64)")
+            self._ensure_column(raw, "clawbot_agent_runs", "trace_id", "VARCHAR")
+            self._ensure_column(raw, "clawbot_agent_runs", "parent_run_id", "VARCHAR")
+            self._ensure_column(raw, "clawbot_agent_runs", "agent_role", "VARCHAR(64)")
+            self._ensure_column(raw, "clawbot_agent_runs", "failure_category", "VARCHAR(64)")
+            self._ensure_column(raw, "clawbot_agent_runs", "cleanup_status", "VARCHAR(32)")
+            self._ensure_column(raw, "clawbot_agent_runs", "budget_json", "JSON NOT NULL DEFAULT '{}'")
 
     @staticmethod
     def _unwrap_sqlite_connection(raw: object) -> sqlite3.Connection | None:

@@ -11,10 +11,19 @@ import shutil
 
 import core.clawbot.dependencies as clawbot_dependencies
 import httpx
+from core.channels.wechat.service import WechatGatewayService
+from core.channels.wechat.types import WechatInboundEvent
 from core.clawbot.dependencies import get_clawbot_container
+from core.clawbot.schemas import TurnResponse
 from core.evals.judge import evaluate_step
 from core.evals.models import EvalAssertionFailure, EvalCase, EvalCaseResult, EvalObservedState, EvalSetup, EvalStepResult
-from core.storage.repositories import ItemRepository, PendingStateRepository, SqlAgentRunRecordRepository
+from core.storage.repositories import (
+    ChannelEventRepository,
+    ChannelSessionMapRepository,
+    ItemRepository,
+    PendingStateRepository,
+    SqlAgentRunRecordRepository,
+)
 
 
 class EvalRuntime:
@@ -55,22 +64,43 @@ class EvalRuntime:
                 self._configure_harness_prepare_failure(container=container, setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
+                wechat_gateway = self._build_wechat_gateway(container=container)
                 for index, step in enumerate(case.steps, start=1):
+                    observed_session_id = session.id
                     try:
-                        response = asyncio.run(
-                            container.clawbot_service.reply(
-                                session_id=session.id,
-                                text=step.input.text,
-                                run_budget=step.input.run_budget,
+                        if step.input.channel == "wechat":
+                            with self._wechat_step_budget(container=container, step_budget=step.input.run_budget):
+                                wechat_result = asyncio.run(
+                                    wechat_gateway.handle_inbound_event(
+                                        event=WechatInboundEvent(
+                                            event_id=step.input.external_event_id or f"{case.id}-{index}",
+                                            user_id=step.input.external_user_id or f"eval-user-{case.id}",
+                                            text=step.input.text,
+                                        )
+                                    )
+                                )
+                            observed_session_id = wechat_result.session_id
+                            response = _turn_response_from_wechat_result(wechat_result)
+                        else:
+                            response = asyncio.run(
+                                container.clawbot_service.reply(
+                                    session_id=session.id,
+                                    text=step.input.text,
+                                    run_budget=step.input.run_budget,
+                                )
                             )
-                        )
                     except Exception as exc:
                         if not step.expect.error_contains_all:
                             raise
+                        if step.input.channel == "wechat":
+                            observed_session_id = _session_id_for_wechat_user(
+                                database=container.database,
+                                external_user_id=step.input.external_user_id or f"eval-user-{case.id}",
+                            ) or observed_session_id
                         response = _failed_turn_response(exc)
                     observed_state = observe_state(
                         database=container.database,
-                        session_id=session.id,
+                        session_id=observed_session_id,
                         user_memory_path=user_memory_path,
                         workspace_root=workspace_root,
                     )
@@ -159,6 +189,39 @@ class EvalRuntime:
 
         container.clawbot_service._agent_turn_runner.history_loader = failing_history_loader
 
+    @staticmethod
+    def _build_wechat_gateway(*, container) -> WechatGatewayService:
+        session_map_repository = ChannelSessionMapRepository(container.database)
+        gateway = WechatGatewayService(
+            clawbot_service=container.clawbot_service,
+            event_repository=ChannelEventRepository(container.database),
+            session_map_repository=session_map_repository,
+            session_idle_minutes=container.settings.wechat_session_idle_minutes,
+            session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
+            session_timezone=container.settings.wechat_session_timezone,
+            enable_manual_reset=container.settings.wechat_session_enable_manual_reset,
+        )
+        container.configure_gateway(gateway, session_map_repository=session_map_repository)
+        return gateway
+
+    @staticmethod
+    @contextmanager
+    def _wechat_step_budget(*, container, step_budget):
+        if not _run_budget_has_values(step_budget):
+            yield
+            return
+        original_budget_for_turn = container.clawbot_service._run_budget_for_turn
+
+        def budget_for_turn(**kwargs):
+            budget = original_budget_for_turn(**kwargs)
+            return step_budget if _run_budget_has_values(step_budget) else budget
+
+        container.clawbot_service._run_budget_for_turn = budget_for_turn
+        try:
+            yield
+        finally:
+            container.clawbot_service._run_budget_for_turn = original_budget_for_turn
+
 
 @contextmanager
 def isolated_settings_env(*, project_root: Path, sandbox_root: Path, user_memory_path: Path, workspace_root: Path):
@@ -199,8 +262,6 @@ _OVERRIDDEN_ENV = {
 
 
 def _failed_turn_response(exc: Exception):
-    from core.clawbot.schemas import TurnResponse
-
     return TurnResponse(
         reply=f"{exc.__class__.__name__}: {exc}",
         status="failed",
@@ -211,6 +272,36 @@ def _failed_turn_response(exc: Exception):
         artifacts=[],
         trace=[],
         decision_source="exception",
+    )
+
+
+def _turn_response_from_wechat_result(result) -> TurnResponse:
+    return TurnResponse(
+        reply=result.reply,
+        status="completed",
+        disposition="respond",
+        action=result.action,
+        item_id=None,
+        needs_clarification=False,
+        artifacts=[],
+        trace=[],
+        decision_source="wechat_gateway",
+    )
+
+
+def _session_id_for_wechat_user(*, database, external_user_id: str) -> str | None:
+    binding = ChannelSessionMapRepository(database).get_binding(channel="wechat", external_user_id=external_user_id)
+    return binding.session_id if binding is not None else None
+
+
+def _run_budget_has_values(budget) -> bool:
+    return bool(
+        getattr(budget, "policy_profile", None)
+        or getattr(budget, "max_steps", None) is not None
+        or getattr(budget, "timeout_seconds", None) is not None
+        or getattr(budget, "max_tool_calls", None) is not None
+        or list(getattr(budget, "allowed_tool_names", []) or [])
+        or list(getattr(budget, "denied_tool_names", []) or [])
     )
 
 
@@ -237,6 +328,9 @@ def observe_state(*, database, session_id: str, user_memory_path: Path, workspac
         agent_run_count=len(agent_runs),
         latest_agent_run_status=latest_agent_run.status if latest_agent_run is not None else None,
         latest_agent_run_outcome=latest_agent_run.outcome if latest_agent_run is not None else None,
+        latest_agent_run_failure_category=latest_agent_run.failure_category if latest_agent_run is not None else None,
+        latest_agent_run_cleanup_status=latest_agent_run.cleanup_status if latest_agent_run is not None else None,
+        latest_agent_run_input_metadata=dict(latest_agent_run.input_metadata or {}) if latest_agent_run is not None else {},
         latest_agent_run_error=latest_agent_run.error if latest_agent_run is not None else None,
         latest_agent_run_trace_events=[
             event.event_type for event in list(latest_agent_run.trace_events or [])

@@ -16,6 +16,9 @@ class EvalStateExpectation:
     agent_run_count: int | None = None
     latest_agent_run_status: str | None = None
     latest_agent_run_outcome: str | None = None
+    latest_agent_run_failure_category: str | None = None
+    latest_agent_run_cleanup_status: str | None = None
+    latest_agent_run_input_metadata_contains: dict[str, str] = field(default_factory=dict)
     latest_agent_run_error_contains_all: list[str] = field(default_factory=list)
     latest_agent_run_trace_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_all: list[str] = field(default_factory=list)
@@ -37,6 +40,9 @@ class EvalStateExpectation:
             agent_run_count=_maybe_int(payload.get("agent_run_count")),
             latest_agent_run_status=_maybe_str(payload.get("latest_agent_run_status")),
             latest_agent_run_outcome=_maybe_str(payload.get("latest_agent_run_outcome")),
+            latest_agent_run_failure_category=_maybe_str(payload.get("latest_agent_run_failure_category")),
+            latest_agent_run_cleanup_status=_maybe_str(payload.get("latest_agent_run_cleanup_status")),
+            latest_agent_run_input_metadata_contains=_string_map(payload.get("latest_agent_run_input_metadata_contains")),
             latest_agent_run_error_contains_all=_string_list(payload.get("latest_agent_run_error_contains_all")),
             latest_agent_run_trace_contains_all=_string_list(payload.get("latest_agent_run_trace_contains_all")),
             user_memory_contains_all=_string_list(payload.get("user_memory_contains_all")),
@@ -86,6 +92,9 @@ class EvalExpectation:
 @dataclass(slots=True)
 class EvalInput:
     text: str
+    channel: str | None = None
+    external_user_id: str | None = None
+    external_event_id: str | None = None
     run_budget: RunBudget = field(default_factory=RunBudget)
 
     @classmethod
@@ -95,6 +104,9 @@ class EvalInput:
             raise ValueError("Eval step input.text is required.")
         return cls(
             text=text,
+            channel=_maybe_str(payload.get("channel")),
+            external_user_id=_maybe_str(payload.get("external_user_id")),
+            external_event_id=_maybe_str(payload.get("external_event_id")),
             run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),
         )
 
@@ -211,6 +223,9 @@ class EvalObservedState:
     agent_run_count: int = 0
     latest_agent_run_status: str | None = None
     latest_agent_run_outcome: str | None = None
+    latest_agent_run_failure_category: str | None = None
+    latest_agent_run_cleanup_status: str | None = None
+    latest_agent_run_input_metadata: dict[str, Any] = field(default_factory=dict)
     latest_agent_run_error: str | None = None
     latest_agent_run_trace_events: list[str] = field(default_factory=list)
     user_memory_text: str = ""

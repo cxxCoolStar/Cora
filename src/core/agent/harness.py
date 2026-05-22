@@ -12,6 +12,16 @@ from core.agent.loop import LoopResult
 from core.agent.policy_profiles import get_harness_policy_profile
 from core.agent.run_records import AgentRunRecordRepository
 from core.agent.runtime_state import ConversationRuntimeState
+from core.agent.tool_policy import ToolPolicyDecision
+from core.agent.tool_policy_engine import (
+    ToolPolicyEngine,
+    effective_allowed_tool_names,
+    effective_denied_tool_names,
+    effective_max_tool_calls,
+    normalize_tool_risk,
+    should_expose_tool,
+)
+from core.schemas.tool_policy import ToolPolicyContext
 from core.schemas.message import Message
 from core.schemas.tool import ToolResult
 from core.schemas.harness import HarnessRunInput, HarnessTraceEventType, RunBudget, RunTraceEvent
@@ -61,8 +71,7 @@ class DefaultAgentHarness:
         )
         try:
             with self._tool_policy_guard(run_input=run_input):
-                with self._tool_call_budget(run_input=run_input):
-                    loop_result = await self._run_with_timeout(run_input=run_input)
+                loop_result = await self._run_with_timeout(run_input=run_input)
             self._mark_run_completed(run_input=run_input, loop_result=loop_result)
             return loop_result
         except TimeoutError:
@@ -120,8 +129,8 @@ class DefaultAgentHarness:
                 "budget_max_steps": self.runner.loop.max_steps,
                 "budget_timeout_seconds": run_input.budget.timeout_seconds,
                 "budget_max_tool_calls": run_input.budget.max_tool_calls,
-                "budget_allowed_tool_names": self._effective_allowed_tool_names(run_input.budget),
-                "budget_denied_tool_names": self._effective_denied_tool_names(run_input.budget),
+                "budget_allowed_tool_names": sorted(effective_allowed_tool_names(run_input.budget)),
+                "budget_denied_tool_names": sorted(effective_denied_tool_names(run_input.budget)),
             },
         )
         self._emit_tool_policy(
@@ -219,6 +228,8 @@ class DefaultAgentHarness:
                 "disposition": loop_result.disposition,
                 "tool_trace_count": len(loop_result.tool_trace),
                 "artifact_count": len(loop_result.artifacts),
+                "failure_category": self._failure_category_for_loop_result(loop_result),
+                "cleanup_status": self._cleanup_status_for_trace(),
             },
         )
 
@@ -229,7 +240,11 @@ class DefaultAgentHarness:
             run_id=run_input.run_id,
             error=f"{type(error).__name__}: {error}",
             trace_events=list(self.trace_events),
-            metadata={"harness_id": self.id},
+            metadata={
+                "harness_id": self.id,
+                "failure_category": "infrastructure_failure",
+                "cleanup_status": self._cleanup_status_for_trace(),
+            },
         )
 
     def _emit(
@@ -254,6 +269,7 @@ class DefaultAgentHarness:
     def _emit_tool_events(self, *, run_input: HarnessRunInput, loop_result: LoopResult) -> None:
         for index, execution in enumerate(loop_result.tool_trace, start=1):
             severity = "error" if execution.status == "failed" else "info"
+            policy_decision = dict(execution.metadata.get("policy_decision") or {})
             self._emit(
                 HarnessTraceEventType.TOOL_COMPLETED,
                 run_input=run_input,
@@ -267,22 +283,22 @@ class DefaultAgentHarness:
                     "status": execution.status,
                     "disposition": execution.disposition,
                     "artifact_count": len(execution.artifacts),
+                    "policy_decision": policy_decision,
                 },
             )
 
     def _apply_run_tool_policy(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
-        allowed_tool_names = set(self._effective_allowed_tool_names(run_input.budget))
-        denied_tool_names = set(self._effective_denied_tool_names(run_input.budget))
-        if not allowed_tool_names and not denied_tool_names:
+        if not (
+            effective_allowed_tool_names(run_input.budget)
+            or effective_denied_tool_names(run_input.budget)
+        ):
             return
         filtered_tool_specs = []
         for spec in prepared_turn.tool_specs:
             tool_name = str(getattr(spec, "name", "") or "").strip()
             if not tool_name:
                 continue
-            if allowed_tool_names and tool_name not in allowed_tool_names:
-                continue
-            if tool_name in denied_tool_names:
+            if not should_expose_tool(tool_name=tool_name, budget=run_input.budget):
                 continue
             filtered_tool_specs.append(spec)
         prepared_turn.tool_specs = filtered_tool_specs
@@ -297,8 +313,8 @@ class DefaultAgentHarness:
         policy = prepared_turn.execution_policy
         profile = get_harness_policy_profile(run_input.budget.policy_profile)
         allowed_tool_names = sorted(policy.allowed_tool_names or [])
-        run_allowed_tool_names = self._effective_allowed_tool_names(run_input.budget)
-        run_denied_tool_names = self._effective_denied_tool_names(run_input.budget)
+        run_allowed_tool_names = sorted(effective_allowed_tool_names(run_input.budget))
+        run_denied_tool_names = sorted(effective_denied_tool_names(run_input.budget))
         exposed_tool_names = sorted(prepared_turn.tool_names)
         filtered_tool_names = [
             name for name in original_tool_names
@@ -335,114 +351,99 @@ class DefaultAgentHarness:
         )
 
     @contextmanager
-    def _tool_call_budget(self, *, run_input: HarnessRunInput):
-        max_tool_calls = self._effective_max_tool_calls(run_input.budget)
-        if max_tool_calls is None:
-            yield
-            return
-        max_tool_calls = max(0, int(max_tool_calls))
+    def _tool_policy_guard(self, *, run_input: HarnessRunInput):
+        engine = ToolPolicyEngine()
         executor = self.runner.loop.tool_executor
         original_execute_tool_call = executor.execute_tool_call
+        tool_metadata = self._tool_metadata_by_name()
         counter = {"count": 0}
 
         async def guarded_execute_tool_call(inner_self, *, session_id, tool_call, runtime):
-            if counter["count"] >= max_tool_calls:
-                self._emit(
-                    HarnessTraceEventType.TOOL_DENIED,
-                    run_input=run_input,
-                    severity="warning",
-                    metadata={
-                        "harness_id": self.id,
-                        "phase": "policy",
-                        "reason": "max_tool_calls_exceeded",
-                        "max_tool_calls": max_tool_calls,
-                        "attempted_tool_name": tool_call.tool_name,
-                    },
-                )
-                return ToolResult(
-                    success=False,
-                    content=(
-                        f"Tool call budget exceeded after {max_tool_calls} allowed call(s). "
-                        f"`{tool_call.tool_name}` was not executed."
-                    ),
-                    status="failed",
-                    disposition="respond",
-                    action="policy_denied",
-                    error="max_tool_calls_exceeded",
-                    metadata={
-                        "policy_denied": True,
-                        "policy_reason": "max_tool_calls_exceeded",
-                        "max_tool_calls": max_tool_calls,
-                    },
-                )
-            counter["count"] += 1
-            return await original_execute_tool_call(
-                session_id=session_id,
-                tool_call=tool_call,
-                runtime=runtime,
-            )
-
-        executor.execute_tool_call = MethodType(guarded_execute_tool_call, executor)
-        try:
-            yield
-        finally:
-            executor.execute_tool_call = original_execute_tool_call
-
-    @contextmanager
-    def _tool_policy_guard(self, *, run_input: HarnessRunInput):
-        allowed_tool_names = set(self._effective_allowed_tool_names(run_input.budget))
-        denied_tool_names = set(self._effective_denied_tool_names(run_input.budget))
-        if not allowed_tool_names and not denied_tool_names:
-            yield
-            return
-        executor = self.runner.loop.tool_executor
-        original_execute_tool_call = executor.execute_tool_call
-
-        async def guarded_execute_tool_call(inner_self, *, session_id, tool_call, runtime):
             tool_name = str(tool_call.tool_name or "").strip()
-            denial_reason = None
-            if allowed_tool_names and tool_name not in allowed_tool_names:
-                denial_reason = "tool_not_allowed"
-            if tool_name in denied_tool_names:
-                denial_reason = "tool_denied"
-            if denial_reason is not None:
-                self._emit(
-                    HarnessTraceEventType.TOOL_DENIED,
-                    run_input=run_input,
-                    severity="warning",
-                    metadata={
-                        "harness_id": self.id,
-                        "phase": "policy",
-                        "reason": denial_reason,
-                        "attempted_tool_name": tool_name,
-                        "run_allowed_tool_names": sorted(allowed_tool_names),
-                        "run_denied_tool_names": sorted(denied_tool_names),
-                    },
+            meta = tool_metadata.get(tool_name, {})
+            policy = self.execution_policy
+            decision = engine.evaluate(
+                ToolPolicyContext(
+                    tool_name=tool_name,
+                    agent_role=run_input.agent_role,
+                    platform=str(run_input.metadata.get("platform") or "").strip() or None,
+                    policy_profile=run_input.budget.policy_profile,
+                    allowed_tool_names=effective_allowed_tool_names(run_input.budget),
+                    denied_tool_names=effective_denied_tool_names(run_input.budget),
+                    tool_risk=str(meta.get("risk") or "medium"),
+                    requires_confirmation=bool(meta.get("requires_confirmation")),
+                    requires_sandbox=bool(meta.get("requires_sandbox")),
+                    allowed_roles=frozenset(meta.get("allowed_roles") or ()),
+                    max_tool_calls=effective_max_tool_calls(run_input.budget),
+                    tool_calls_so_far=counter["count"],
+                    session_kind=policy.session_kind if policy is not None else None,
+                    background_execution=policy.background_execution if policy is not None else False,
                 )
-                return ToolResult(
-                    success=False,
-                    content=f"Tool `{tool_name}` is not allowed by this run's harness policy.",
-                    status="failed",
-                    disposition="respond",
-                    action="policy_denied",
-                    error=denial_reason,
-                    metadata={
-                        "policy_denied": True,
-                        "policy_reason": denial_reason,
-                        "attempted_tool_name": tool_name,
-                    },
-                )
-            return await original_execute_tool_call(
+            )
+            if decision.decision == "deny":
+                self._emit_tool_denied(run_input=run_input, tool_name=tool_name, decision=decision)
+                return self._policy_denied_tool_result(tool_name=tool_name, decision=decision)
+            counter["count"] += 1
+            result = await original_execute_tool_call(
                 session_id=session_id,
                 tool_call=tool_call,
                 runtime=runtime,
             )
+            result.metadata["policy_decision"] = decision.to_dict()
+            return result
 
         executor.execute_tool_call = MethodType(guarded_execute_tool_call, executor)
         try:
             yield
         finally:
             executor.execute_tool_call = original_execute_tool_call
+
+    def _emit_tool_denied(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        tool_name: str,
+        decision: ToolPolicyDecision,
+    ) -> None:
+        metadata: dict[str, object] = {
+            "harness_id": self.id,
+            "phase": "policy",
+            "reason": decision.reason,
+            "attempted_tool_name": tool_name,
+            "policy_decision": decision.to_dict(),
+            "run_allowed_tool_names": sorted(effective_allowed_tool_names(run_input.budget)),
+            "run_denied_tool_names": sorted(effective_denied_tool_names(run_input.budget)),
+        }
+        max_tool_calls = decision.audit_metadata.get("max_tool_calls")
+        if max_tool_calls is not None:
+            metadata["max_tool_calls"] = max_tool_calls
+        self._emit(
+            HarnessTraceEventType.TOOL_DENIED,
+            run_input=run_input,
+            severity="warning",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _policy_denied_tool_result(*, tool_name: str, decision: ToolPolicyDecision) -> ToolResult:
+        metadata: dict[str, object] = {
+            "policy_denied": True,
+            "policy_reason": decision.reason,
+            "attempted_tool_name": tool_name,
+            "policy_decision": decision.to_dict(),
+        }
+        max_tool_calls = decision.audit_metadata.get("max_tool_calls")
+        if max_tool_calls is not None:
+            metadata["max_tool_calls"] = max_tool_calls
+        return ToolResult(
+            success=False,
+            content=decision.safe_user_message,
+            status="failed",
+            disposition="respond",
+            action="policy_denied",
+            error=decision.reason,
+            metadata=metadata,
+        )
 
     @staticmethod
     def _resolved_max_steps(budget: RunBudget, *, fallback: int) -> int:
@@ -450,42 +451,35 @@ class DefaultAgentHarness:
             return max(1, int(fallback or 1))
         return max(1, int(budget.max_steps or 1))
 
-    @staticmethod
-    def _normalized_tool_names(values: list[str]) -> list[str]:
-        names: list[str] = []
-        for value in values:
-            name = str(value or "").strip()
-            if name and name not in names:
-                names.append(name)
-        return names
-
-    @classmethod
-    def _effective_allowed_tool_names(cls, budget: RunBudget) -> list[str]:
-        profile = get_harness_policy_profile(budget.policy_profile)
-        profile_names = list(profile.allowed_tool_names) if profile is not None else []
-        explicit_names = cls._normalized_tool_names(budget.allowed_tool_names)
-        if not profile_names:
-            return explicit_names
-        if not explicit_names:
-            return cls._normalized_tool_names(profile_names)
-        explicit_set = set(explicit_names)
-        return [name for name in cls._normalized_tool_names(profile_names) if name in explicit_set]
-
-    @classmethod
-    def _effective_denied_tool_names(cls, budget: RunBudget) -> list[str]:
-        profile = get_harness_policy_profile(budget.policy_profile)
-        names = list(profile.denied_tool_names) if profile is not None else []
-        names.extend(budget.denied_tool_names)
-        return cls._normalized_tool_names(names)
+    def _tool_metadata_by_name(self) -> dict[str, dict[str, object]]:
+        metadata_by_name: dict[str, dict[str, object]] = {}
+        for spec in self.runner.loop.tool_specs:
+            tool_name = str(getattr(spec, "name", "") or "").strip()
+            if not tool_name:
+                continue
+            allowed_roles = getattr(spec, "allowed_roles", None) or []
+            metadata_by_name[tool_name] = {
+                "risk": normalize_tool_risk(getattr(spec, "risk", None)),
+                "requires_confirmation": bool(getattr(spec, "requires_confirmation", False)),
+                "requires_sandbox": bool(getattr(spec, "requires_sandbox", False)),
+                "allowed_roles": tuple(str(role).strip() for role in allowed_roles if str(role).strip()),
+            }
+        return metadata_by_name
 
     @staticmethod
-    def _effective_max_tool_calls(budget: RunBudget) -> int | None:
-        profile = get_harness_policy_profile(budget.policy_profile)
-        if budget.max_tool_calls is not None:
-            return budget.max_tool_calls
-        if profile is not None:
-            return profile.max_tool_calls
+    def _failure_category_for_loop_result(loop_result: LoopResult) -> str | None:
+        if loop_result.exit_reason == "timeout":
+            return "timeout"
+        if any(trace.action == "policy_denied" for trace in loop_result.tool_trace):
+            return "permission_denied"
+        if loop_result.status == "failed":
+            return "tool_failure"
         return None
+
+    def _cleanup_status_for_trace(self) -> str:
+        if any(event.event_type == HarnessTraceEventType.CLEANUP_COMPLETED for event in self.trace_events):
+            return "completed"
+        return "skipped"
 
 
 def new_run_input(
@@ -498,9 +492,13 @@ def new_run_input(
     context_snapshot,
     budget: RunBudget | None = None,
     metadata: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    parent_run_id: str | None = None,
+    agent_role: str = "primary",
 ) -> HarnessRunInput:
+    run_id = f"run-{uuid4().hex}"
     return HarnessRunInput(
-        run_id=f"run-{uuid4().hex}",
+        run_id=run_id,
         session_id=session_id,
         source_message_id=source_message_id,
         user_text=user_text,
@@ -509,4 +507,7 @@ def new_run_input(
         context_snapshot=context_snapshot,
         budget=budget or RunBudget(),
         metadata=dict(metadata or {}),
+        trace_id=trace_id or run_id,
+        parent_run_id=parent_run_id,
+        agent_role=agent_role,
     )

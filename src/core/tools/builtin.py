@@ -27,6 +27,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_user_memory(invocation),
                 is_agent_stateful=True,
+                risk="medium",
             )
         )
     if active_registry.get("list_files") is None:
@@ -47,6 +48,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_list_files(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("search_files") is None:
@@ -70,6 +72,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_search_files(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("read_file") is None:
@@ -90,6 +93,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_read_file(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("write_file") is None:
@@ -109,6 +113,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                     "additionalProperties": False,
                 },
                 handler=lambda executor, invocation: executor._tool_write_file(invocation),
+                risk="medium",
             )
         )
     if active_registry.get("shell_exec") is None:
@@ -128,6 +133,10 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                     "additionalProperties": False,
                 },
                 handler=lambda executor, invocation: executor._tool_shell_exec(invocation),
+                risk="high",
+                allowed_roles=("primary",),
+                requires_confirmation=True,
+                requires_sandbox=True,
             )
         )
     if active_registry.get("web_search") is None:
@@ -147,6 +156,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_web_search(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("web_fetch") is None:
@@ -166,6 +176,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_web_fetch(invocation),
                 read_only=True,
+                risk="medium",
             )
         )
     if active_registry.get("search_sessions") is None:
@@ -185,6 +196,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_search_sessions(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("skills_list") is None:
@@ -202,6 +214,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_skills_list(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("skill_view") is None:
@@ -221,6 +234,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_skill_view(invocation),
                 read_only=True,
+                risk="low",
             )
         )
     if active_registry.get("skill_run") is None:
@@ -241,6 +255,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_skill_run(invocation),
                 is_agent_stateful=True,
+                risk="medium",
             )
         )
     if active_registry.get("scheduled_tasks") is None:
@@ -316,5 +331,7 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 },
                 handler=lambda executor, invocation: executor._tool_scheduled_tasks(invocation),
                 is_agent_stateful=True,
+                risk="high",
+                requires_confirmation=True,
             )
         )

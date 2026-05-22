@@ -1,0 +1,38 @@
+{
+  "id": "wechat_policy_denial",
+  "type": "harness",
+  "description": "WeChat turns should record policy denials through the harness.",
+  "tags": ["harness", "wechat", "policy"],
+  "steps": [
+    {
+      "label": "wechat shell denied",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-policy",
+        "external_event_id": "wx-eval-policy-1",
+        "text": "/tool shell_exec {\"command\":\"pwd\"}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["not allowed by this run's harness policy"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_failure_category": "permission_denied",
+          "latest_agent_run_cleanup_status": "completed",
+          "latest_agent_run_input_metadata_contains": {
+            "channel": "wechat"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.policy.applied",
+            "tool.denied",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

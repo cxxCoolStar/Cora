@@ -12,6 +12,12 @@ class ToolSpec(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any]
+    toolset: str | None = None
+    read_only: bool = False
+    risk: str = "medium"
+    allowed_roles: list[str] = Field(default_factory=list)
+    requires_confirmation: bool = False
+    requires_sandbox: bool = False
 
 
 class ToolCall(BaseModel):
