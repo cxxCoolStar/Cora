@@ -62,6 +62,7 @@ class EvalRuntime:
                 container.initialize()
                 self._configure_harness_tool_delay(container=container, setup=case.setup)
                 self._configure_harness_prepare_failure(container=container, setup=case.setup)
+                self._configure_planner_stub(container=container, setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
                 wechat_gateway = self._build_wechat_gateway(container=container)
@@ -94,6 +95,18 @@ class EvalRuntime:
                                     session_id=session.id,
                                     hitl_id=hitl_id,
                                     text=step.input.text or None,
+                                    run_budget=step.input.run_budget,
+                                    source_metadata=source_metadata or None,
+                                )
+                            )
+                        elif str(step.input.agent_role or "").strip() == "planner":
+                            source_metadata = {}
+                            if step.input.platform:
+                                source_metadata["platform"] = step.input.platform
+                            response = asyncio.run(
+                                container.clawbot_service.plan_turn(
+                                    session_id=session.id,
+                                    text=step.input.text,
                                     run_budget=step.input.run_budget,
                                     source_metadata=source_metadata or None,
                                 )
@@ -200,6 +213,13 @@ class EvalRuntime:
         container.tool_executor.execute_tool_call = delayed_execute_tool_call
 
     @staticmethod
+    def _configure_planner_stub(*, container, setup: EvalSetup) -> None:
+        mode = str(setup.planner_stub_mode or "").strip().lower()
+        if not mode:
+            return
+        os.environ["CORA_EVAL_PLANNER_STUB"] = mode
+
+    @staticmethod
     def _configure_harness_prepare_failure(*, container, setup: EvalSetup) -> None:
         message = setup.harness_prepare_failure_message
         if not message:
@@ -279,6 +299,7 @@ _OVERRIDDEN_ENV = {
     "CORA_USER_MEMORY_PATH",
     "CORA_FILE_TOOL_ROOT",
     "CORA_MODEL_PROVIDER",
+    "CORA_EVAL_PLANNER_STUB",
 }
 
 

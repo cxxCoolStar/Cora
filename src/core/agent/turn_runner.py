@@ -141,6 +141,7 @@ class AgentTurnRunner:
     ) -> AgentTurnResult:
         run_metadata_payload = dict(run_metadata or {})
         parent_run_id = str(run_metadata_payload.get("parent_run_id") or "").strip() or None
+        agent_role = str(run_metadata_payload.get("agent_role") or "primary").strip() or "primary"
         run_input = new_run_input(
             session_id=session_id,
             source_message_id=source_message_id,
@@ -151,6 +152,7 @@ class AgentTurnRunner:
             budget=run_budget,
             metadata=run_metadata_payload,
             parent_run_id=parent_run_id,
+            agent_role=agent_role,
         )
         harness = self.harness or DefaultAgentHarness(runner=self)
         loop_result = await harness.run(run_input=run_input)

@@ -12,6 +12,12 @@ from core.agent.execution_policy import ExecutionPolicy
 from core.agent.loop import LoopResult
 from core.agent.policy_profiles import get_harness_policy_profile
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
+from core.agent.plan_planner import (
+    PLANNER_AGENT_ROLE,
+    build_planner_user_text,
+    finalize_planner_run,
+    resolve_planner_validation_options,
+)
 from core.agent.sandbox_runtime import MUTATING_TOOLS_IN_SANDBOX, SandboxContext, SandboxWorkspaceManager
 from core.channels.wechat.hitl_commands import build_wechat_hitl_confirmation_message
 from core.agent.run_records import AgentRunRecordRepository
@@ -112,9 +118,15 @@ class DefaultAgentHarness:
         )
 
     async def _run_lifecycle(self, *, run_input: HarnessRunInput) -> LoopResult:
+        planner_user_text = run_input.user_text
+        if run_input.agent_role == PLANNER_AGENT_ROLE:
+            planner_user_text = build_planner_user_text(
+                user_text=run_input.user_text,
+                session_id=run_input.session_id,
+            )
         prepared_turn = self.runner.prepare_turn(
             session_id=run_input.session_id,
-            user_text=run_input.user_text,
+            user_text=planner_user_text,
             source_message_id=run_input.source_message_id,
             raw_text=run_input.raw_text,
             upload=run_input.upload,
@@ -162,6 +174,19 @@ class DefaultAgentHarness:
             },
         )
         loop_result = await self.runner._execute_turn_plan(plan)
+        if run_input.agent_role == PLANNER_AGENT_ROLE:
+            finalize_result = finalize_planner_run(
+                emit=self._emit,
+                run_input=run_input,
+                loop_result=loop_result,
+                validation_options=resolve_planner_validation_options(
+                    registered_tool_names=self._registered_tool_names(),
+                    platform=resolve_platform_name(
+                        run_input.metadata.get("platform") or run_input.metadata.get("channel")
+                    ),
+                ),
+            )
+            loop_result = finalize_result.loop_result
         self._emit(
             HarnessTraceEventType.RESOLVE_COMPLETED,
             run_input=run_input,
@@ -225,19 +250,23 @@ class DefaultAgentHarness:
     def _mark_run_completed(self, *, run_input: HarnessRunInput, loop_result: LoopResult) -> None:
         if self.run_record_repository is None:
             return
+        completion_metadata: dict[str, object] = {
+            "disposition": loop_result.disposition,
+            "tool_trace_count": len(loop_result.tool_trace),
+            "artifact_count": len(loop_result.artifacts),
+            "failure_category": self._failure_category_for_loop_result(loop_result),
+            "cleanup_status": self._cleanup_status_for_trace(),
+            "agent_role": run_input.agent_role,
+        }
+        if run_input.agent_role == PLANNER_AGENT_ROLE:
+            completion_metadata["planner_run"] = True
         self.run_record_repository.mark_completed(
             run_id=run_input.run_id,
             status=loop_result.status,
             outcome=loop_result.exit_reason,
             steps=loop_result.steps,
             trace_events=list(self.trace_events),
-            metadata={
-                "disposition": loop_result.disposition,
-                "tool_trace_count": len(loop_result.tool_trace),
-                "artifact_count": len(loop_result.artifacts),
-                "failure_category": self._failure_category_for_loop_result(loop_result),
-                "cleanup_status": self._cleanup_status_for_trace(),
-            },
+            metadata=completion_metadata,
         )
 
     def _mark_run_failed(self, *, run_input: HarnessRunInput, error: Exception) -> None:
@@ -618,6 +647,13 @@ class DefaultAgentHarness:
             return max(1, int(fallback or 1))
         return max(1, int(budget.max_steps or 1))
 
+    def _registered_tool_names(self) -> frozenset[str]:
+        return frozenset(
+            str(getattr(spec, "name", "") or "").strip()
+            for spec in self.runner.loop.tool_specs
+            if str(getattr(spec, "name", "") or "").strip()
+        )
+
     def _tool_metadata_by_name(self) -> dict[str, dict[str, object]]:
         metadata_by_name: dict[str, dict[str, object]] = {}
         for spec in self.runner.loop.tool_specs:
@@ -636,6 +672,8 @@ class DefaultAgentHarness:
     def _failure_category_for_loop_result(self, loop_result: LoopResult) -> str | None:
         if loop_result.exit_reason == "timeout":
             return "timeout"
+        if loop_result.exit_reason in {"plan_validation_failed"}:
+            return "plan_validation_failed"
         if any(trace.action == "policy_ask" for trace in loop_result.tool_trace):
             return "needs_confirmation"
         if any(trace.action == "policy_denied" for trace in loop_result.tool_trace):

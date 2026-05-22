@@ -1,0 +1,38 @@
+{
+  "id": "planner_valid_plan_records_trace",
+  "type": "harness",
+  "description": "Planner runs should parse model JSON, validate it, and emit plan trace events.",
+  "tags": ["harness", "planner", "planning"],
+  "setup": {
+    "planner_stub_mode": "valid"
+  },
+  "steps": [
+    {
+      "label": "planner validates stub plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "List scheduled tasks for review"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["Plan `", "validated", "scheduled_tasks"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "plan_validated",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "planner"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "plan.created",
+            "plan.validation.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

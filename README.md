@@ -1,6 +1,6 @@
 # Cora
 
-`Cora` 是我为微信文件传输助手这个真实使用场景写的一个 agent。
+`Cora` 是我为微信文件传输助手这个真实使用场景写的一个 agent，也是个人 **agent 开发练手项目**（长期目标与阶段对照见 [docs/project-goals.md](docs/project-goals.md)）。
 
 我在长期使用微信文件传输助手时，反复遇到两个痛点：
 

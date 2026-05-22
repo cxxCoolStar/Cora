@@ -96,6 +96,7 @@ class EvalInput:
     platform: str | None = None
     hitl_action: str | None = None
     hitl_id: str | None = None
+    agent_role: str | None = None
     external_user_id: str | None = None
     external_event_id: str | None = None
     run_budget: RunBudget = field(default_factory=RunBudget)
@@ -112,6 +113,7 @@ class EvalInput:
             platform=_maybe_str(payload.get("platform")),
             hitl_action=hitl_action,
             hitl_id=_maybe_str(payload.get("hitl_id")),
+            agent_role=_maybe_str(payload.get("agent_role")),
             external_user_id=_maybe_str(payload.get("external_user_id")),
             external_event_id=_maybe_str(payload.get("external_event_id")),
             run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),
@@ -183,6 +185,7 @@ class EvalSetup:
     workspace_files: dict[str, str] = field(default_factory=dict)
     harness_tool_delay_seconds: float | None = None
     harness_prepare_failure_message: str | None = None
+    planner_stub_mode: str | None = None
     web_search_results: dict[str, list[EvalWebSearchHit]] = field(default_factory=dict)
     web_pages: dict[str, EvalWebPage] = field(default_factory=dict)
 
@@ -194,6 +197,7 @@ class EvalSetup:
             workspace_files=_string_map(payload.get("workspace_files")),
             harness_tool_delay_seconds=_maybe_float(payload.get("harness_tool_delay_seconds")),
             harness_prepare_failure_message=_maybe_str(payload.get("harness_prepare_failure_message")),
+            planner_stub_mode=_maybe_str(payload.get("planner_stub_mode")),
             web_search_results=_web_search_results_map(payload.get("web_search_results")),
             web_pages=_web_pages_map(payload.get("web_pages")),
         )

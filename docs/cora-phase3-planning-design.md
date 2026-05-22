@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：PR-3a 已落地（schema + validator）；PR-3b/3c 待实现。前置：Phase 2 + harness 14/14。
+> 状态：PR-3a/3b 已落地（schema + validator + Planner harness）；PR-3c 待实现。前置：Phase 2 + harness 16/16。
 
 ## 1. 目标
 
@@ -132,11 +132,13 @@ v1 建议 **显式 + 启发式** 并存：
 - `planner_readonly` harness profile（与 planner 只读 tool 集对齐）
 - 测试：`tests/test_plan_validator.py`（8 cases）
 
-### PR-3b：Planner harness 步
+### PR-3b：Planner harness 步 — **已完成**
 
-- `agent_role=planner` + readonly profile
-- Dev model stub 返回固定 plan JSON（eval）
-- Trace：`plan.created`、`plan.validation_completed`
+- `agent_role=planner` + `planner_readonly` profile（`plan_planner.py`、`harness.py`）
+- `ClawBotService.plan_turn()`；Dev model `/plan` + `[Planner mode]` stub（`CORA_EVAL_PLANNER_STUB`）
+- Trace：`plan.created`、`plan.validation.completed` / `plan.validation.failed`
+- Eval：`planner_valid_plan_records_trace`、`plan_validation_rejects_unknown_tool`
+- 测试：`tests/test_plan_planner.py`
 
 ### PR-3c：顺序 Worker dispatch
 
@@ -156,7 +158,7 @@ v1 建议 **显式 + 启发式** 并存：
 
 ## 11. 验收标准
 
-- `.\scripts\run_harness_evals.cmd` 在 Phase 3 slice 合并后仍全绿（只增 case，不破坏既有 14 case）
+- `.\scripts\run_harness_evals.cmd` 在 Phase 3 slice 合并后仍全绿（只增 case，不破坏既有 harness case）
 - Planner 步 **零次** mutating tool 调用（trace 审计）
 - Worker 步 tool 仅来自 `TaskSpec.tool_names` 交集
 

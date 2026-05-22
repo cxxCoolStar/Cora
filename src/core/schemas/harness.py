@@ -44,6 +44,9 @@ class HarnessTraceEventType(StrEnum):
     TOOL_COMPLETED = "tool.completed"
     TOOL_DENIED = "tool.denied"
     CLEANUP_COMPLETED = "cleanup.completed"
+    PLAN_CREATED = "plan.created"
+    PLAN_VALIDATION_COMPLETED = "plan.validation.completed"
+    PLAN_VALIDATION_FAILED = "plan.validation.failed"
     BUDGET_TIMEOUT = "budget.timeout"
     RUN_FAILED = "run.failed"
 

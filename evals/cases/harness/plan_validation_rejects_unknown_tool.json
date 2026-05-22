@@ -1,0 +1,38 @@
+{
+  "id": "plan_validation_rejects_unknown_tool",
+  "type": "harness",
+  "description": "Invalid planner JSON with unknown tools should fail validation without worker execution.",
+  "tags": ["harness", "planner", "planning"],
+  "setup": {
+    "planner_stub_mode": "invalid"
+  },
+  "steps": [
+    {
+      "label": "planner rejects unknown tool",
+      "input": {
+        "agent_role": "planner",
+        "text": "Plan work that needs a fake tool"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "clarify",
+        "reply_contains_all": ["invalid plan", "not_a_registered_tool"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "failed",
+          "latest_agent_run_outcome": "plan_validation_failed",
+          "latest_agent_run_failure_category": "plan_validation_failed",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "planner"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "plan.created",
+            "plan.validation.failed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

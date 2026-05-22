@@ -9,6 +9,7 @@ from fastapi import UploadFile
 
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.harness import DefaultAgentHarness
+from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
@@ -484,6 +485,24 @@ class ClawBotService:
             text=text,
             source_metadata=source_metadata,
             run_budget=run_budget,
+        )
+        return self._session_shell.to_turn_response(outcome=outcome)
+
+    async def plan_turn(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        source_metadata: dict[str, Any] | None = None,
+        run_budget: RunBudget | None = None,
+    ) -> TurnResponse:
+        metadata = dict(source_metadata or {})
+        metadata["agent_role"] = PLANNER_AGENT_ROLE
+        outcome = await self.reply_outcome(
+            session_id=session_id,
+            text=text if str(text or "").strip().startswith("/plan") else f"/plan {text}".strip(),
+            source_metadata=metadata,
+            run_budget=run_budget or planner_run_budget(),
         )
         return self._session_shell.to_turn_response(outcome=outcome)
 

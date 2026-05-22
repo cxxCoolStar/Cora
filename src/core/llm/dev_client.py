@@ -36,6 +36,10 @@ class DevelopmentModelClient(ModelClient):
             return ModelResponse(assistant_text="How can I help?")
 
         text = latest_user.content.strip()
+        if text.startswith("/plan") or "[Planner mode]" in text:
+            goal_line = text.split("\n", 1)[0].strip()
+            return ModelResponse(assistant_text=self._planner_plan_json(f"/plan {goal_line}"))
+
         if text.startswith("/tool "):
             _, _, remainder = text.partition("/tool ")
             name, _, payload = remainder.partition(" ")
@@ -53,3 +57,42 @@ class DevelopmentModelClient(ModelClient):
             )
 
         return ModelResponse(assistant_text=f"You said: {text}")
+
+    @classmethod
+    def _planner_plan_json(cls, user_text: str) -> str:
+        import os
+
+        goal = user_text[5:].strip() if user_text.startswith("/plan") else user_text
+        goal = goal or "Execute the requested work."
+        stub_mode = str(os.environ.get("CORA_EVAL_PLANNER_STUB") or "valid").strip().lower()
+        if stub_mode == "invalid":
+            payload = {
+                "plan_id": "plan-dev-invalid",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "title": "Broken step",
+                        "tool_names": ["not_a_registered_tool"],
+                        "instruction": "This tool does not exist.",
+                    }
+                ],
+            }
+        else:
+            payload = {
+                "plan_id": "plan-dev-valid",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "title": "List scheduled tasks",
+                        "tool_names": ["scheduled_tasks"],
+                        "instruction": "List all scheduled tasks.",
+                    }
+                ],
+            }
+        return json.dumps(payload, ensure_ascii=False)
