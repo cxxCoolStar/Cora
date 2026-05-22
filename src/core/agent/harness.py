@@ -19,6 +19,7 @@ from core.agent.tool_policy import ToolPolicyDecision
 from core.agent.tool_policy_engine import (
     ToolPolicyEngine,
     effective_allowed_tool_names,
+    effective_approved_tool_names,
     effective_denied_tool_names,
     effective_max_tool_calls,
     normalize_tool_risk,
@@ -388,6 +389,7 @@ class DefaultAgentHarness:
                     tool_calls_so_far=counter["count"],
                     session_kind=policy.session_kind if policy is not None else None,
                     background_execution=policy.background_execution if policy is not None else False,
+                    approved_tool_names=effective_approved_tool_names(run_input.budget),
                 )
             )
             if decision.decision == "deny":
@@ -398,6 +400,7 @@ class DefaultAgentHarness:
                     run_input=run_input,
                     tool_name=tool_name,
                     decision=decision,
+                    tool_call=tool_call,
                 )
             if decision.decision == "sandbox":
                 runtime = self._apply_sandbox_runtime(
@@ -406,6 +409,11 @@ class DefaultAgentHarness:
                     decision=decision,
                     runtime=runtime,
                     sandbox_manager=sandbox_state["manager"],
+                )
+            if tool_name in effective_approved_tool_names(run_input.budget):
+                self._emit_hitl_approved(
+                    run_input=run_input,
+                    tool_name=tool_name,
                 )
             counter["count"] += 1
             result = await original_execute_tool_call(
@@ -502,13 +510,35 @@ class DefaultAgentHarness:
             },
         )
 
+    def _emit_hitl_approved(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        tool_name: str,
+    ) -> None:
+        self._emit(
+            HarnessTraceEventType.TOOL_HITL_APPROVED,
+            run_input=run_input,
+            metadata={
+                "harness_id": self.id,
+                "phase": "policy",
+                "attempted_tool_name": tool_name,
+                "resume_hitl_id": run_input.metadata.get("resume_hitl_id"),
+                "parent_run_id": run_input.parent_run_id,
+            },
+        )
+
     def _policy_ask_tool_result(
         self,
         *,
         run_input: HarnessRunInput,
         tool_name: str,
         decision: ToolPolicyDecision,
+        tool_call: Any,
     ) -> ToolResult:
+        platform = resolve_platform_name(
+            run_input.metadata.get("platform") or run_input.metadata.get("channel")
+        )
         hitl_request = self._resolve_hitl_store().create_pending(
             run_id=run_input.run_id,
             session_id=run_input.session_id,
@@ -516,7 +546,11 @@ class DefaultAgentHarness:
             reason=decision.reason,
             policy_profile=run_input.budget.policy_profile,
             tool_risk=decision.risk,
-            metadata={"policy_decision": decision.to_dict()},
+            tool_arguments=dict(getattr(tool_call, "arguments", None) or {}),
+            metadata={
+                "policy_decision": decision.to_dict(),
+                "platform": platform,
+            },
         )
         self._emit(
             HarnessTraceEventType.TOOL_REQUESTED,

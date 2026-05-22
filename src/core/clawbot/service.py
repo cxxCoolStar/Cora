@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from fastapi import UploadFile
 
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.harness import DefaultAgentHarness
+from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
 from core.agent.context_budget import ContextBudgetManager
@@ -85,6 +87,7 @@ class ClawBotService:
         wechat_harness_policy_profile: str | None = "wechat_safe",
         job_harness_policy_profile: str | None = "background_readonly",
         agent_run_record_repository: AgentRunRecordRepository | None = None,
+        hitl_store: HitlStore | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -185,9 +188,11 @@ class ClawBotService:
             execution_policy_resolver=self.execution_policy_resolver,
         )
         self.agent_run_record_repository = agent_run_record_repository
+        self.hitl_store = hitl_store or InMemoryHitlStore()
         self._agent_turn_runner.harness = DefaultAgentHarness(
             runner=self._agent_turn_runner,
             run_record_repository=agent_run_record_repository,
+            hitl_store=self.hitl_store,
         )
 
     def create_session(
@@ -301,7 +306,71 @@ class ClawBotService:
             max_tool_calls=budget.max_tool_calls,
             allowed_tool_names=list(budget.allowed_tool_names),
             denied_tool_names=list(budget.denied_tool_names),
+            approved_tool_names=list(budget.approved_tool_names),
         )
+
+    def _merge_resume_run_budget(
+        self,
+        *,
+        run_budget: RunBudget | None,
+        approved_tool_name: str,
+    ) -> RunBudget:
+        budget = run_budget or RunBudget()
+        approved_names = list(budget.approved_tool_names)
+        if approved_tool_name not in approved_names:
+            approved_names.append(approved_tool_name)
+        return RunBudget(
+            policy_profile=budget.policy_profile,
+            max_steps=budget.max_steps,
+            timeout_seconds=budget.timeout_seconds,
+            max_tool_calls=budget.max_tool_calls,
+            allowed_tool_names=list(budget.allowed_tool_names),
+            denied_tool_names=list(budget.denied_tool_names),
+            approved_tool_names=approved_names,
+        )
+
+    async def approve_hitl_and_resume(
+        self,
+        *,
+        session_id: str,
+        hitl_id: str,
+        text: str | None = None,
+        run_budget: RunBudget | None = None,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> TurnResponse:
+        request = self.hitl_store.approve(hitl_id=hitl_id)
+        if request.session_id != session_id:
+            raise ValueError(
+                f"HITL request {hitl_id} belongs to session {request.session_id}, not {session_id}"
+            )
+        resume_text = text
+        if not resume_text:
+            payload = json.dumps(request.tool_arguments, ensure_ascii=False)
+            resume_text = f"/tool {request.tool_name} {payload}"
+        metadata = dict(source_metadata or {})
+        metadata.setdefault(
+            "platform",
+            request.metadata.get("platform"),
+        )
+        metadata["resume_hitl_id"] = hitl_id
+        metadata["parent_run_id"] = request.run_id
+        return await self.reply(
+            session_id=session_id,
+            text=resume_text,
+            source_metadata=metadata,
+            run_budget=self._merge_resume_run_budget(
+                run_budget=run_budget,
+                approved_tool_name=request.tool_name,
+            ),
+        )
+
+    def reject_hitl(self, *, session_id: str, hitl_id: str):
+        request = self.hitl_store.reject(hitl_id=hitl_id)
+        if request.session_id != session_id:
+            raise ValueError(
+                f"HITL request {hitl_id} belongs to session {request.session_id}, not {session_id}"
+            )
+        return request
 
     def _default_harness_policy_profile(
         self,

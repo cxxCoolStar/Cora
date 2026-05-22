@@ -1222,6 +1222,120 @@ async def test_default_agent_harness_applies_sandbox_before_tool_execution(tmp_p
     assert not (cora_home / "sandboxes" / run_input.run_id).exists()
 
 
+def test_sql_hitl_store_persists_and_resolves(tmp_path) -> None:
+    from core.storage.db import DatabaseManager
+    from core.storage.repositories import SqlHitlStore
+
+    database = DatabaseManager(f"sqlite:///{tmp_path / 'hitl.db'}")
+    database.create_all()
+    store = SqlHitlStore(database)
+    request = store.create_pending(
+        run_id="run-1",
+        session_id="session-1",
+        tool_name="scheduled_tasks",
+        reason="confirmation_required",
+        tool_arguments={"action": "list"},
+    )
+    assert request.status == "pending"
+    loaded = store.get(hitl_id=request.hitl_id)
+    assert loaded is not None
+    assert loaded.tool_arguments == {"action": "list"}
+    approved = store.approve(hitl_id=request.hitl_id)
+    assert approved.status == "approved"
+    assert approved.resolved_at is not None
+    with pytest.raises(ValueError):
+        store.approve(hitl_id=request.hitl_id)
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_executes_after_hitl_approval() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    hitl_store = InMemoryHitlStore()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="scheduled_tasks", arguments={"action": "list"})],
+            ),
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="scheduled_tasks", arguments={"action": "list"})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = StubExecutor(
+        results=[
+            ToolResult(success=True, content="tasks listed", action="automation"),
+        ]
+    )
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(
+                name="scheduled_tasks",
+                description="scheduled tasks",
+                input_schema={},
+                risk="high",
+                requires_confirmation=True,
+            ),
+        ],
+        max_steps=2,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(
+        runner=runner,
+        run_record_repository=repository,
+        hitl_store=hitl_store,
+    )
+    ask_run = new_run_input(
+        session_id="session-hitl-resume",
+        source_message_id="msg-hitl-resume-1",
+        user_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        raw_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(policy_profile="coding_full"),
+        metadata={"platform": "api"},
+    )
+    ask_result = await harness.run(run_input=ask_run)
+    assert ask_result.tool_trace[0].action == "policy_ask"
+    pending = hitl_store.get(hitl_id=ask_result.tool_trace[0].metadata["hitl_id"])
+    assert pending is not None
+    hitl_store.approve(hitl_id=pending.hitl_id)
+    resume_run = new_run_input(
+        session_id="session-hitl-resume",
+        source_message_id="msg-hitl-resume-2",
+        user_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        raw_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(
+            policy_profile="coding_full",
+            approved_tool_names=["scheduled_tasks"],
+        ),
+        metadata={"platform": "api", "resume_hitl_id": pending.hitl_id, "parent_run_id": ask_run.run_id},
+        parent_run_id=ask_run.run_id,
+    )
+    resume_result = await harness.run(run_input=resume_run)
+    assert resume_result.tool_trace
+    assert resume_result.tool_trace[0].action != "policy_ask"
+    assert len(executor.results) == 0
+    resume_record = repository.get(run_id=resume_run.run_id)
+    assert "tool.hitl.approved" in [event.event_type for event in resume_record.trace_events]
+
+
 @pytest.mark.anyio
 async def test_default_agent_harness_asks_for_confirmation_before_execution() -> None:
     repository = InMemoryAgentRunRecordRepository()

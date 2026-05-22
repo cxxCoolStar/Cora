@@ -6,8 +6,10 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.storage.db import DatabaseManager
+from core.schemas.hitl import HitlRequest
 from core.storage.models import (
     AgentRunRecordModel,
+    HitlRequestModel,
     ChannelEventRecord,
     ChannelSessionMapRecord,
     PendingStateRecord,
@@ -1266,3 +1268,84 @@ class ScheduledTaskRepository:
             session.commit()
             session.refresh(record)
             return record
+
+
+class SqlHitlStore:
+    def __init__(self, database: DatabaseManager) -> None:
+        self.database = database
+
+    def create_pending(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_name: str,
+        reason: str,
+        policy_profile: str | None = None,
+        tool_risk: str = "medium",
+        tool_arguments: dict[str, Any] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> HitlRequest:
+        from uuid import uuid4
+
+        hitl_id = f"hitl-{uuid4().hex}"
+        with self.database.session() as session:
+            record = HitlRequestModel(
+                hitl_id=hitl_id,
+                run_id=run_id,
+                session_id=session_id,
+                tool_name=tool_name,
+                status="pending",
+                reason=reason,
+                policy_profile=policy_profile,
+                tool_risk=tool_risk,
+                tool_arguments_json=dict(tool_arguments or {}),
+                metadata_json=dict(metadata or {}),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return self._to_hitl_request(record)
+
+    def get(self, *, hitl_id: str) -> HitlRequest | None:
+        with self.database.session() as session:
+            record = session.get(HitlRequestModel, hitl_id)
+            if record is None:
+                return None
+            return self._to_hitl_request(record)
+
+    def approve(self, *, hitl_id: str) -> HitlRequest:
+        return self._resolve(hitl_id=hitl_id, status="approved")
+
+    def reject(self, *, hitl_id: str) -> HitlRequest:
+        return self._resolve(hitl_id=hitl_id, status="rejected")
+
+    def _resolve(self, *, hitl_id: str, status: str) -> HitlRequest:
+        with self.database.session() as session:
+            record = session.get(HitlRequestModel, hitl_id)
+            if record is None:
+                raise KeyError(f"HITL request not found: {hitl_id}")
+            if record.status != "pending":
+                raise ValueError(f"HITL request is not pending: {hitl_id}")
+            record.status = status
+            record.resolved_at = utc_now()
+            session.commit()
+            session.refresh(record)
+            return self._to_hitl_request(record)
+
+    @staticmethod
+    def _to_hitl_request(record: HitlRequestModel) -> HitlRequest:
+        return HitlRequest(
+            hitl_id=record.hitl_id,
+            run_id=record.run_id,
+            session_id=record.session_id,
+            tool_name=record.tool_name,
+            status=record.status,  # type: ignore[arg-type]
+            reason=record.reason,
+            policy_profile=record.policy_profile,
+            tool_risk=record.tool_risk,
+            tool_arguments=dict(record.tool_arguments_json or {}),
+            created_at=record.created_at,
+            resolved_at=record.resolved_at,
+            metadata=dict(record.metadata_json or {}),
+        )

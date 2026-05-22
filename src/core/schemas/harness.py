@@ -18,6 +18,7 @@ class RunBudget:
     max_tool_calls: int | None = None
     allowed_tool_names: list[str] = field(default_factory=list)
     denied_tool_names: list[str] = field(default_factory=list)
+    approved_tool_names: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -27,6 +28,7 @@ class RunBudget:
             "max_tool_calls": self.max_tool_calls,
             "allowed_tool_names": list(self.allowed_tool_names),
             "denied_tool_names": list(self.denied_tool_names),
+            "approved_tool_names": list(self.approved_tool_names),
         }
 
 
@@ -37,6 +39,7 @@ class HarnessTraceEventType(StrEnum):
     RESOLVE_COMPLETED = "resolve.completed"
     TOOL_POLICY_APPLIED = "tool.policy.applied"
     TOOL_REQUESTED = "tool.requested"
+    TOOL_HITL_APPROVED = "tool.hitl.approved"
     TOOL_SANDBOX_APPLIED = "tool.sandbox.applied"
     TOOL_COMPLETED = "tool.completed"
     TOOL_DENIED = "tool.denied"

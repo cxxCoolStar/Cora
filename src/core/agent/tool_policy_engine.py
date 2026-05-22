@@ -45,6 +45,10 @@ def effective_allowed_tool_names(budget: RunBudget) -> frozenset[str]:
     )
 
 
+def effective_approved_tool_names(budget: RunBudget) -> frozenset[str]:
+    return frozenset(normalize_tool_names(budget.approved_tool_names))
+
+
 def effective_denied_tool_names(budget: RunBudget) -> frozenset[str]:
     profile = get_harness_policy_profile(budget.policy_profile)
     names = list(profile.denied_tool_names) if profile is not None else []
@@ -214,6 +218,7 @@ class ToolPolicyEngine:
 __all__ = [
     "ToolPolicyEngine",
     "effective_allowed_tool_names",
+    "effective_approved_tool_names",
     "effective_denied_tool_names",
     "effective_max_tool_calls",
     "has_runtime_tool_governance",

@@ -91,9 +91,11 @@ class EvalExpectation:
 
 @dataclass(slots=True)
 class EvalInput:
-    text: str
+    text: str = ""
     channel: str | None = None
     platform: str | None = None
+    hitl_action: str | None = None
+    hitl_id: str | None = None
     external_user_id: str | None = None
     external_event_id: str | None = None
     run_budget: RunBudget = field(default_factory=RunBudget)
@@ -101,12 +103,15 @@ class EvalInput:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvalInput":
         text = str(payload.get("text") or "").strip()
-        if not text:
-            raise ValueError("Eval step input.text is required.")
+        hitl_action = _maybe_str(payload.get("hitl_action"))
+        if not text and not hitl_action:
+            raise ValueError("Eval step input.text or input.hitl_action is required.")
         return cls(
             text=text,
             channel=_maybe_str(payload.get("channel")),
             platform=_maybe_str(payload.get("platform")),
+            hitl_action=hitl_action,
+            hitl_id=_maybe_str(payload.get("hitl_id")),
             external_user_id=_maybe_str(payload.get("external_user_id")),
             external_event_id=_maybe_str(payload.get("external_event_id")),
             run_budget=_run_budget(payload.get("run_budget") or payload.get("budget")),
@@ -307,6 +312,7 @@ def _run_budget(value: Any) -> RunBudget:
         max_tool_calls=_maybe_int(value.get("max_tool_calls")),
         allowed_tool_names=_string_list(value.get("allowed_tool_names")),
         denied_tool_names=_string_list(value.get("denied_tool_names")),
+        approved_tool_names=_string_list(value.get("approved_tool_names")),
     )
 
 

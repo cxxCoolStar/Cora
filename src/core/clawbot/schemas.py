@@ -67,6 +67,26 @@ class AgentRunSummaryResponse(BaseModel):
     completed_at: datetime | None = None
 
 
+class HitlRequestResponse(BaseModel):
+    hitl_id: str
+    run_id: str
+    session_id: str
+    tool_name: str
+    status: str
+    reason: str
+    policy_profile: str | None = None
+    tool_risk: str = "medium"
+    tool_arguments: dict = Field(default_factory=dict)
+    created_at: str
+    resolved_at: str | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class HitlActionResponse(BaseModel):
+    hitl: HitlRequestResponse
+    turn: TurnResponse
+
+
 class AgentRunDetailResponse(AgentRunSummaryResponse):
     budget: dict = Field(default_factory=dict)
     input_metadata: dict = Field(default_factory=dict)

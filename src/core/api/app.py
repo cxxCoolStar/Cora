@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from core.api.routes import ingest, sessions
+from core.api.routes import hitl, ingest, sessions
 from core.clawbot.dependencies import get_clawbot_container
 
 
@@ -20,6 +20,7 @@ def create_app() -> FastAPI:
     app.state.container = container
     app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
     app.include_router(ingest.router, prefix="/sessions", tags=["ingest"])
+    app.include_router(hitl.router, prefix="/sessions", tags=["hitl"])
     return app
 
 

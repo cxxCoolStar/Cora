@@ -81,8 +81,25 @@ class EvalRuntime:
                                 )
                             observed_session_id = wechat_result.session_id
                             response = _turn_response_from_wechat_result(wechat_result)
-                        else:
+                        elif step.input.hitl_action == "approve":
+                            hitl_id = step.input.hitl_id or _latest_pending_hitl_id(
+                                database=container.database,
+                                session_id=session.id,
+                            )
                             source_metadata: dict[str, str] = {}
+                            if step.input.platform:
+                                source_metadata["platform"] = step.input.platform
+                            response = asyncio.run(
+                                container.clawbot_service.approve_hitl_and_resume(
+                                    session_id=session.id,
+                                    hitl_id=hitl_id,
+                                    text=step.input.text or None,
+                                    run_budget=step.input.run_budget,
+                                    source_metadata=source_metadata or None,
+                                )
+                            )
+                        else:
+                            source_metadata = {}
                             if step.input.platform:
                                 source_metadata["platform"] = step.input.platform
                             response = asyncio.run(
@@ -306,7 +323,22 @@ def _run_budget_has_values(budget) -> bool:
         or getattr(budget, "max_tool_calls", None) is not None
         or list(getattr(budget, "allowed_tool_names", []) or [])
         or list(getattr(budget, "denied_tool_names", []) or [])
+        or list(getattr(budget, "approved_tool_names", []) or [])
     )
+
+
+def _latest_pending_hitl_id(*, database, session_id: str) -> str:
+    agent_run_repository = SqlAgentRunRecordRepository(database)
+    agent_runs = agent_run_repository.list_by_session(session_id=session_id)
+    if not agent_runs:
+        raise ValueError(f"No agent runs found for session {session_id}")
+    for event in agent_runs[0].trace_events:
+        if event.event_type != "tool.requested":
+            continue
+        hitl_id = str(event.metadata.get("hitl_id") or "").strip()
+        if hitl_id:
+            return hitl_id
+    raise ValueError(f"No pending HITL id found in latest agent run for session {session_id}")
 
 
 def observe_state(*, database, session_id: str, user_memory_path: Path, workspace_root: Path) -> EvalObservedState:

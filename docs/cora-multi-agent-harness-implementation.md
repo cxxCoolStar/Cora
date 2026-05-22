@@ -832,8 +832,10 @@ Phase 2 current status:
   mutating tools; harness emits `tool.sandbox.applied` and injects
   `sandbox_workspace_root` into runtime context; harness eval
   `wechat_write_file_runs_in_sandbox` passes.
-- PR-2 still pending: durable HITL approval flow and approval API for
-  WeChat/HTTP shells.
+- PR-2b (HITL durable + resume) landed: `SqlHitlStore`, approve/reject API,
+  `approve_hitl_and_resume`, `RunBudget.approved_tool_names`, trace
+  `tool.hitl.approved`; harness eval `hitl_approve_and_resume` passes.
+- Still pending: WeChat-native approval UX (buttons/commands wiring to API).
 
 ### Phase 3: Structured Planning Without Parallelism
 
@@ -891,8 +893,8 @@ Phase 1 is considered complete when this command passes:
 The expected baseline is:
 
 ```text
-Cases: 10/10 passed
-Steps: 10/10 passed
+Cases: 13/13 passed
+Steps: 14/14 passed
 ```
 
 The harness smoke gate currently includes:

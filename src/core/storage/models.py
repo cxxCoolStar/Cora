@@ -187,6 +187,23 @@ class ChannelEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class HitlRequestModel(Base):
+    __tablename__ = "clawbot_hitl_requests"
+
+    hitl_id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("clawbot_sessions.id"), index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    reason: Mapped[str] = mapped_column(String(128), default="confirmation_required")
+    policy_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_risk: Mapped[str] = mapped_column(String(16), default="medium")
+    tool_arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
 class AgentRunRecordModel(Base):
     __tablename__ = "clawbot_agent_runs"
 
