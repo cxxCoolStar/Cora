@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：PR-3a–3f + PR-3g（Plan 并行 subagent）已落地；PR-3d Reviewer 暂停。前置：Phase 2 + harness 18/18。
+> 状态：PR-3a–3f + PR-3g + PR-3d + PR-3h 已落地。前置：Phase 2 + harness 18/18。
 
 ## 1. 目标
 
@@ -61,7 +61,7 @@ class PlanRunSpec:
 | **Planner** | `planner` | 只读 profile（`background_readonly` 或专用 `planner_readonly`） | 仅 `read_file`、`search_*`、`web_search` 等；**禁止** `write_file`、`shell_exec`、`scheduled_tasks` |
 | **Worker** | `worker` | 每步 `RunBudget.allowed_tool_names = task.tool_names` | 继承 `ToolPolicyEngine`；HITL / sandbox 规则不变 |
 | **Plan 并行 subagent** | （执行层） | 同 plan 父 budget 子集 | `parallel_subagents` → `spawn_workers`；适合多路径并发 search |
-| **Reviewer**（暂停） | `reviewer` | 只读 | 仅在高风险步或低 confidence 后触发 |
+| **Reviewer** | `reviewer` | 只读 | 高风险 Worker 步或 `requires_review` 后触发（可 `CORA_PLAN_REVIEW_MODE=off` 关闭） |
 
 Planner 输出必须是 **JSON PlanSpec**（或 YAML 子集），由 `PlanValidator` 校验：
 
@@ -181,7 +181,13 @@ v1 建议 **显式 + 启发式** 并存：
 - 集成测试：`tests/test_planner_llm_parallel.py`（`SimulatedLlmPlannerModelClient` 走完整 `plan_turn` 路径）
 - Live eval（可选）：`plan_llm_parallel_search_planner`；默认 harness 跳过 `live` tag，运行 `scripts/run_live_planner_evals.cmd`（需 `CORA_RUN_LIVE_EVALS=1` 与 `CORA_OPENAI_API_KEY`）
 
-### PR-3d（暂停）：Reviewer + 失败策略细化
+### PR-3d：Reviewer + 失败策略细化 — **已完成**
+
+- `agent_role=reviewer`、只读 profile（`planner_readonly`）、JSON verdict（`accept|retry|ask_user|abort`）
+- `PlanExecutor` 在 `high_risk_only`（默认）或 `requires_review` 的 Worker 步成功后触发审查
+- 配置：`CORA_PLAN_REVIEW_MODE=off|high_risk_only|always`
+- Eval：`plan_reviewer_accepts_write_step`、`plan_reviewer_aborts_write_step`
+- 测试：`tests/test_plan_reviewer.py`
 
 ## 10. Eval 计划
 
@@ -193,6 +199,8 @@ v1 建议 **显式 + 启发式** 并存：
 | `plan_parallel_subagent_search_completes` | `parallel_subagents` + `spawn_workers` 并发 search — **已实现** |
 | `plan_parallel_three_way_search_completes` | 三路 `parallel_subagents` 并行 search — **已实现** |
 | `plan_llm_parallel_search_planner` | Live OpenAI Planner 产出 `parallel_subagents` — **已实现（live tag，可选运行）** |
+| `plan_reviewer_accepts_write_step` | 高风险 Worker + Reviewer accept — **已实现** |
+| `plan_reviewer_aborts_write_step` | Reviewer abort 终止 plan — **已实现** |
 
 ## 11. 验收标准
 

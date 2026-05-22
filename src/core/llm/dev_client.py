@@ -46,6 +46,9 @@ class DevelopmentModelClient(ModelClient):
             goal_line = text.split("\n", 1)[0].strip()
             return ModelResponse(assistant_text=self._planner_plan_json(f"/plan {goal_line}"))
 
+        if "[Reviewer mode]" in text:
+            return ModelResponse(assistant_text=self._reviewer_verdict_json())
+
         worker_tool_call = self._worker_tool_call_from_text(text)
         if worker_tool_call is not None:
             return ModelResponse(tool_calls=[worker_tool_call])
@@ -147,6 +150,22 @@ class DevelopmentModelClient(ModelClient):
                 ],
             }
             return json.dumps(payload, ensure_ascii=False)
+        if stub_mode in {"high_risk", "write_file", "review"}:
+            payload = {
+                "plan_id": "plan-dev-high-risk",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-write",
+                        "title": "Write marker file",
+                        "tool_names": ["write_file"],
+                        "instruction": "Write a marker file under src/.",
+                    }
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode == "invalid":
             payload = {
                 "plan_id": "plan-dev-invalid",
@@ -180,6 +199,29 @@ class DevelopmentModelClient(ModelClient):
         return json.dumps(payload, ensure_ascii=False)
 
     @classmethod
+    def _reviewer_verdict_json(cls) -> str:
+        import os
+
+        stub_mode = str(os.environ.get("CORA_EVAL_REVIEWER_STUB") or "accept").strip().lower()
+        verdict = "accept"
+        reason = "Worker output matches the task and is safe to continue."
+        if stub_mode in {"abort", "reject", "deny", "fail"}:
+            verdict = "abort"
+            reason = "Worker output is inconsistent with the plan goal."
+        elif stub_mode in {"retry", "again"}:
+            verdict = "retry"
+            reason = "Worker output is incomplete; one retry may help."
+        elif stub_mode in {"ask", "ask_user", "clarify"}:
+            verdict = "ask_user"
+            reason = "Need user confirmation before continuing."
+        payload = {
+            "verdict": verdict,
+            "reason": reason,
+            "confidence": "high",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @classmethod
     def _worker_tool_call_from_text(cls, text: str) -> ToolCall | None:
         if "[Worker task" not in text and "[Subagent task]" not in text:
             return None
@@ -202,6 +244,8 @@ class DevelopmentModelClient(ModelClient):
                 arguments = {"query": "example", "path": "src"}
             else:
                 arguments = {"query": "hello_agent", "path": "src"}
+        elif tool_name == "write_file":
+            arguments = {"path": "src/marker.txt", "content": "reviewed\n"}
         elif tool_name == "list_files":
             arguments = {"path": "src", "recursive": False}
         elif tool_name == "read_file":

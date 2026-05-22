@@ -57,7 +57,17 @@ PLANNER_GUIDANCE = (
     "use 4 only for unusually broad discovery (avoid more than 4). "
     "Give each parallel_subagents entry a distinct focus (one path, keyword, or source per entry) so work is not duplicated. "
     "Leave tool_names as [] when parallel_subagents is set. "
-    "Do not use parallel_subagents when step B needs step A's output; order those as separate worker tasks instead."
+    "Do not use parallel_subagents when step B needs step A's output; order those as separate worker tasks instead. "
+    "Set requires_review=true on mutating or high-risk worker tasks when an extra read-only review pass is warranted."
+)
+
+REVIEWER_GUIDANCE = (
+    "You are in REVIEWER mode. Do not call any tools in this turn. "
+    "Respond with exactly one JSON object and no markdown prose before or after it. "
+    'The JSON must include keys: verdict ("accept"|"retry"|"ask_user"|"abort"), reason, '
+    "and optional confidence (high|medium|low). "
+    "Judge whether the worker output matches the plan task and is safe to continue. "
+    "Use abort when the result is unsafe or contradicts the plan; retry only when one more worker attempt may fix it."
 )
 
 SKILLS_GUIDANCE = (
@@ -100,6 +110,7 @@ class AgentPromptBuilder:
         upload_name: str | None = None,
         delivery_available: bool = False,
         planner_mode: bool = False,
+        reviewer_mode: bool = False,
     ) -> list[Message]:
         system_parts = self._build_system_parts(
             runtime=runtime,
@@ -107,6 +118,7 @@ class AgentPromptBuilder:
             upload_name=upload_name,
             delivery_available=delivery_available,
             planner_mode=planner_mode,
+            reviewer_mode=reviewer_mode,
         )
         messages = [Message.system(session_id=session_id, content="\n".join(system_parts))]
         if history:
@@ -122,16 +134,19 @@ class AgentPromptBuilder:
         upload_name: str | None,
         delivery_available: bool,
         planner_mode: bool = False,
+        reviewer_mode: bool = False,
     ) -> list[str]:
         policy = self.execution_policy_resolver.for_runtime(runtime)
         system_parts = [self.agent_identity]
-        if planner_mode:
+        if reviewer_mode:
+            system_parts.extend(["", "Reviewer guidance:", REVIEWER_GUIDANCE])
+        elif planner_mode:
             system_parts.extend(["", "Planner guidance:", PLANNER_GUIDANCE])
         else:
             system_parts.extend(["", "Execution guidance:", EXECUTION_GUIDANCE])
         for title, body in policy.prompt_sections():
             system_parts.extend(["", f"{title}:", body])
-        if not planner_mode:
+        if not planner_mode and not reviewer_mode:
             system_parts.extend(["", "Memory guidance:", MEMORY_GUIDANCE])
             system_parts.extend(["", "Skills guidance:", SKILLS_GUIDANCE])
         platform_hint = self._platform_hint(runtime=runtime, delivery_available=delivery_available)

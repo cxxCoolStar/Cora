@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from core.agent.plan_reviewer import PlanReviewVerdict, should_review_task
 from core.schemas.harness import RunBudget
 from core.schemas.plan import PlanRunSpec, PlanSpec, TaskResultSpec, TaskSpec
 
@@ -55,6 +56,7 @@ def plan_subagent_run_budget(*, plan: PlanSpec, task: TaskSpec) -> RunBudget:
 
 
 SpawnWorkersForPlan = Callable[..., Awaitable["SpawnWorkersResult"]]
+ReviewPlanTask = Callable[..., Awaitable["PlanReviewVerdict | None"]]
 
 
 @dataclass(slots=True)
@@ -76,10 +78,14 @@ class PlanExecutor:
         turn_runner: AgentTurnRunner,
         run_record_repository: AgentRunRecordRepository | None = None,
         spawn_workers_for_plan: SpawnWorkersForPlan | None = None,
+        review_plan_task: ReviewPlanTask | None = None,
+        plan_review_mode: str | None = None,
     ) -> None:
         self._turn_runner = turn_runner
         self._run_record_repository = run_record_repository
         self._spawn_workers_for_plan = spawn_workers_for_plan
+        self._review_plan_task = review_plan_task
+        self._plan_review_mode = plan_review_mode
 
     async def execute(
         self,
@@ -236,6 +242,96 @@ class PlanExecutor:
                 source_message_id=source_message_id,
                 metadata_base=metadata_base,
             )
+        task_result, trace_entries = await self._run_worker_turn(
+            session_id=session_id,
+            plan=plan,
+            task=task,
+            planner_run_id=planner_run_id,
+            source_message_id=f"{source_message_id}:{task.task_id}",
+            context_snapshot=context_snapshot,
+            metadata_base=metadata_base,
+        )
+        if task_result.status != "completed":
+            return task_result, trace_entries
+        reviewed = await self._apply_task_review(
+            session_id=session_id,
+            plan=plan,
+            task=task,
+            task_result=task_result,
+            planner_run_id=planner_run_id,
+            source_message_id=source_message_id,
+            context_snapshot=context_snapshot,
+            metadata_base=metadata_base,
+        )
+        if reviewed is not None:
+            return reviewed, trace_entries
+        return task_result, trace_entries
+
+    async def _apply_task_review(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        task_result: TaskResultSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        context_snapshot: RuntimeContextSnapshot,
+        metadata_base: dict[str, Any],
+    ) -> TaskResultSpec | None:
+        if task_result.status != "completed":
+            return None
+        if self._review_plan_task is None:
+            return None
+        if not should_review_task(task=task, review_mode=self._plan_review_mode or ""):
+            return None
+        verdict = await self._review_plan_task(
+            session_id=session_id,
+            plan=plan,
+            task=task,
+            task_result=task_result,
+            planner_run_id=planner_run_id,
+            source_message_id=source_message_id,
+            context_snapshot=context_snapshot,
+            metadata_base=metadata_base,
+        )
+        if verdict is None:
+            return None
+        if verdict.verdict == "accept":
+            return None
+        if verdict.verdict == "retry":
+            retry_result, _ = await self._run_worker_turn(
+                session_id=session_id,
+                plan=plan,
+                task=task,
+                planner_run_id=planner_run_id,
+                source_message_id=f"{source_message_id}:{task.task_id}:retry",
+                context_snapshot=context_snapshot,
+                metadata_base=metadata_base,
+            )
+            if retry_result.status == "completed":
+                return None
+            return retry_result
+        summary = f"Plan review {verdict.verdict}: {verdict.reason}"
+        return TaskResultSpec(
+            task_id=task.task_id,
+            run_id=task_result.run_id,
+            status="failed",
+            summary=summary,
+            tool_trace_count=task_result.tool_trace_count,
+        )
+
+    async def _run_worker_turn(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        context_snapshot: RuntimeContextSnapshot,
+        metadata_base: dict[str, Any],
+    ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
         task_metadata = {
             **metadata_base,
             "agent_role": WORKER_AGENT_ROLE,
@@ -244,7 +340,7 @@ class PlanExecutor:
         }
         turn_result = await self._turn_runner.run_turn(
             session_id=session_id,
-            source_message_id=f"{source_message_id}:{task.task_id}",
+            source_message_id=source_message_id,
             user_text=build_worker_user_text(task=task),
             raw_text=build_worker_user_text(task=task),
             upload=None,

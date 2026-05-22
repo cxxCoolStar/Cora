@@ -18,6 +18,12 @@ from core.agent.plan_planner import (
     finalize_planner_run,
     resolve_planner_validation_options,
 )
+from core.agent.plan_reviewer import (
+    REVIEWER_AGENT_ROLE,
+    build_reviewer_user_text,
+    finalize_reviewer_run,
+)
+from core.schemas.plan import TaskSpec, plan_spec_from_dict
 from core.agent.sandbox_runtime import MUTATING_TOOLS_IN_SANDBOX, SandboxContext, SandboxWorkspaceManager
 from core.channels.wechat.hitl_commands import build_wechat_hitl_confirmation_message
 from core.agent.run_records import AgentRunRecordRepository
@@ -151,6 +157,8 @@ class DefaultAgentHarness:
                 user_text=run_input.user_text,
                 session_id=run_input.session_id,
             )
+        elif run_input.agent_role == REVIEWER_AGENT_ROLE:
+            planner_user_text = _reviewer_user_text_from_metadata(run_input=run_input)
         prepared_turn = self.runner.prepare_turn(
             session_id=run_input.session_id,
             user_text=planner_user_text,
@@ -161,7 +169,7 @@ class DefaultAgentHarness:
         )
         self._inject_spawn_context_metadata(run_input=run_input, prepared_turn=prepared_turn)
         original_tool_names = sorted(prepared_turn.tool_names)
-        self._apply_planner_tool_surface(run_input=run_input, prepared_turn=prepared_turn)
+        self._apply_readonly_agent_tool_surface(run_input=run_input, prepared_turn=prepared_turn)
         self._apply_run_tool_policy(run_input=run_input, prepared_turn=prepared_turn)
         self.execution_policy = prepared_turn.execution_policy
         profile = get_harness_policy_profile(run_input.budget.policy_profile)
@@ -193,6 +201,7 @@ class DefaultAgentHarness:
             upload=run_input.upload,
             prepared_turn=prepared_turn,
             planner_mode=run_input.agent_role == PLANNER_AGENT_ROLE,
+            reviewer_mode=run_input.agent_role == REVIEWER_AGENT_ROLE,
         )
         self._emit(
             HarnessTraceEventType.START_COMPLETED,
@@ -223,6 +232,15 @@ class DefaultAgentHarness:
                 and finalize_result.validation.plan is not None
             ):
                 run_input.metadata["validated_plan"] = finalize_result.validation.plan.to_dict()
+        elif run_input.agent_role == REVIEWER_AGENT_ROLE:
+            review_finalize = finalize_reviewer_run(
+                emit=self._emit,
+                run_input=run_input,
+                loop_result=loop_result,
+                plan_id=str(run_input.metadata.get("plan_id") or ""),
+                task_id=str(run_input.metadata.get("task_id") or ""),
+            )
+            loop_result = review_finalize.loop_result
         self._emit(
             HarnessTraceEventType.RESOLVE_COMPLETED,
             run_input=run_input,
@@ -331,6 +349,11 @@ class DefaultAgentHarness:
             validated_plan = run_input.metadata.get("validated_plan")
             if isinstance(validated_plan, dict):
                 completion_metadata["plan"] = validated_plan
+        if run_input.agent_role == REVIEWER_AGENT_ROLE:
+            completion_metadata["reviewer_run"] = True
+            review_verdict = run_input.metadata.get("review_verdict")
+            if isinstance(review_verdict, dict):
+                completion_metadata["review_verdict"] = review_verdict
         trace_events = self._merge_preserved_run_trace_events(
             run_id=run_input.run_id,
             harness_trace_events=list(self.trace_events),
@@ -438,8 +461,8 @@ class DefaultAgentHarness:
             return frozenset()
         return frozenset(normalize_tool_names([str(name) for name in raw]))
 
-    def _apply_planner_tool_surface(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
-        if run_input.agent_role != PLANNER_AGENT_ROLE:
+    def _apply_readonly_agent_tool_surface(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
+        if run_input.agent_role not in {PLANNER_AGENT_ROLE, REVIEWER_AGENT_ROLE}:
             return
         prepared_turn.tool_specs = []
         prepared_turn.tool_names = set()
@@ -800,8 +823,8 @@ class DefaultAgentHarness:
     def _failure_category_for_loop_result(self, loop_result: LoopResult) -> str | None:
         if loop_result.exit_reason == "timeout":
             return "timeout"
-        if loop_result.exit_reason in {"plan_validation_failed"}:
-            return "plan_validation_failed"
+        if loop_result.exit_reason in {"plan_validation_failed", "plan_review_failed"}:
+            return loop_result.exit_reason
         if loop_result.exit_reason == "error" and loop_result.steps == 0:
             if any(
                 event.event_type == HarnessTraceEventType.SUBAGENT_SPAWN_DENIED
@@ -820,6 +843,29 @@ class DefaultAgentHarness:
         if any(event.event_type == HarnessTraceEventType.CLEANUP_COMPLETED for event in self.trace_events):
             return "completed"
         return "skipped"
+
+
+def _reviewer_user_text_from_metadata(*, run_input: HarnessRunInput) -> str:
+    if "[Reviewer mode]" in str(run_input.user_text or ""):
+        return str(run_input.user_text)
+    plan_payload = run_input.metadata.get("plan")
+    task_payload = run_input.metadata.get("task")
+    if not isinstance(plan_payload, dict) or not isinstance(task_payload, dict):
+        raise ValueError("Reviewer run requires plan and task metadata.")
+    plan = plan_spec_from_dict(plan_payload)
+    task = TaskSpec(
+        task_id=str(task_payload.get("task_id") or ""),
+        title=str(task_payload.get("title") or ""),
+        tool_names=list(task_payload.get("tool_names") or []),
+        instruction=str(task_payload.get("instruction") or ""),
+        requires_review=bool(task_payload.get("requires_review")),
+    )
+    return build_reviewer_user_text(
+        plan=plan,
+        task=task,
+        worker_summary=str(run_input.metadata.get("worker_summary") or ""),
+        worker_run_id=str(run_input.metadata.get("worker_run_id") or "") or None,
+    )
 
 
 def new_run_input(

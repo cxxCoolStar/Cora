@@ -20,6 +20,7 @@ class OrchestratorInput:
     history: list[Message] | None = None
     tool_specs: list[ToolSpec] | None = None
     planner_mode: bool = False
+    reviewer_mode: bool = False
 
 
 class AgentOrchestrator:
@@ -45,8 +46,9 @@ class AgentOrchestrator:
             upload_name=turn.upload_name,
             delivery_available=turn.delivery_available,
             planner_mode=turn.planner_mode,
+            reviewer_mode=turn.reviewer_mode,
         )
-        response_format = "json_object" if turn.planner_mode else None
+        response_format = "json_object" if (turn.planner_mode or turn.reviewer_mode) else None
         return await self.loop.run(
             session_id=turn.session_id,
             initial_messages=messages,

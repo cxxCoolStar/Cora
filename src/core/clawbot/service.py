@@ -15,8 +15,15 @@ from core.agent.plan_executor import (
     format_plan_execution_reply,
     plan_subagent_run_budget,
 )
-from core.schemas.plan import PlanSpec, TaskSpec
+from core.schemas.plan import PlanSpec, TaskResultSpec, TaskSpec
 from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
+from core.agent.plan_reviewer import (
+    REVIEWER_AGENT_ROLE,
+    PlanReviewVerdict,
+    build_reviewer_user_text,
+    reviewer_run_budget,
+    verdict_from_turn_reply,
+)
 from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
 from core.agent.subagent_spawner import SubagentSpawner
@@ -109,6 +116,7 @@ class ClawBotService:
         harness_max_spawn_depth: int = 1,
         harness_max_child_runs: int = 4,
         harness_max_parallel_spawns: int = 3,
+        plan_review_mode: str = "high_risk_only",
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -130,6 +138,7 @@ class ClawBotService:
         self.harness_max_spawn_depth = max(0, int(harness_max_spawn_depth))
         self.harness_max_child_runs = max(0, int(harness_max_child_runs))
         self.harness_max_parallel_spawns = max(1, int(harness_max_parallel_spawns))
+        self.plan_review_mode = str(plan_review_mode or "high_risk_only").strip() or "high_risk_only"
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         preconfigured_policy_resolver = (
@@ -686,6 +695,60 @@ class ClawBotService:
             turn_runner=self._agent_turn_runner,
             run_record_repository=self.agent_run_record_repository,
             spawn_workers_for_plan=self._spawn_workers_for_plan_execution,
+            review_plan_task=self._review_plan_task,
+            plan_review_mode=self.plan_review_mode,
+        )
+
+    async def _review_plan_task(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        task_result: TaskResultSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        context_snapshot: RuntimeContextSnapshot,
+        metadata_base: dict[str, Any],
+    ) -> PlanReviewVerdict | None:
+        review_metadata = {
+            **dict(metadata_base or {}),
+            "agent_role": REVIEWER_AGENT_ROLE,
+            "task_id": task.task_id,
+            "parent_run_id": task_result.run_id or planner_run_id,
+            "plan_id": plan.plan_id,
+            "plan": plan.to_dict(),
+            "task": task.to_dict(),
+            "worker_summary": task_result.summary,
+            "worker_run_id": task_result.run_id,
+        }
+        user_text = build_reviewer_user_text(
+            plan=plan,
+            task=task,
+            worker_summary=task_result.summary,
+            worker_run_id=task_result.run_id or None,
+        )
+        turn_result = await self._agent_turn_runner.run_turn(
+            session_id=session_id,
+            source_message_id=f"{source_message_id}:{task.task_id}:review",
+            user_text=user_text,
+            raw_text=user_text,
+            upload=None,
+            context_snapshot=context_snapshot,
+            run_budget=reviewer_run_budget(),
+            run_metadata=review_metadata,
+        )
+        verdict = verdict_from_turn_reply(turn_result.reply)
+        if verdict is not None:
+            return verdict
+        if str(turn_result.status or "").strip() == "failed":
+            return PlanReviewVerdict(
+                verdict="abort",
+                reason=str(turn_result.reply or "Reviewer run failed."),
+            )
+        return PlanReviewVerdict(
+            verdict="abort",
+            reason="Reviewer output did not include a recognizable verdict.",
         )
 
     async def _spawn_workers_for_plan_execution(

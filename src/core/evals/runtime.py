@@ -65,6 +65,7 @@ class EvalRuntime:
                 self._configure_harness_tool_delay(container=container, setup=case.setup)
                 self._configure_harness_prepare_failure(container=container, setup=case.setup)
                 self._configure_planner_stub(container=container, setup=case.setup)
+                self._configure_reviewer_stub(setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
                 wechat_gateway = self._build_wechat_gateway(container=container)
@@ -228,6 +229,14 @@ class EvalRuntime:
         container.tool_executor.execute_tool_call = delayed_execute_tool_call
 
     @staticmethod
+    @staticmethod
+    def _configure_reviewer_stub(*, setup: EvalSetup) -> None:
+        mode = str(setup.reviewer_stub_mode or "").strip().lower()
+        if not mode:
+            return
+        os.environ["CORA_EVAL_REVIEWER_STUB"] = mode
+
+    @staticmethod
     def _configure_planner_stub(*, container, setup: EvalSetup) -> None:
         if str(setup.model_mode or "").strip().lower() == "live":
             os.environ.pop("CORA_EVAL_PLANNER_STUB", None)
@@ -319,6 +328,7 @@ def isolated_settings_env(
         os.environ.pop("CORA_EVAL_PLANNER_STUB", None)
     else:
         os.environ["CORA_MODEL_PROVIDER"] = "dev"
+    os.environ.setdefault("CORA_PLAN_REVIEW_MODE", "high_risk_only")
     os.chdir(project_root)
     try:
         yield
@@ -339,6 +349,8 @@ _OVERRIDDEN_ENV = {
     "CORA_FILE_TOOL_ROOT",
     "CORA_MODEL_PROVIDER",
     "CORA_EVAL_PLANNER_STUB",
+    "CORA_EVAL_REVIEWER_STUB",
+    "CORA_PLAN_REVIEW_MODE",
 }
 
 

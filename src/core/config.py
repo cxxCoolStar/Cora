@@ -18,6 +18,7 @@ class CoreSettings(BaseSettings):
     harness_max_spawn_depth: int = 1
     harness_max_child_runs: int = 4
     harness_max_parallel_spawns: int = 3
+    plan_review_mode: str = "high_risk_only"
     wechat_harness_policy_profile: str = "wechat_safe"
     job_harness_policy_profile: str = "background_readonly"
     model_provider: str = "dev"

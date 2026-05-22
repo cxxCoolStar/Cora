@@ -1,0 +1,52 @@
+{
+  "id": "plan_reviewer_aborts_write_step",
+  "type": "harness",
+  "description": "Reviewer abort verdict should fail the plan after a high-risk worker step.",
+  "tags": ["harness", "planner", "worker", "reviewer", "planning"],
+  "setup": {
+    "planner_stub_mode": "high_risk",
+    "reviewer_stub_mode": "abort",
+    "workspace_files": {
+      "src/.gitkeep": ""
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates write_file plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Write a marker file in src"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "state": {
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute worker then reviewer abort",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "tool_names_any": ["write_file"],
+        "reply_contains_all": [
+          "execution failed",
+          "Plan review abort"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_outcome": "plan_review_completed",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "reviewer"
+          }
+        }
+      }
+    }
+  ]
+}
