@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：设计稿，待实现。前置条件：Phase 2 工具治理与 WeChat HITL 已落地（harness 14/14）。
+> 状态：PR-3a 已落地（schema + validator）；PR-3b/3c 待实现。前置：Phase 2 + harness 14/14。
 
 ## 1. 目标
 
@@ -125,10 +125,12 @@ v1 建议 **显式 + 启发式** 并存：
 
 ## 9. 实现切片（推荐 PR 顺序）
 
-### PR-3a：Schema + Validator（无模型）
+### PR-3a：Schema + Validator（无模型）— **已完成**
 
-- `PlanSpec` / `TaskSpec` / `PlanValidator`
-- 单元测试：合法 plan、非法 tool、重复 task_id
+- `src/core/schemas/plan.py` — `PlanSpec`, `TaskSpec`, `TaskResultSpec`, `PlanRunSpec`, `plan_spec_from_dict`
+- `src/core/agent/plan_validator.py` — `PlanValidator`, `PlanValidationResult`, WeChat forbidden tools
+- `planner_readonly` harness profile（与 planner 只读 tool 集对齐）
+- 测试：`tests/test_plan_validator.py`（8 cases）
 
 ### PR-3b：Planner harness 步
 

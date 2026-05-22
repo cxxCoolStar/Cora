@@ -840,6 +840,7 @@ Phase 2 current status:
 - HITL 默认 **10 分钟** 过期（`expires_at`）；超时自动 `expired`，用户文档见
   [wechat-hitl.md](./wechat-hitl.md)。
 - Phase 3 设计草案：[cora-phase3-planning-design.md](./cora-phase3-planning-design.md)。
+- PR-3a 完成：`PlanSpec` / `PlanValidator`（见 `src/core/schemas/plan.py`、`src/core/agent/plan_validator.py`）。
 
 ### Phase 3: Structured Planning Without Parallelism
 

@@ -30,6 +30,19 @@ HARNESS_POLICY_PROFILES: dict[str, HarnessPolicyProfile] = {
             "search_sessions",
         ),
     ),
+    "planner_readonly": HarnessPolicyProfile(
+        name="planner_readonly",
+        allowed_tool_names=(
+            "list_files",
+            "search_files",
+            "read_file",
+            "web_search",
+            "web_fetch",
+            "skills_list",
+            "skill_view",
+            "search_sessions",
+        ),
+    ),
     "coding_full": HarnessPolicyProfile(name="coding_full"),
 }
 
