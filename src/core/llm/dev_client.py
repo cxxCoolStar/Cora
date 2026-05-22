@@ -134,6 +134,10 @@ class DevelopmentModelClient(ModelClient):
         arguments: dict = {}
         if tool_name == "search_files":
             arguments = {"query": "hello_agent", "path": "src"}
+        elif tool_name == "list_files":
+            arguments = {"path": "src", "recursive": False}
+        elif tool_name == "read_file":
+            arguments = {"path": "src/missing.py"}
         elif tool_name == "scheduled_tasks":
             arguments = {"action": "list"}
         return ToolCall(

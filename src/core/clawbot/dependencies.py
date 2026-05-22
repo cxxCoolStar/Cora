@@ -191,7 +191,9 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         plan_store=plan_store,
         harness_max_spawn_depth=active_settings.harness_max_spawn_depth,
         harness_max_child_runs=active_settings.harness_max_child_runs,
+        harness_max_parallel_spawns=active_settings.harness_max_parallel_spawns,
     )
+    tool_executor.bind_clawbot_service(clawbot_service)
     return ClawBotContainer(
         settings=active_settings,
         database=database,

@@ -1,0 +1,39 @@
+{
+  "id": "spawn_worker_tool_spawn_depth_denied",
+  "type": "harness",
+  "description": "spawn_worker tool should deny spawning a child when max_spawn_depth blocks depth 1 children.",
+  "tags": ["harness", "subagent", "spawn", "tool", "spawn-depth"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "child depth blocked by max_spawn_depth 0",
+      "input": {
+        "text": "/tool spawn_worker {\"instruction\":\"Find hello_agent in src.\",\"tool_names\":[\"search_files\"]}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_worker", "search_files"],
+          "max_spawn_depth": 0,
+          "max_child_runs": 2
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Subagent spawn depth exceeded",
+          "depth=1",
+          "max=0"
+        ],
+        "tool_names_all": ["spawn_worker"],
+        "state": {
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawn.denied"
+          ]
+        }
+      }
+    }
+  ]
+}

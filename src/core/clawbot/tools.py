@@ -12,6 +12,8 @@ from fastapi import UploadFile
 import httpx
 
 from core.agent.execution_policy import ExecutionPolicy, ExecutionPolicyResolver
+from core.agent.spawn_budget import run_budget_from_dict
+from core.agent.subagent_spawner import format_spawn_reply
 from core.agent.skill_effects import HostEffectDispatcher
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import ConversationRuntimeState, PendingSessionState, RuntimeStateDelta
@@ -30,6 +32,8 @@ from core.clawbot.tool_domains import (
 )
 from core.ingestion.service import IngestionService
 from core.schemas.execution import ExecutionHints, SuppressedPendingRequest
+from core.schemas.harness import RunBudget
+from core.schemas.subagent import SpawnWorkerTaskSpec
 from core.schemas.tool import ToolCall, ToolResult
 from core.storage.repositories import (
     ChannelSessionMapRepository,
@@ -119,7 +123,9 @@ class RuntimeToolExecutor:
         web_tavily_api_key: str | None = None,
         web_tavily_base_url: str | None = None,
         scheduled_task_default_timezone: str | None = None,
+        clawbot_service: Any | None = None,
     ) -> None:
+        self._clawbot_service = clawbot_service
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
         self.pending_state_repository = pending_state_repository
@@ -180,6 +186,9 @@ class RuntimeToolExecutor:
             self.can_send_files_to_user(),
             registry.names(),
         )
+
+    def bind_clawbot_service(self, clawbot_service: Any) -> None:
+        self._clawbot_service = clawbot_service
 
     def can_send_files_to_user(self) -> bool:
         return self.gateway_service is not None and self.session_map_repository is not None
@@ -421,6 +430,101 @@ class RuntimeToolExecutor:
             action=result.action,
             status=result.status,
             metadata=dict(result.metadata or {}),
+        )
+
+    def _spawn_context_from_invocation(self, invocation: ToolInvocation) -> tuple[str | None, int, RunBudget]:
+        context = dict(invocation.context or {})
+        parent_run_id = str(context.get("agent_run_id") or "").strip() or None
+        spawn_depth = max(0, int(context.get("spawn_depth") or 0))
+        parent_budget = run_budget_from_dict(context.get("run_budget"))
+        return parent_run_id, spawn_depth, parent_budget
+
+    async def _tool_spawn_worker(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if self._clawbot_service is None:
+            return ToolExecutionResult(
+                reply="spawn_worker is not configured for this runtime.",
+                action="spawn_worker",
+                status="failed",
+            )
+        arguments = dict(invocation.plan.arguments or {})
+        instruction = str(arguments.get("instruction") or "").strip()
+        if not instruction:
+            return ToolExecutionResult(
+                reply="spawn_worker requires a non-empty instruction.",
+                action="spawn_worker",
+                status="failed",
+            )
+        tool_names = _string_list_argument(arguments.get("tool_names"))
+        context_mode = str(arguments.get("context_mode") or "isolated").strip() or "isolated"
+        parent_run_id, spawn_depth, parent_budget = self._spawn_context_from_invocation(invocation)
+        spawn_result = await self._clawbot_service.spawn_worker_for_tool(
+            session_id=invocation.session_id,
+            source_message_id=invocation.source_message_id,
+            parent_run_id=parent_run_id,
+            parent_spawn_depth=spawn_depth,
+            parent_budget=parent_budget,
+            instruction=instruction,
+            tool_names=tool_names or None,
+            context_mode=context_mode,
+        )
+        metadata: dict[str, Any] = {
+            "parent_run_id": spawn_result.parent_run_id,
+            "child_session_id": spawn_result.child_session_id,
+            "child_run_id": spawn_result.child_run_id,
+        }
+        if spawn_result.child_result is not None:
+            metadata["child_result"] = spawn_result.child_result.to_dict()
+        reply = (
+            spawn_result.reply
+            if spawn_result.denied
+            else format_spawn_reply(child_result=spawn_result.child_result, denied=False)
+        )
+        return ToolExecutionResult(
+            reply=reply,
+            action="spawn_worker",
+            status=spawn_result.status,
+            disposition=spawn_result.disposition,
+            metadata=metadata,
+        )
+
+    async def _tool_spawn_workers(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if self._clawbot_service is None:
+            return ToolExecutionResult(
+                reply="spawn_workers is not configured for this runtime.",
+                action="spawn_workers",
+                status="failed",
+            )
+        arguments = dict(invocation.plan.arguments or {})
+        tasks = _spawn_worker_tasks_from_argument(arguments.get("tasks"))
+        if not tasks:
+            return ToolExecutionResult(
+                reply="spawn_workers requires at least one task with an instruction.",
+                action="spawn_workers",
+                status="failed",
+            )
+        parent_run_id, spawn_depth, parent_budget = self._spawn_context_from_invocation(invocation)
+        spawn_result = await self._clawbot_service.spawn_workers_for_tool(
+            session_id=invocation.session_id,
+            source_message_id=invocation.source_message_id,
+            parent_run_id=parent_run_id,
+            parent_spawn_depth=spawn_depth,
+            parent_budget=parent_budget,
+            tasks=tasks,
+        )
+        metadata: dict[str, Any] = {
+            "parent_run_id": spawn_result.parent_run_id,
+            "child_results": [
+                item.child_result.to_dict()
+                for item in spawn_result.results
+                if item.child_result is not None
+            ],
+        }
+        return ToolExecutionResult(
+            reply=spawn_result.reply,
+            action="spawn_workers",
+            status=spawn_result.status,
+            disposition=spawn_result.disposition,
+            metadata=metadata,
         )
 
     def _tool_scheduled_tasks(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -854,6 +958,33 @@ class RuntimeToolExecutor:
 def request_upload(runtime: ConversationRuntimeState) -> UploadFile | None:
     upload = runtime.metadata.get("upload")
     return upload if getattr(upload, "filename", None) is not None else None
+
+
+def _string_list_argument(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _spawn_worker_tasks_from_argument(value: object) -> list[SpawnWorkerTaskSpec]:
+    if not isinstance(value, list):
+        return []
+    tasks: list[SpawnWorkerTaskSpec] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        instruction = str(item.get("instruction") or "").strip()
+        if not instruction:
+            continue
+        context_mode = str(item.get("context_mode") or "").strip() or None
+        tasks.append(
+            SpawnWorkerTaskSpec(
+                instruction=instruction,
+                tool_names=_string_list_argument(item.get("tool_names")),
+                context_mode=context_mode,
+            )
+        )
+    return tasks
 
 
 __all__ = [

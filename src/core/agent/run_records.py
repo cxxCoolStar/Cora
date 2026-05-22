@@ -75,6 +75,15 @@ class AgentRunRecordRepository(Protocol):
     def list_by_parent_run_id(self, *, parent_run_id: str) -> list[AgentRunRecord]:
         ...
 
+    def append_trace_events(
+        self,
+        *,
+        run_id: str,
+        trace_events: list[RunTraceEvent],
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        ...
+
 
 class InMemoryAgentRunRecordRepository:
     def __init__(self) -> None:
@@ -165,6 +174,30 @@ class InMemoryAgentRunRecordRepository:
             if str(record.parent_run_id or "").strip() == normalized_parent_run_id
         ]
         return sorted(records, key=lambda record: record.started_at, reverse=True)
+
+    def append_trace_events(
+        self,
+        *,
+        run_id: str,
+        trace_events: list[RunTraceEvent],
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        record = self.get(run_id=run_id)
+        start_sequence = len(record.trace_events)
+        for offset, event in enumerate(trace_events):
+            record.trace_events.append(
+                RunTraceEvent(
+                    event_type=event.event_type,
+                    run_id=event.run_id,
+                    session_id=event.session_id,
+                    sequence=start_sequence + offset,
+                    severity=event.severity,
+                    metadata=dict(event.metadata),
+                )
+            )
+        if metadata_patch:
+            record.metadata.update(dict(metadata_patch))
+        return record
 
 
 def _failure_category_for_outcome(*, status: str, outcome: str) -> str | None:

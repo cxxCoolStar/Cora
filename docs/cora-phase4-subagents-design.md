@@ -1,6 +1,6 @@
 # Phase 4：受控 Subagent 设计草案
 
-> 状态：PR-4a–4d 已落地；4e（额外 eval）可选。  
+> 状态：PR-4a–4g + 4e eval 已落地；Reviewer (PR-3d) 暂停。  
 > 前置：Phase 3（Planner / Worker / HITL / plan SQL）+ harness 18/18。
 
 ## 1. 目标
@@ -35,7 +35,9 @@
 | **4b** | `spawn_worker_turn` / `SubagentSpawner`、子 session、`max_child_runs`、parent trace | ✅ |
 | **4c** | 继承 tool policy（子 ⊂ 父 allow 集） | ✅ |
 | **4d** | 子 run `SubagentResultSpec` 合并回父 orchestrator metadata + 回复 | ✅ |
-| **4e** | eval：spawn 超限、policy 继承 deny、merge 失败 | 未开始 |
+| **4e** | eval：spawn 超限、policy 继承 deny、merge 失败（含 tool 路径） | ✅ |
+| **4f** | 主 agent `spawn_worker` 工具（同步子 run + 结构化合并） | ✅ |
+| **4g** | 主 agent `spawn_workers` 并行工具（`asyncio.gather` + 并发上限） | ✅ |
 
 ## 4. Harness 行为（4a）
 
@@ -89,9 +91,28 @@ sequenceDiagram
 - 父回复：`Subagent completed (status=…, tools=…)` + 子摘要
 - `TurnResponse.context.child_result` 供上层合并
 
+**4f / 4g**
+
+- `spawn_worker` / `spawn_workers` 注册于 `subagent` toolset（`cora-cli` / `cora-api`，默认不含 WeChat）
+- `RuntimeToolExecutor` + `ClawBotService.spawn_worker_for_tool()` / `spawn_workers_for_tool()`
+- Harness 在 `prepare_turn` 后注入 `runtime.metadata`：`agent_run_id`、`spawn_depth`、`parent_run_id`、`run_budget`
+- 配置：`CORA_HARNESS_MAX_PARALLEL_SPAWNS`（默认 3）
+- Eval：`spawn_worker_tool_completes`、`spawn_workers_parallel_completes`
+- `/spawn` 仍保留给 eval `agent_role: spawn` 与手动调试；产品路径为主 agent 工具调用
+
+**4e**
+
+- 已有（`/spawn` 路径）：`spawn_depth_exceeds_max_denied`、`spawn_worker_child_run_limit_denied`、`spawn_worker_policy_inherit_denied`
+- 补充（`spawn_worker` / `spawn_workers` 工具路径）：
+  - `spawn_worker_tool_policy_inherit_denied`
+  - `spawn_worker_tool_spawn_depth_denied`
+  - `spawn_workers_tool_batch_limit_denied`
+  - `spawn_worker_tool_failed_child_merge`（子任务错误输出合并回父回复）
+  - 同会话二次限额仍由 `/spawn` 路径 `spawn_worker_child_run_limit_denied` 覆盖
+
 **验收**
 
-- `.\scripts\run_harness_evals.cmd` 全绿（22 cases）
+- `.\scripts\run_harness_evals.cmd` 全绿（28 cases）
 
 ## 7. 参考
 

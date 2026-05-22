@@ -159,6 +159,7 @@ class DefaultAgentHarness:
             upload=run_input.upload,
             context_snapshot=run_input.context_snapshot,
         )
+        self._inject_spawn_context_metadata(run_input=run_input, prepared_turn=prepared_turn)
         original_tool_names = sorted(prepared_turn.tool_names)
         self._apply_planner_tool_surface(run_input=run_input, prepared_turn=prepared_turn)
         self._apply_run_tool_policy(run_input=run_input, prepared_turn=prepared_turn)
@@ -330,14 +331,39 @@ class DefaultAgentHarness:
             validated_plan = run_input.metadata.get("validated_plan")
             if isinstance(validated_plan, dict):
                 completion_metadata["plan"] = validated_plan
+        trace_events = self._merge_preserved_run_trace_events(
+            run_id=run_input.run_id,
+            harness_trace_events=list(self.trace_events),
+        )
         self.run_record_repository.mark_completed(
             run_id=run_input.run_id,
             status=loop_result.status,
             outcome=loop_result.exit_reason,
             steps=loop_result.steps,
-            trace_events=list(self.trace_events),
+            trace_events=trace_events,
             metadata=completion_metadata,
         )
+
+    def _merge_preserved_run_trace_events(
+        self,
+        *,
+        run_id: str,
+        harness_trace_events: list[RunTraceEvent],
+    ) -> list[RunTraceEvent]:
+        if self.run_record_repository is None:
+            return harness_trace_events
+        try:
+            existing = self.run_record_repository.get(run_id=run_id)
+        except KeyError:
+            return harness_trace_events
+        preserved = [
+            event
+            for event in existing.trace_events
+            if str(event.event_type).startswith("subagent.")
+        ]
+        if not preserved:
+            return harness_trace_events
+        return preserved + harness_trace_events
 
     def _mark_run_failed(self, *, run_input: HarnessRunInput, error: Exception) -> None:
         if self.run_record_repository is None:
@@ -392,6 +418,16 @@ class DefaultAgentHarness:
                     "policy_decision": policy_decision,
                 },
             )
+
+    @staticmethod
+    def _inject_spawn_context_metadata(*, run_input: HarnessRunInput, prepared_turn) -> None:
+        runtime = prepared_turn.runtime
+        runtime.metadata = dict(runtime.metadata)
+        runtime.metadata["agent_run_id"] = run_input.run_id
+        runtime.metadata["spawn_depth"] = run_input.spawn_depth
+        if run_input.parent_run_id:
+            runtime.metadata["parent_run_id"] = run_input.parent_run_id
+        runtime.metadata["run_budget"] = run_input.budget.to_dict()
 
     @staticmethod
     def _parent_allowed_tool_names(*, run_input: HarnessRunInput) -> frozenset[str]:

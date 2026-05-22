@@ -18,7 +18,12 @@ from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
 from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
 from core.agent.subagent_spawner import SubagentSpawner
-from core.schemas.subagent import SpawnWorkerRequest, parse_spawn_instruction
+from core.schemas.subagent import (
+    SpawnWorkerRequest,
+    SpawnWorkerTaskSpec,
+    SpawnWorkersResult,
+    parse_spawn_instruction,
+)
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
@@ -101,6 +106,7 @@ class ClawBotService:
         plan_store: PlanStore | None = None,
         harness_max_spawn_depth: int = 1,
         harness_max_child_runs: int = 4,
+        harness_max_parallel_spawns: int = 3,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -121,6 +127,7 @@ class ClawBotService:
         self.job_harness_policy_profile = str(job_harness_policy_profile or "").strip() or None
         self.harness_max_spawn_depth = max(0, int(harness_max_spawn_depth))
         self.harness_max_child_runs = max(0, int(harness_max_child_runs))
+        self.harness_max_parallel_spawns = max(1, int(harness_max_parallel_spawns))
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         preconfigured_policy_resolver = (
@@ -583,20 +590,16 @@ class ClawBotService:
         if not tool_names:
             tool_names = ["search_files"]
         metadata = dict(source_metadata or {})
-        spawn_result = await self._subagent_spawner().spawn_worker(
-            request=SpawnWorkerRequest(
-                parent_session_id=session_id,
-                source_message_id=inbound_turn.source_message_id,
-                instruction=parse_spawn_instruction(inbound_text),
-                allowed_tool_names=tool_names,
-                parent_budget=budget,
-                parent_run_id=parent_run_id or metadata.get("parent_run_id"),
-                parent_spawn_depth=int(metadata.get("spawn_depth") or 0),
-                run_metadata=metadata,
-            ),
-            parent_context_snapshot=self.load_context_snapshot(session_id=session_id),
-            run_budget=budget,
-            registered_tool_names=self.list_tool_names(),
+        resolved_parent_run_id = str(parent_run_id or metadata.get("parent_run_id") or "").strip() or None
+        spawn_result = await self.spawn_worker_for_tool(
+            session_id=session_id,
+            source_message_id=inbound_turn.source_message_id,
+            parent_run_id=resolved_parent_run_id or "",
+            parent_spawn_depth=int(metadata.get("spawn_depth") or 0),
+            parent_budget=budget,
+            instruction=parse_spawn_instruction(inbound_text),
+            tool_names=tool_names,
+            run_metadata=metadata,
         )
         outcome = self._outcome_from_spawn_result(spawn_result)
         self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
@@ -692,6 +695,70 @@ class ClawBotService:
             harness_id=str(harness_id),
             default_max_spawn_depth=self.harness_max_spawn_depth,
             default_max_child_runs=self.harness_max_child_runs,
+            default_max_parallel_spawns=self.harness_max_parallel_spawns,
+        )
+
+    async def spawn_worker_for_tool(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        parent_run_id: str | None,
+        parent_spawn_depth: int,
+        parent_budget: RunBudget,
+        instruction: str,
+        tool_names: list[str] | None = None,
+        context_mode: str = "isolated",
+        run_metadata: dict[str, Any] | None = None,
+    ):
+        budget = parent_budget
+        names = list(tool_names or budget.allowed_tool_names)
+        normalized_parent_run_id = str(parent_run_id or "").strip() or None
+        return await self._subagent_spawner().spawn_worker(
+            request=SpawnWorkerRequest(
+                parent_session_id=session_id,
+                source_message_id=source_message_id,
+                instruction=instruction,
+                allowed_tool_names=names,
+                parent_budget=parent_budget,
+                parent_run_id=normalized_parent_run_id,
+                parent_spawn_depth=parent_spawn_depth,
+                context_mode=context_mode,
+                run_metadata=dict(run_metadata or {}),
+            ),
+            parent_context_snapshot=self.load_context_snapshot(session_id=session_id),
+            run_budget=budget,
+            registered_tool_names=self.list_tool_names(),
+        )
+
+    async def spawn_workers_for_tool(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        parent_run_id: str | None,
+        parent_spawn_depth: int,
+        parent_budget: RunBudget,
+        tasks: list[SpawnWorkerTaskSpec],
+        run_metadata: dict[str, Any] | None = None,
+    ) -> SpawnWorkersResult:
+        normalized_parent_run_id = str(parent_run_id or "").strip() or None
+        return await self._subagent_spawner().spawn_workers(
+            request=SpawnWorkerRequest(
+                parent_session_id=session_id,
+                source_message_id=source_message_id,
+                instruction="",
+                allowed_tool_names=list(parent_budget.allowed_tool_names),
+                parent_budget=parent_budget,
+                parent_run_id=normalized_parent_run_id,
+                parent_spawn_depth=parent_spawn_depth,
+                run_metadata=dict(run_metadata or {}),
+            ),
+            tasks=tasks,
+            parent_context_snapshot=self.load_context_snapshot(session_id=session_id),
+            run_budget=parent_budget,
+            registered_tool_names=self.list_tool_names(),
+            max_parallel=self.harness_max_parallel_spawns,
         )
 
     @staticmethod

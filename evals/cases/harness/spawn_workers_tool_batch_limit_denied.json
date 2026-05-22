@@ -1,0 +1,37 @@
+{
+  "id": "spawn_workers_tool_batch_limit_denied",
+  "type": "harness",
+  "description": "spawn_workers tool should deny a batch when task count exceeds max_child_runs.",
+  "tags": ["harness", "subagent", "spawn", "tool", "budget", "parallel"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "parallel batch exceeds child limit",
+      "input": {
+        "text": "/tool spawn_workers {\"tasks\":[{\"instruction\":\"Find hello_agent in src.\",\"tool_names\":[\"search_files\"]},{\"instruction\":\"List files under src.\",\"tool_names\":[\"list_files\"]}]}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_workers", "search_files", "list_files"],
+          "max_child_runs": 1,
+          "max_tool_calls": 2
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "child run limit exceeded"
+        ],
+        "tool_names_all": ["spawn_workers"],
+        "state": {
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawn.denied"
+          ]
+        }
+      }
+    }
+  ]
+}

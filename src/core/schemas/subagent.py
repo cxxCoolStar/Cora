@@ -12,6 +12,24 @@ DEFAULT_SUBAGENT_POLICY_PROFILE = "background_readonly"
 
 
 @dataclass(slots=True)
+class SpawnWorkerTaskSpec:
+    instruction: str
+    tool_names: list[str] = field(default_factory=list)
+    context_mode: str | None = None
+
+
+@dataclass(slots=True)
+class SpawnWorkersResult:
+    parent_run_id: str
+    results: list[SpawnWorkerResult] = field(default_factory=list)
+    reply: str = ""
+    status: str = "completed"
+    disposition: str = "respond"
+    denied: bool = False
+    denial_reason: str | None = None
+
+
+@dataclass(slots=True)
 class SpawnWorkerRequest:
     parent_session_id: str
     source_message_id: str
@@ -106,6 +124,18 @@ def subagent_result_from_turn(
     )
 
 
+def format_spawn_workers_reply(*, results: list[SpawnWorkerResult]) -> str:
+    if not results:
+        return "No subagent tasks were spawned."
+    if len(results) == 1:
+        return results[0].reply
+    lines = [f"Spawned {len(results)} subagents in parallel."]
+    for index, result in enumerate(results, start=1):
+        preview = str(result.reply or "").strip().splitlines()[0][:120]
+        lines.append(f"{index}. {preview}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "DEFAULT_SUBAGENT_POLICY_PROFILE",
     "SPAWN_ORCHESTRATOR_AGENT_ROLE",
@@ -113,8 +143,11 @@ __all__ = [
     "SUBAGENT_WORKER_ROLE",
     "SpawnWorkerRequest",
     "SpawnWorkerResult",
+    "SpawnWorkerTaskSpec",
+    "SpawnWorkersResult",
     "SubagentResultSpec",
     "build_subagent_user_text",
+    "format_spawn_workers_reply",
     "parse_spawn_instruction",
     "subagent_result_from_turn",
 ]

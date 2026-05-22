@@ -990,6 +990,32 @@ class SqlAgentRunRecordRepository:
         text = str((metadata or {}).get("cleanup_status") or "").strip()
         return text or fallback
 
+    def append_trace_events(
+        self,
+        *,
+        run_id: str,
+        trace_events: list[RunTraceEvent],
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> AgentRunRecord:
+        with self.database.session() as session:
+            record = session.get(AgentRunRecordModel, run_id)
+            if record is None:
+                raise KeyError(f"Agent run record not found: {run_id}")
+            existing_events = list(record.trace_events_json or [])
+            start_sequence = len(existing_events)
+            for offset, event in enumerate(trace_events):
+                payload = self._trace_event_to_json(event)
+                payload["sequence"] = start_sequence + offset
+                existing_events.append(payload)
+            record.trace_events_json = existing_events
+            if metadata_patch:
+                merged_metadata = dict(record.metadata_json or {})
+                merged_metadata.update(dict(metadata_patch))
+                record.metadata_json = merged_metadata
+            session.commit()
+            session.refresh(record)
+            return self._to_agent_run_record(record)
+
     @classmethod
     def _to_agent_run_record(cls, record: AgentRunRecordModel) -> AgentRunRecord:
         return AgentRunRecord(

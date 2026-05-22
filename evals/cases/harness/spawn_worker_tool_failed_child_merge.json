@@ -1,0 +1,40 @@
+{
+  "id": "spawn_worker_tool_failed_child_merge",
+  "type": "harness",
+  "description": "spawn_worker tool should merge child error output back into the parent reply.",
+  "tags": ["harness", "subagent", "spawn", "tool", "merge"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "child read error merged to parent",
+      "input": {
+        "text": "/tool spawn_worker {\"instruction\":\"Read src/missing.py and summarize it.\",\"tool_names\":[\"read_file\"]}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_worker", "read_file"],
+          "max_child_runs": 2,
+          "max_tool_calls": 3
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Subagent completed",
+          "file does not exist",
+          "missing.py"
+        ],
+        "tool_names_all": ["spawn_worker"],
+        "state": {
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawned",
+            "subagent.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

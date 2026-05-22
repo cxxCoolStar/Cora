@@ -28,6 +28,9 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 4b | spawn_worker、子 session、子 run 记录、max_child_runs | `subagent_spawner.py`、`spawn_worker_turn` | ✅ |
 | Phase 4c | 子 run tool policy 继承（子 ⊂ 父 allow） | `subagent_policy.py`、harness 过滤 | ✅ |
 | Phase 4d | 子结果 `SubagentResultSpec` 合并回父回复 / metadata | `schemas/subagent.py` | ✅ |
+| Phase 4f | 主 agent `spawn_worker` 工具 | `builtin.py`、`tools.py`、`spawn_worker_for_tool` | ✅ |
+| Phase 4g | 主 agent `spawn_workers` 并行工具 | `spawn_workers_for_tool`、`harness_max_parallel_spawns` | ✅ |
+| Phase 4e | Subagent 边界 eval（深度/限额/policy/merge，含 tool 路径） | `evals/cases/harness/spawn_*` | ✅ |
 
 ## 建议的自学方式（在本仓库内）
 

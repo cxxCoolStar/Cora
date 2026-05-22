@@ -1,0 +1,43 @@
+{
+  "id": "spawn_workers_parallel_completes",
+  "type": "harness",
+  "description": "spawn_workers tool should run multiple child workers and merge parallel results.",
+  "tags": ["harness", "subagent", "spawn", "tool", "parallel"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "parallel spawn via tool",
+      "input": {
+        "text": "/tool spawn_workers {\"tasks\":[{\"instruction\":\"Find hello_agent in src.\",\"tool_names\":[\"search_files\"]},{\"instruction\":\"List files under src.\",\"tool_names\":[\"list_files\"]}]}",
+        "run_budget": {
+          "allowed_tool_names": ["spawn_workers", "search_files", "list_files"],
+          "max_tool_calls": 2,
+          "max_child_runs": 3,
+          "max_spawn_depth": 1
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Spawned 2 subagents",
+          "hello_agent"
+        ],
+        "tool_names_all": ["spawn_workers"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "subagent.spawned",
+            "subagent.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

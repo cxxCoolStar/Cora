@@ -37,6 +37,10 @@ TOOLSETS: dict[str, dict[str, object]] = {
         "description": "Search prior sessions and historical records through explicit retrieval.",
         "tools": ["search_sessions"],
     },
+    "subagent": {
+        "description": "Delegate isolated sub-runs to child workers and merge structured results back.",
+        "tools": ["spawn_worker", "spawn_workers"],
+    },
 }
 
 TOOLSET_ALIASES: dict[str, str] = {
@@ -53,11 +57,11 @@ TOOLSET_PRESETS: dict[str, dict[str, object]] = {
     },
     "cora-cli": {
         "description": "Coding-focused tool surface for the local CLI shell.",
-        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation"],
+        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation", "subagent"],
     },
     "cora-api": {
         "description": "General programmable tool surface for the HTTP/API shell.",
-        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation"],
+        "toolsets": ["user_memory", "file", "terminal", "web", "browser", "skills", "skills_execute", "session_search", "automation", "subagent"],
     },
 }
 

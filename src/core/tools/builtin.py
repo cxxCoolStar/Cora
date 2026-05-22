@@ -335,3 +335,76 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 requires_confirmation=True,
             )
         )
+    if active_registry.get("spawn_worker") is None:
+        active_registry.register(
+            ToolSpec(
+                name="spawn_worker",
+                toolset="subagent",
+                description=(
+                    "Delegate a single isolated subagent run with a narrower tool scope. "
+                    "The child completes synchronously and returns a structured summary."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "instruction": {"type": "string"},
+                        "tool_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "context_mode": {
+                            "type": "string",
+                            "enum": ["isolated", "shared"],
+                        },
+                    },
+                    "required": ["instruction"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_spawn_worker(invocation),
+                is_agent_stateful=True,
+                risk="medium",
+                allowed_roles=("primary",),
+            )
+        )
+    if active_registry.get("spawn_workers") is None:
+        active_registry.register(
+            ToolSpec(
+                name="spawn_workers",
+                toolset="subagent",
+                description=(
+                    "Delegate multiple isolated subagent runs in parallel (bounded by max parallel spawns). "
+                    "Each task must include an instruction and optional tool_names inherited from the parent run."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "instruction": {"type": "string"},
+                                    "tool_names": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "context_mode": {
+                                        "type": "string",
+                                        "enum": ["isolated", "shared"],
+                                    },
+                                },
+                                "required": ["instruction"],
+                                "additionalProperties": False,
+                            },
+                            "minItems": 1,
+                        },
+                    },
+                    "required": ["tasks"],
+                    "additionalProperties": False,
+                },
+                handler=lambda executor, invocation: executor._tool_spawn_workers(invocation),
+                is_agent_stateful=True,
+                risk="medium",
+                allowed_roles=("primary",),
+            )
+        )
