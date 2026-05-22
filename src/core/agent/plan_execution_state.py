@@ -15,6 +15,8 @@ class StoredPlanExecution:
     task_index: int
     task_results: list[TaskResultSpec] = field(default_factory=list)
     pending_hitl_id: str = ""
+    pause_reason: str = ""
+    checkpoint_id: str = ""
     run_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -26,6 +28,8 @@ class StoredPlanExecution:
             "task_index": self.task_index,
             "task_results": [result.to_dict() for result in self.task_results],
             "pending_hitl_id": self.pending_hitl_id,
+            "pause_reason": self.pause_reason,
+            "checkpoint_id": self.checkpoint_id,
             "run_metadata": dict(self.run_metadata),
         }
 
@@ -54,6 +58,8 @@ def stored_plan_execution_from_dict(payload: dict[str, Any]) -> StoredPlanExecut
         task_index=int(payload.get("task_index") or 0),
         task_results=task_results,
         pending_hitl_id=str(payload.get("pending_hitl_id") or ""),
+        pause_reason=str(payload.get("pause_reason") or ""),
+        checkpoint_id=str(payload.get("checkpoint_id") or ""),
         run_metadata=dict(payload.get("run_metadata") or {}),
     )
 

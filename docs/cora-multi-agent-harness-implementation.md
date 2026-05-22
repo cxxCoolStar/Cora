@@ -875,9 +875,13 @@ Goal:
 
 - make the system operationally robust.
 
+**5a (done):** Plan execution checkpoint on worker failure; `/execute resume|restart`;
+auto-resume after failed checkpoint; eval `plan_checkpoint_resume_after_failure`.
+See [cora-phase5-checkpoint-design.md](./cora-phase5-checkpoint-design.md).
+
 Actions:
 
-1. Add checkpoints and resume.
+1. Add checkpoints and resume. — **5a done** (plan-level; not full run replay)
 2. Add idempotency keys for mutating tools.
 3. Add retry backoff and compensation hooks.
 4. Add MCP tool mounting through registry.

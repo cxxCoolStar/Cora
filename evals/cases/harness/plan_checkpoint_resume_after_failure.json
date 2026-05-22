@@ -1,0 +1,85 @@
+{
+  "id": "plan_checkpoint_resume_after_failure",
+  "type": "harness",
+  "description": "Failed plan execution should persist a checkpoint and resume from the failed task without replanning.",
+  "tags": ["harness", "planner", "worker", "planning", "checkpoint"],
+  "setup": {
+    "planner_stub_mode": "two_step",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n",
+      "tests/test_example.py": "def test_hello_agent():\n    assert True\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates three-step plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Search the workspace in stages"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-3"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute fails on task-2 and saves checkpoint",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution failed",
+          "task-1",
+          "task-2",
+          "/execute resume",
+          "/execute restart"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-2"
+          }
+        }
+      }
+    },
+    {
+      "label": "resume retries from failed task and completes plan",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute resume"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1",
+          "task-2",
+          "task-3"
+        ],
+        "state": {
+          "agent_run_count": 5,
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-3"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -19,13 +19,17 @@ WORKER_AGENT_ROLE = "worker"
 DEFAULT_WORKER_POLICY_PROFILE = "coding_full"
 
 
-def build_worker_user_text(*, task: TaskSpec) -> str:
+def build_worker_user_text(*, task: TaskSpec, plan_resume: bool = False) -> str:
     tools = ", ".join(task.tool_names)
-    return (
-        f"{task.instruction.strip()}\n\n"
-        f"[Worker task {task.task_id}] {task.title}\n"
-        f"Tool scope: {tools}"
-    )
+    lines = [
+        task.instruction.strip(),
+        "",
+        f"[Worker task {task.task_id}] {task.title}",
+        f"Tool scope: {tools}",
+    ]
+    if plan_resume:
+        lines.append("[Plan resume]")
+    return "\n".join(lines)
 
 
 def worker_run_budget(*, plan: PlanSpec, task: TaskSpec) -> RunBudget:
@@ -68,6 +72,7 @@ class PlanExecutionResult:
     waiting_hitl: bool = False
     pending_hitl_id: str | None = None
     paused_task_index: int | None = None
+    pause_reason: str | None = None
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -125,20 +130,33 @@ class PlanExecutor:
                 plan_run.status = "failed"
                 return PlanExecutionResult(
                     plan_run=plan_run,
-                    reply=format_plan_execution_reply(plan=plan, plan_run=plan_run),
+                    reply=format_plan_execution_reply(
+                        plan=plan,
+                        plan_run=plan_run,
+                        pause_reason="failed",
+                        paused_task_index=index,
+                    ),
                     status="failed",
                     disposition="respond",
+                    paused_task_index=index,
+                    pause_reason="failed",
                     tool_trace=aggregated_tool_trace,
                 )
             if task_result.status == "pending":
                 plan_run.status = "waiting_hitl"
                 return PlanExecutionResult(
                     plan_run=plan_run,
-                    reply=format_plan_execution_reply(plan=plan, plan_run=plan_run),
+                    reply=format_plan_execution_reply(
+                        plan=plan,
+                        plan_run=plan_run,
+                        pause_reason="hitl",
+                        paused_task_index=index,
+                    ),
                     status="failed",
                     disposition="clarify",
                     waiting_hitl=True,
                     paused_task_index=index,
+                    pause_reason="hitl",
                     tool_trace=aggregated_tool_trace,
                 )
 
@@ -332,17 +350,19 @@ class PlanExecutor:
         context_snapshot: RuntimeContextSnapshot,
         metadata_base: dict[str, Any],
     ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
+        plan_resume = bool(metadata_base.get("plan_resume"))
         task_metadata = {
             **metadata_base,
             "agent_role": WORKER_AGENT_ROLE,
             "task_id": task.task_id,
             "parent_run_id": planner_run_id,
         }
+        worker_text = build_worker_user_text(task=task, plan_resume=plan_resume)
         turn_result = await self._turn_runner.run_turn(
             session_id=session_id,
             source_message_id=source_message_id,
-            user_text=build_worker_user_text(task=task),
-            raw_text=build_worker_user_text(task=task),
+            user_text=worker_text,
+            raw_text=worker_text,
             upload=None,
             context_snapshot=context_snapshot,
             run_budget=worker_run_budget(plan=plan, task=task),
@@ -511,7 +531,13 @@ def _task_summary_from_turn(turn_result: AgentTurnResult) -> str:
     return "No worker output."
 
 
-def format_plan_execution_reply(*, plan: PlanSpec, plan_run: PlanRunSpec) -> str:
+def format_plan_execution_reply(
+    *,
+    plan: PlanSpec,
+    plan_run: PlanRunSpec,
+    pause_reason: str | None = None,
+    paused_task_index: int | None = None,
+) -> str:
     status_label = {
         "completed": "completed successfully",
         "failed": "failed",
@@ -530,6 +556,22 @@ def format_plan_execution_reply(*, plan: PlanSpec, plan_run: PlanRunSpec) -> str
     if plan_run.status == "waiting_hitl":
         lines.append("")
         lines.append("Reply 确认 to approve the pending tool and continue this plan, or 拒绝 to cancel.")
+    elif plan_run.status == "failed" and str(pause_reason or "").strip().lower() == "failed":
+        failed_task = ""
+        if paused_task_index is not None and 0 <= int(paused_task_index) < len(plan.tasks):
+            failed_task = plan.tasks[int(paused_task_index)].task_id
+        lines.append("")
+        if failed_task:
+            lines.append(
+                f"Execution stopped at `{failed_task}`. "
+                "Reply /execute resume to retry from the failed task, "
+                "or /execute restart to run the full plan again."
+            )
+        else:
+            lines.append(
+                "Execution stopped before completion. "
+                "Reply /execute resume to continue, or /execute restart to run the full plan again."
+            )
     return "\n".join(lines)
 
 

@@ -154,6 +154,34 @@ class DevelopmentModelClient(ModelClient):
                 ],
             }
             return json.dumps(payload, ensure_ascii=False)
+        if stub_mode in {"two_step", "two-step", "checkpoint"}:
+            payload = {
+                "plan_id": "plan-dev-two-step",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "title": "Search workspace",
+                        "tool_names": ["search_files"],
+                        "instruction": "Find hello_agent under src.",
+                    },
+                    {
+                        "task_id": "task-2",
+                        "title": "Simulated failure step",
+                        "tool_names": ["search_files"],
+                        "instruction": "This step is configured to fail in eval stubs.",
+                    },
+                    {
+                        "task_id": "task-3",
+                        "title": "Search again after resume",
+                        "tool_names": ["search_files"],
+                        "instruction": "Find hello_agent under tests.",
+                    },
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode in {"high_risk", "write_file", "review"}:
             payload = {
                 "plan_id": "plan-dev-high-risk",
@@ -250,6 +278,15 @@ class DevelopmentModelClient(ModelClient):
     def _worker_tool_call_from_text(cls, text: str) -> ToolCall | None:
         if "[Worker task" not in text and "[Subagent task]" not in text:
             return None
+        import os
+
+        fail_task_id = str(os.environ.get("CORA_EVAL_WORKER_FAIL_TASK_ID") or "").strip()
+        if fail_task_id and f"[Worker task {fail_task_id}]" in text and "[Plan resume]" not in text:
+            return ToolCall(
+                id=str(uuid.uuid4()),
+                tool_name="write_file",
+                arguments={"path": "src/marker.txt", "content": "should not run\n"},
+            )
         scope = ""
         for line in text.splitlines():
             if line.strip().lower().startswith("tool scope:"):
@@ -258,6 +295,17 @@ class DevelopmentModelClient(ModelClient):
         if not scope:
             return None
         tool_name = scope.split(",")[0].strip()
+        if (
+            "[Worker task task-2]" in text
+            and "[Plan resume]" not in text
+            and str(os.environ.get("CORA_EVAL_PLANNER_STUB") or "").strip().lower()
+            in {"two_step", "two-step", "checkpoint"}
+        ):
+            return ToolCall(
+                id=str(uuid.uuid4()),
+                tool_name="write_file",
+                arguments={"path": "src/marker.txt", "content": "checkpoint eval failure\n"},
+            )
         if not tool_name:
             return None
         arguments: dict = {}

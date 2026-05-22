@@ -24,6 +24,14 @@ from core.agent.plan_reviewer import (
     reviewer_run_budget,
     verdict_from_turn_reply,
 )
+from core.agent.plan_execute import (
+    ExecutePlanCommand,
+    checkpoint_resume_task_index,
+    checkpoint_resume_task_results,
+    new_checkpoint_id,
+    parse_execute_plan_command,
+    should_auto_resume_failed_checkpoint,
+)
 from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
 from core.agent.subagent_spawner import SubagentSpawner
@@ -653,6 +661,62 @@ class ClawBotService:
                 tool_trace=[],
             )
         inbound_text = str(text or "").strip() or "/execute"
+        execute_command = parse_execute_plan_command(inbound_text)
+        checkpoint = self.plan_store.get_execution(session_id=session_id)
+
+        if execute_command.mode == "restart":
+            self.plan_store.clear_execution(session_id=session_id)
+            checkpoint = None
+            inbound_text = "/execute"
+
+        if execute_command.mode == "resume":
+            if checkpoint is None:
+                return AssistantTurnOutcome(
+                    reply="No paused plan execution is available to resume. Run /plan and /execute first.",
+                    action="plan_execute",
+                    disposition="clarify",
+                    status="failed",
+                    tool_name="none",
+                    tool_arguments={},
+                    context=None,
+                    confidence="high",
+                    reason="Plan resume requested without a stored checkpoint.",
+                    artifacts=[],
+                    trace=[],
+                    tool_trace=[],
+                )
+            inbound_turn = await self._session_shell.record_inbound_turn(
+                session_id=session_id,
+                text=inbound_text,
+                upload=None,
+                source_metadata=source_metadata,
+            )
+            return await self._resume_plan_from_checkpoint(
+                session_id=session_id,
+                stored=stored,
+                checkpoint=checkpoint,
+                inbound_turn=inbound_turn,
+                source_metadata=dict(source_metadata or {}),
+            )
+
+        if should_auto_resume_failed_checkpoint(
+            command=execute_command,
+            checkpoint=checkpoint,
+        ):
+            inbound_turn = await self._session_shell.record_inbound_turn(
+                session_id=session_id,
+                text=inbound_text,
+                upload=None,
+                source_metadata=source_metadata,
+            )
+            return await self._resume_plan_from_checkpoint(
+                session_id=session_id,
+                stored=stored,
+                checkpoint=checkpoint,
+                inbound_turn=inbound_turn,
+                source_metadata=dict(source_metadata or {}),
+            )
+
         inbound_turn = await self._session_shell.record_inbound_turn(
             session_id=session_id,
             text=inbound_text,
@@ -670,24 +734,13 @@ class ClawBotService:
             context_snapshot=context_snapshot,
             run_metadata=run_metadata,
         )
-        if execution.waiting_hitl:
-            pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
-            if pending is not None and execution.paused_task_index is not None:
-                self.plan_store.save_execution(
-                    execution=StoredPlanExecution(
-                        session_id=session_id,
-                        plan=stored.plan,
-                        planner_run_id=stored.planner_run_id,
-                        source_message_id=inbound_turn.source_message_id,
-                        task_index=execution.paused_task_index,
-                        task_results=list(execution.plan_run.task_results),
-                        pending_hitl_id=pending.hitl_id,
-                        run_metadata=run_metadata,
-                    )
-                )
-                execution.pending_hitl_id = pending.hitl_id
-        else:
-            self.plan_store.clear_execution(session_id=session_id)
+        self._persist_plan_execution_state(
+            session_id=session_id,
+            stored=stored,
+            execution=execution,
+            source_message_id=inbound_turn.source_message_id,
+            run_metadata=run_metadata,
+        )
         outcome = self._outcome_from_plan_execution(execution)
         self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
         logger.info(
@@ -698,6 +751,127 @@ class ClawBotService:
             outcome.disposition,
         )
         return outcome
+
+    async def _resume_plan_from_checkpoint(
+        self,
+        *,
+        session_id: str,
+        stored: StoredValidatedPlan,
+        checkpoint: StoredPlanExecution,
+        inbound_turn,
+        source_metadata: dict[str, Any],
+    ):
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+
+        if str(checkpoint.pending_hitl_id or "").strip():
+            return AssistantTurnOutcome(
+                reply=(
+                    "This plan is paused for human approval. "
+                    "Approve the pending tool before using /execute resume."
+                ),
+                action="plan_execute",
+                disposition="clarify",
+                status="failed",
+                tool_name="none",
+                tool_arguments={},
+                context=None,
+                confidence="high",
+                reason="Plan resume blocked while HITL is pending.",
+                artifacts=[],
+                trace=[],
+                tool_trace=[],
+            )
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        context_snapshot.current_source_event_id = inbound_turn.source_event_id
+        resume_metadata = dict(checkpoint.run_metadata)
+        resume_metadata.update(source_metadata)
+        resume_metadata["plan_checkpoint_id"] = str(checkpoint.checkpoint_id or "")
+        resume_metadata["plan_resume"] = True
+        execution = await self._plan_executor().execute(
+            session_id=session_id,
+            plan=stored.plan,
+            planner_run_id=stored.planner_run_id,
+            source_message_id=inbound_turn.source_message_id,
+            context_snapshot=context_snapshot,
+            run_metadata=resume_metadata,
+            start_task_index=checkpoint_resume_task_index(checkpoint=checkpoint),
+            initial_task_results=checkpoint_resume_task_results(checkpoint=checkpoint),
+        )
+        self._persist_plan_execution_state(
+            session_id=session_id,
+            stored=stored,
+            execution=execution,
+            source_message_id=inbound_turn.source_message_id,
+            run_metadata=resume_metadata,
+        )
+        outcome = self._outcome_from_plan_execution(execution)
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        logger.info(
+            "clawbot resume_plan_checkpoint_done session_id=%s plan_id=%s status=%s checkpoint_id=%s",
+            session_id,
+            stored.plan.plan_id,
+            outcome.status,
+            checkpoint.checkpoint_id,
+        )
+        return outcome
+
+    def _persist_plan_execution_state(
+        self,
+        *,
+        session_id: str,
+        stored: StoredValidatedPlan,
+        execution: PlanExecutionResult,
+        source_message_id: str,
+        run_metadata: dict[str, Any],
+    ) -> None:
+        if execution.waiting_hitl:
+            pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
+            if pending is not None and execution.paused_task_index is not None:
+                existing = self.plan_store.get_execution(session_id=session_id)
+                checkpoint_id = (
+                    str(existing.checkpoint_id or "").strip() if existing is not None else ""
+                ) or new_checkpoint_id()
+                self.plan_store.save_execution(
+                    execution=StoredPlanExecution(
+                        session_id=session_id,
+                        plan=stored.plan,
+                        planner_run_id=stored.planner_run_id,
+                        source_message_id=source_message_id,
+                        task_index=execution.paused_task_index,
+                        task_results=list(execution.plan_run.task_results),
+                        pending_hitl_id=pending.hitl_id,
+                        pause_reason="hitl",
+                        checkpoint_id=checkpoint_id,
+                        run_metadata=run_metadata,
+                    )
+                )
+                execution.pending_hitl_id = pending.hitl_id
+            return
+        if (
+            execution.status == "failed"
+            and execution.paused_task_index is not None
+            and str(execution.pause_reason or "").strip().lower() == "failed"
+        ):
+            existing = self.plan_store.get_execution(session_id=session_id)
+            checkpoint_id = (
+                str(existing.checkpoint_id or "").strip() if existing is not None else ""
+            ) or new_checkpoint_id()
+            self.plan_store.save_execution(
+                execution=StoredPlanExecution(
+                    session_id=session_id,
+                    plan=stored.plan,
+                    planner_run_id=stored.planner_run_id,
+                    source_message_id=source_message_id,
+                    task_index=execution.paused_task_index,
+                    task_results=list(execution.plan_run.task_results),
+                    pending_hitl_id="",
+                    pause_reason="failed",
+                    checkpoint_id=checkpoint_id,
+                    run_metadata=run_metadata,
+                )
+            )
+            return
+        self.plan_store.clear_execution(session_id=session_id)
 
     def _plan_executor(self) -> PlanExecutor:
         return PlanExecutor(
@@ -1004,22 +1178,18 @@ class ClawBotService:
             initial_task_results=[*prior_results, completed_result],
             initial_tool_trace=resume_trace,
         )
-        self.plan_store.clear_execution(session_id=session_id)
-        if continued.waiting_hitl:
-            pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
-            if pending is not None and continued.paused_task_index is not None:
-                self.plan_store.save_execution(
-                    execution=StoredPlanExecution(
-                        session_id=session_id,
-                        plan=state.plan,
-                        planner_run_id=state.planner_run_id,
-                        source_message_id=state.source_message_id,
-                        task_index=continued.paused_task_index,
-                        task_results=list(continued.plan_run.task_results),
-                        pending_hitl_id=pending.hitl_id,
-                        run_metadata=resume_metadata,
-                    )
-                )
+        stored_plan = StoredValidatedPlan(
+            session_id=session_id,
+            plan=state.plan,
+            planner_run_id=state.planner_run_id,
+        )
+        self._persist_plan_execution_state(
+            session_id=session_id,
+            stored=stored_plan,
+            execution=continued,
+            source_message_id=state.source_message_id,
+            run_metadata=resume_metadata,
+        )
         outcome = self._outcome_from_plan_execution(continued)
         self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
         logger.info(

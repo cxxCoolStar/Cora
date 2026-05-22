@@ -35,6 +35,7 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 4g | 主 agent `spawn_workers` 并行工具 | `spawn_workers_for_tool`、`harness_max_parallel_spawns` | ✅ |
 | Phase 4e | Subagent 边界 eval（深度/限额/policy/merge，含 tool 路径） | `evals/cases/harness/spawn_*` | ✅ |
 | Phase 4h | Subagent `context_mode` isolated / forked | `subagent_context.py`、`_load_agent_history` | ✅ |
+| Phase 5a | Plan 执行 checkpoint（失败续跑 / restart） | `plan_execute.py`、`execute_plan_outcome` | ✅ |
 
 ## 建议的自学方式（在本仓库内）
 
@@ -53,4 +54,5 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 
 - [cora-multi-agent-harness-implementation.md](./cora-multi-agent-harness-implementation.md) — 架构路线图
 - [cora-phase3-planning-design.md](./cora-phase3-planning-design.md) — Phase 3 设计
+- [cora-phase5-checkpoint-design.md](./cora-phase5-checkpoint-design.md) — Phase 5 checkpoint
 - [wechat-hitl.md](./wechat-hitl.md) — 微信人工确认
