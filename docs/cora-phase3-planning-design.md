@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：PR-3a/3b 已落地（schema + validator + Planner harness）；PR-3c 待实现。前置：Phase 2 + harness 16/16。
+> 状态：PR-3a/3b/3c 已落地（schema + Planner + 顺序 Worker 执行）；PR-3d 可选。前置：Phase 2 + harness 17/17。
 
 ## 1. 目标
 
@@ -140,11 +140,14 @@ v1 建议 **显式 + 启发式** 并存：
 - Eval：`planner_valid_plan_records_trace`、`plan_validation_rejects_unknown_tool`
 - 测试：`tests/test_plan_planner.py`
 
-### PR-3c：顺序 Worker dispatch
+### PR-3c：顺序 Worker dispatch — **已完成**
 
-- `PlanExecutor`：for task in plan.tasks → `new_run_input` + Worker budget
-- 汇总 `TaskResultSpec` 为最终用户回复
-- Eval：`plan_valid_single_task_completes`
+- `src/core/agent/plan_executor.py` — `PlanExecutor`、Worker budget、`build_worker_user_text`
+- `src/core/agent/plan_store.py` — `InMemoryPlanStore`（session 级 validated plan）
+- `ClawBotService.execute_plan_turn()`；`/execute` 触发顺序 Worker harness run
+- Planner 成功后写入 plan store；Worker `parent_run_id` 指向 planner run
+- Eval：`plan_single_task_worker_completes`（plan + execute 两步）
+- 测试：`tests/test_plan_executor.py`
 
 ### PR-3d（可选）：Reviewer + 失败策略细化
 

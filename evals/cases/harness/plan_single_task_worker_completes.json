@@ -1,0 +1,60 @@
+{
+  "id": "plan_single_task_worker_completes",
+  "type": "harness",
+  "description": "A validated plan should execute worker tasks sequentially and record tool traces.",
+  "tags": ["harness", "planner", "worker", "planning"],
+  "setup": {
+    "planner_stub_mode": "valid",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates validated plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Find hello_agent in the workspace"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute runs worker task",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["search_files"],
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1",
+          "hello_agent"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-1"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

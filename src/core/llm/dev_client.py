@@ -40,6 +40,10 @@ class DevelopmentModelClient(ModelClient):
             goal_line = text.split("\n", 1)[0].strip()
             return ModelResponse(assistant_text=self._planner_plan_json(f"/plan {goal_line}"))
 
+        worker_tool_call = self._worker_tool_call_from_text(text)
+        if worker_tool_call is not None:
+            return ModelResponse(tool_calls=[worker_tool_call])
+
         if text.startswith("/tool "):
             _, _, remainder = text.partition("/tool ")
             name, _, payload = remainder.partition(" ")
@@ -89,10 +93,35 @@ class DevelopmentModelClient(ModelClient):
                 "tasks": [
                     {
                         "task_id": "task-1",
-                        "title": "List scheduled tasks",
-                        "tool_names": ["scheduled_tasks"],
-                        "instruction": "List all scheduled tasks.",
+                        "title": "Search workspace",
+                        "tool_names": ["search_files"],
+                        "instruction": "Find `hello_agent` in `src`.",
                     }
                 ],
             }
         return json.dumps(payload, ensure_ascii=False)
+
+    @classmethod
+    def _worker_tool_call_from_text(cls, text: str) -> ToolCall | None:
+        if "[Worker task" not in text:
+            return None
+        scope = ""
+        for line in text.splitlines():
+            if line.strip().lower().startswith("tool scope:"):
+                scope = line.split(":", 1)[1].strip()
+                break
+        if not scope:
+            return None
+        tool_name = scope.split(",")[0].strip()
+        if not tool_name:
+            return None
+        arguments: dict = {}
+        if tool_name == "search_files":
+            arguments = {"query": "hello_agent", "path": "src"}
+        elif tool_name == "scheduled_tasks":
+            arguments = {"action": "list"}
+        return ToolCall(
+            id=str(uuid.uuid4()),
+            tool_name=tool_name,
+            arguments=arguments,
+        )

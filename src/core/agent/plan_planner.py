@@ -170,7 +170,7 @@ def _planner_success_reply(plan: PlanSpec | None) -> str:
         tools = ", ".join(task.tool_names)
         lines.append(f"- {task.task_id}: {task.title} (tools: {tools})")
     lines.append("")
-    lines.append("Reply /execute when worker execution is wired (PR-3c).")
+    lines.append("Reply /execute to run these tasks with the worker harness.")
     return "\n".join(lines)
 
 

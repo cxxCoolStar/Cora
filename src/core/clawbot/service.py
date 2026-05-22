@@ -9,7 +9,9 @@ from fastapi import UploadFile
 
 from core.agent.execution_policy import DIRECT_TOOL_PLAN_MODE, ExecutionPolicyResolver
 from core.agent.harness import DefaultAgentHarness
+from core.agent.plan_executor import PlanExecutor, PlanExecutionResult
 from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
+from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
@@ -89,6 +91,7 @@ class ClawBotService:
         job_harness_policy_profile: str | None = "background_readonly",
         agent_run_record_repository: AgentRunRecordRepository | None = None,
         hitl_store: HitlStore | None = None,
+        plan_store: PlanStore | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -190,6 +193,7 @@ class ClawBotService:
         )
         self.agent_run_record_repository = agent_run_record_repository
         self.hitl_store = hitl_store or InMemoryHitlStore()
+        self.plan_store = plan_store or InMemoryPlanStore()
         self._agent_turn_runner.harness = DefaultAgentHarness(
             runner=self._agent_turn_runner,
             run_record_repository=agent_run_record_repository,
@@ -504,7 +508,131 @@ class ClawBotService:
             source_metadata=metadata,
             run_budget=run_budget or planner_run_budget(),
         )
+        self._persist_validated_plan(session_id=session_id)
         return self._session_shell.to_turn_response(outcome=outcome)
+
+    async def execute_plan_turn(
+        self,
+        *,
+        session_id: str,
+        text: str | None = None,
+        plan_id: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> TurnResponse:
+        outcome = await self.execute_plan_outcome(
+            session_id=session_id,
+            text=text,
+            plan_id=plan_id,
+            source_metadata=source_metadata,
+        )
+        return self._session_shell.to_turn_response(outcome=outcome)
+
+    async def execute_plan_outcome(
+        self,
+        *,
+        session_id: str,
+        text: str | None = None,
+        plan_id: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
+    ):
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+
+        self.session_repository.get(session_id)
+        stored = self.plan_store.get_latest(session_id=session_id, plan_id=plan_id)
+        if stored is None:
+            return AssistantTurnOutcome(
+                reply="No validated plan is available for this session. Run /plan first.",
+                action="plan_execute",
+                disposition="clarify",
+                status="failed",
+                tool_name="none",
+                tool_arguments={},
+                context=None,
+                confidence="high",
+                reason="Plan execution requested without a stored validated plan.",
+                artifacts=[],
+                trace=[],
+                tool_trace=[],
+            )
+        inbound_text = str(text or "").strip() or "/execute"
+        inbound_turn = await self._session_shell.record_inbound_turn(
+            session_id=session_id,
+            text=inbound_text,
+            upload=None,
+            source_metadata=source_metadata,
+        )
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        context_snapshot.current_source_event_id = inbound_turn.source_event_id
+        execution = await self._plan_executor().execute(
+            session_id=session_id,
+            plan=stored.plan,
+            planner_run_id=stored.planner_run_id,
+            source_message_id=inbound_turn.source_message_id,
+            context_snapshot=context_snapshot,
+            run_metadata=dict(source_metadata or {}),
+        )
+        outcome = self._outcome_from_plan_execution(execution)
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        logger.info(
+            "clawbot execute_plan_outcome_done session_id=%s plan_id=%s status=%s disposition=%s",
+            session_id,
+            stored.plan.plan_id,
+            outcome.status,
+            outcome.disposition,
+        )
+        return outcome
+
+    def _plan_executor(self) -> PlanExecutor:
+        return PlanExecutor(
+            turn_runner=self._agent_turn_runner,
+            run_record_repository=self.agent_run_record_repository,
+        )
+
+    @staticmethod
+    def _outcome_from_plan_execution(execution: PlanExecutionResult):
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+
+        primary_tool = execution.tool_trace[-1] if execution.tool_trace else None
+        return AssistantTurnOutcome(
+            reply=execution.reply,
+            action="plan_execute",
+            disposition=execution.disposition,
+            status=execution.status,
+            tool_name=str((primary_tool or {}).get("tool_name") or "none"),
+            tool_arguments=dict((primary_tool or {}).get("arguments") or {}),
+            context=None,
+            confidence="high",
+            reason="Sequential plan worker execution finished.",
+            artifacts=[],
+            trace=[
+                {
+                    "role": "tool",
+                    "name": entry.get("tool_name"),
+                    "content": str(entry.get("metadata", {}).get("content") or entry.get("tool_name") or ""),
+                }
+                for entry in execution.tool_trace
+                if entry.get("tool_name")
+            ],
+            tool_trace=list(execution.tool_trace),
+        )
+
+    def _persist_validated_plan(self, *, session_id: str) -> None:
+        if self.agent_run_record_repository is None:
+            return
+        for record in self.agent_run_record_repository.list_by_session(session_id=session_id):
+            if record.outcome != "plan_validated":
+                continue
+            plan_payload = record.metadata.get("plan")
+            if not isinstance(plan_payload, dict):
+                continue
+            self.plan_store.save(
+                stored=stored_plan_from_metadata(
+                    session_id=session_id,
+                    planner_run_id=record.run_id,
+                    plan_payload=plan_payload,
+                )
+            )
+            return
 
     async def reply_outcome(
         self,

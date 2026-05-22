@@ -187,6 +187,12 @@ class DefaultAgentHarness:
                 ),
             )
             loop_result = finalize_result.loop_result
+            if (
+                finalize_result.validation is not None
+                and finalize_result.validation.valid
+                and finalize_result.validation.plan is not None
+            ):
+                run_input.metadata["validated_plan"] = finalize_result.validation.plan.to_dict()
         self._emit(
             HarnessTraceEventType.RESOLVE_COMPLETED,
             run_input=run_input,
@@ -260,6 +266,9 @@ class DefaultAgentHarness:
         }
         if run_input.agent_role == PLANNER_AGENT_ROLE:
             completion_metadata["planner_run"] = True
+            validated_plan = run_input.metadata.get("validated_plan")
+            if isinstance(validated_plan, dict):
+                completion_metadata["plan"] = validated_plan
         self.run_record_repository.mark_completed(
             run_id=run_input.run_id,
             status=loop_result.status,

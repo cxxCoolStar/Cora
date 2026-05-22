@@ -16,7 +16,7 @@
       "expect": {
         "status": "completed",
         "disposition": "respond",
-        "reply_contains_all": ["Plan `", "validated", "scheduled_tasks"],
+        "reply_contains_all": ["Plan `", "validated", "search_files"],
         "state": {
           "agent_run_count": 1,
           "latest_agent_run_status": "completed",
