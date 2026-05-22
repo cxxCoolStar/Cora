@@ -23,11 +23,14 @@ from core.agent.skill_protocol import PendingRequest, PendingStateDelta, SkillEx
 from core.agent.session_runtime import SessionRuntimeSnapshotLoader
 from core.agent.skill_loader import SkillLoader
 from core.agent.tool_policy import allow_tool_policy_decision, deny_tool_policy_decision
+from core.agent.hitl_store import InMemoryHitlStore
 from core.agent.tool_policy_engine import (
     ToolPolicyEngine,
     effective_allowed_tool_names,
     effective_denied_tool_names,
     has_runtime_tool_governance,
+    requires_hitl_confirmation,
+    resolve_platform_name,
 )
 from core.schemas.tool_policy import ToolPolicyContext
 from core.agent.turn_runner import AgentTurnRunner
@@ -1076,6 +1079,109 @@ def test_effective_allowed_tool_names_intersects_profile_and_budget() -> None:
 def test_has_runtime_tool_governance_detects_budget_only() -> None:
     assert has_runtime_tool_governance(RunBudget(max_tool_calls=2)) is True
     assert has_runtime_tool_governance(RunBudget()) is False
+
+
+def test_resolve_platform_name_normalizes_wechat_channel() -> None:
+    assert resolve_platform_name("weixin") == "wechat"
+    assert resolve_platform_name("cli") == "cli"
+
+
+def test_tool_policy_engine_asks_for_confirmation() -> None:
+    context = ToolPolicyContext(
+        tool_name="scheduled_tasks",
+        requires_confirmation=True,
+        tool_risk="high",
+        platform="api",
+    )
+
+    assert requires_hitl_confirmation(context) is True
+    decision = ToolPolicyEngine().evaluate(context)
+    assert decision.decision == "ask"
+    assert decision.reason == "confirmation_required"
+    assert "confirmation" in decision.safe_user_message
+
+
+def test_tool_policy_engine_skips_confirmation_on_cli() -> None:
+    context = ToolPolicyContext(
+        tool_name="scheduled_tasks",
+        requires_confirmation=True,
+        tool_risk="high",
+        platform="cli",
+    )
+
+    assert requires_hitl_confirmation(context) is False
+    decision = ToolPolicyEngine().evaluate(context)
+    assert decision.decision == "allow"
+
+
+@pytest.mark.anyio
+async def test_default_agent_harness_asks_for_confirmation_before_execution() -> None:
+    repository = InMemoryAgentRunRecordRepository()
+    hitl_store = InMemoryHitlStore()
+    model = StubModelClient(
+        responses=[
+            ModelResponse(
+                assistant_text="",
+                tool_calls=[ToolCall(tool_name="scheduled_tasks", arguments={"action": "list"})],
+            ),
+            ModelResponse(assistant_text="done"),
+        ]
+    )
+    executor = StubExecutor(results=[])
+    loop = AgentLoop(
+        model_client=model,
+        tool_executor=executor,
+        tool_specs=[
+            ToolSpec(
+                name="scheduled_tasks",
+                description="scheduled tasks",
+                input_schema={},
+                risk="high",
+                requires_confirmation=True,
+            ),
+        ],
+        max_steps=2,
+    )
+    runner = AgentTurnRunner(
+        orchestrator=AgentOrchestrator(loop=loop),
+        loop=loop,
+        runtime_manager=AgentRuntimeManager(pending_state_repository=StubPendingStateRepository()),
+        skill_loader=SkillLoader(),
+        history_loader=lambda **kwargs: [],
+        delivery_available=lambda: False,
+        media_kind_resolver=lambda upload: None,
+        tool_specs_resolver=lambda runtime: loop.tool_specs,
+        execution_policy_resolver=ExecutionPolicyResolver(),
+    )
+    harness = DefaultAgentHarness(
+        runner=runner,
+        run_record_repository=repository,
+        hitl_store=hitl_store,
+    )
+    run_input = new_run_input(
+        session_id="session-hitl-ask",
+        source_message_id="msg-hitl-ask",
+        user_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        raw_text="/tool scheduled_tasks {\"action\":\"list\"}",
+        upload=None,
+        context_snapshot=RuntimeContextSnapshot(),
+        budget=RunBudget(policy_profile="coding_full"),
+        metadata={"platform": "api"},
+    )
+
+    result = await harness.run(run_input=run_input)
+
+    record = repository.get(run_id=run_input.run_id)
+    assert result.disposition == "clarify"
+    assert result.exit_reason == "needs_clarification"
+    assert result.tool_trace[0].action == "policy_ask"
+    assert result.tool_trace[0].metadata["hitl_id"]
+    assert len(executor.results) == 0
+    requested_event = next(
+        event for event in record.trace_events if event.event_type == HarnessTraceEventType.TOOL_REQUESTED
+    )
+    assert requested_event.metadata["attempted_tool_name"] == "scheduled_tasks"
+    assert record.metadata["failure_category"] == "needs_confirmation"
 
 
 @pytest.mark.anyio

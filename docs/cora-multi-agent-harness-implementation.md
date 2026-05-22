@@ -819,6 +819,17 @@ Only after this object is stable should Phase 2 add `ask`/HITL and `sandbox`.
 Phase 3 must wait until tool policy decisions can reliably grant a Worker a
 narrow tool set.
 
+Phase 2 current status:
+
+- PR-1 complete: `ToolPolicyEngine` is the single policy entry point; harness
+  uses one merged tool guard.
+- PR-2 ask slice complete: `ask` decisions for `requires_confirmation` tools
+  with medium/high risk (CLI auto-allows); `HitlRequest` persisted in-memory;
+  trace emits `tool.requested`; harness eval `high_risk_tool_requests_confirmation`
+  passes.
+- PR-2 still pending: `sandbox` execution routing, durable HITL approval flow,
+  and approval API for WeChat/HTTP shells.
+
 ### Phase 3: Structured Planning Without Parallelism
 
 Goal:

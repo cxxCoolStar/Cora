@@ -177,6 +177,7 @@ class WechatGatewayService:
                 "source_created_at": source_created_at.isoformat() if source_created_at is not None else None,
                 "delivery_available": self._ilink_client is not None,
                 "platform_preset": "cora-wechat",
+                "platform": "wechat",
             },
         )
 

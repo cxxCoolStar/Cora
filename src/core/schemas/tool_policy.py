@@ -19,3 +19,4 @@ class ToolPolicyContext:
     tool_calls_so_far: int = 0
     session_kind: str | None = None
     background_execution: bool = False
+    approved_tool_names: frozenset[str] = field(default_factory=frozenset)

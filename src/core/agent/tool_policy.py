@@ -75,6 +75,31 @@ def deny_tool_policy_decision(
     )
 
 
+def ask_tool_policy_decision(
+    *,
+    tool_name: str,
+    reason: str = "confirmation_required",
+    policy_profile: str | None = None,
+    risk: ToolRisk = "medium",
+    requires_confirmation: bool = True,
+    requires_sandbox: bool = False,
+    audit_metadata: dict[str, object] | None = None,
+) -> ToolPolicyDecision:
+    return ToolPolicyDecision(
+        decision="ask",
+        reason=reason,
+        tool_name=tool_name,
+        risk=risk,
+        policy_profile=policy_profile,
+        requires_confirmation=requires_confirmation,
+        requires_sandbox=requires_sandbox,
+        safe_user_message=(
+            f"This action needs your confirmation before I run `{tool_name}`."
+        ),
+        audit_metadata=dict(audit_metadata or {}),
+    )
+
+
 def deny_max_tool_calls_decision(
     *,
     tool_name: str,
@@ -102,6 +127,7 @@ __all__ = [
     "ToolPolicyDecisionKind",
     "ToolRisk",
     "allow_tool_policy_decision",
+    "ask_tool_policy_decision",
     "deny_tool_policy_decision",
     "deny_max_tool_calls_decision",
 ]

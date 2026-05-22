@@ -5,6 +5,7 @@ from core.agent.tool_policy import (
     ToolPolicyDecision,
     ToolRisk,
     allow_tool_policy_decision,
+    ask_tool_policy_decision,
     deny_tool_policy_decision,
     deny_max_tool_calls_decision,
 )
@@ -64,6 +65,33 @@ def has_runtime_tool_governance(budget: RunBudget) -> bool:
         or bool(effective_allowed_tool_names(budget))
         or bool(effective_denied_tool_names(budget))
     )
+
+
+def resolve_platform_name(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"weixin", "wechat"}:
+        return "wechat"
+    if text in {"cli", "api", "http", "tui"}:
+        return text
+    return text
+
+
+def requires_hitl_confirmation(context: ToolPolicyContext) -> bool:
+    if not context.requires_confirmation:
+        return False
+    if context.background_execution:
+        return False
+    if context.tool_name in context.approved_tool_names:
+        return False
+    risk = normalize_tool_risk(context.tool_risk)
+    if risk not in {"medium", "high"}:
+        return False
+    platform = resolve_platform_name(context.platform)
+    if platform == "cli":
+        return False
+    return True
 
 
 def should_expose_tool(
@@ -137,6 +165,19 @@ class ToolPolicyEngine:
                 audit_metadata=audit_metadata,
             )
 
+        if requires_hitl_confirmation(context):
+            return ask_tool_policy_decision(
+                tool_name=context.tool_name,
+                policy_profile=context.policy_profile,
+                risk=normalize_tool_risk(context.tool_risk),
+                requires_confirmation=True,
+                requires_sandbox=context.requires_sandbox,
+                audit_metadata={
+                    **audit_metadata,
+                    "platform": resolve_platform_name(context.platform),
+                },
+            )
+
         return allow_tool_policy_decision(
             tool_name=context.tool_name,
             policy_profile=context.policy_profile,
@@ -155,5 +196,7 @@ __all__ = [
     "has_runtime_tool_governance",
     "normalize_tool_risk",
     "normalize_tool_names",
+    "requires_hitl_confirmation",
+    "resolve_platform_name",
     "should_expose_tool",
 ]

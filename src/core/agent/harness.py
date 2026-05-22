@@ -10,6 +10,7 @@ from uuid import uuid4
 from core.agent.execution_policy import ExecutionPolicy
 from core.agent.loop import LoopResult
 from core.agent.policy_profiles import get_harness_policy_profile
+from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.run_records import AgentRunRecordRepository
 from core.agent.runtime_state import ConversationRuntimeState
 from core.agent.tool_policy import ToolPolicyDecision
@@ -19,6 +20,7 @@ from core.agent.tool_policy_engine import (
     effective_denied_tool_names,
     effective_max_tool_calls,
     normalize_tool_risk,
+    resolve_platform_name,
     should_expose_tool,
 )
 from core.schemas.tool_policy import ToolPolicyContext
@@ -48,6 +50,7 @@ class DefaultAgentHarness:
     trace_events: list[RunTraceEvent] = field(default_factory=list)
     execution_policy: ExecutionPolicy | None = None
     run_record_repository: AgentRunRecordRepository | None = None
+    hitl_store: HitlStore | None = None
 
     async def run(
         self,
@@ -366,7 +369,9 @@ class DefaultAgentHarness:
                 ToolPolicyContext(
                     tool_name=tool_name,
                     agent_role=run_input.agent_role,
-                    platform=str(run_input.metadata.get("platform") or "").strip() or None,
+                    platform=resolve_platform_name(
+                        run_input.metadata.get("platform") or run_input.metadata.get("channel")
+                    ),
                     policy_profile=run_input.budget.policy_profile,
                     allowed_tool_names=effective_allowed_tool_names(run_input.budget),
                     denied_tool_names=effective_denied_tool_names(run_input.budget),
@@ -383,6 +388,12 @@ class DefaultAgentHarness:
             if decision.decision == "deny":
                 self._emit_tool_denied(run_input=run_input, tool_name=tool_name, decision=decision)
                 return self._policy_denied_tool_result(tool_name=tool_name, decision=decision)
+            if decision.decision == "ask":
+                return self._policy_ask_tool_result(
+                    run_input=run_input,
+                    tool_name=tool_name,
+                    decision=decision,
+                )
             counter["count"] += 1
             result = await original_execute_tool_call(
                 session_id=session_id,
@@ -422,6 +433,55 @@ class DefaultAgentHarness:
             run_input=run_input,
             severity="warning",
             metadata=metadata,
+        )
+
+    def _resolve_hitl_store(self) -> HitlStore:
+        return self.hitl_store or InMemoryHitlStore()
+
+    def _policy_ask_tool_result(
+        self,
+        *,
+        run_input: HarnessRunInput,
+        tool_name: str,
+        decision: ToolPolicyDecision,
+    ) -> ToolResult:
+        hitl_request = self._resolve_hitl_store().create_pending(
+            run_id=run_input.run_id,
+            session_id=run_input.session_id,
+            tool_name=tool_name,
+            reason=decision.reason,
+            policy_profile=run_input.budget.policy_profile,
+            tool_risk=decision.risk,
+            metadata={"policy_decision": decision.to_dict()},
+        )
+        self._emit(
+            HarnessTraceEventType.TOOL_REQUESTED,
+            run_input=run_input,
+            severity="warning",
+            metadata={
+                "harness_id": self.id,
+                "phase": "policy",
+                "reason": decision.reason,
+                "attempted_tool_name": tool_name,
+                "hitl_id": hitl_request.hitl_id,
+                "policy_decision": decision.to_dict(),
+            },
+        )
+        return ToolResult(
+            success=False,
+            content=decision.safe_user_message,
+            status="failed",
+            disposition="clarify",
+            action="policy_ask",
+            error=decision.reason,
+            metadata={
+                "policy_ask": True,
+                "policy_reason": decision.reason,
+                "attempted_tool_name": tool_name,
+                "hitl_id": hitl_request.hitl_id,
+                "needs_clarification": True,
+                "policy_decision": decision.to_dict(),
+            },
         )
 
     @staticmethod
@@ -466,10 +526,11 @@ class DefaultAgentHarness:
             }
         return metadata_by_name
 
-    @staticmethod
-    def _failure_category_for_loop_result(loop_result: LoopResult) -> str | None:
+    def _failure_category_for_loop_result(self, loop_result: LoopResult) -> str | None:
         if loop_result.exit_reason == "timeout":
             return "timeout"
+        if any(trace.action == "policy_ask" for trace in loop_result.tool_trace):
+            return "needs_confirmation"
         if any(trace.action == "policy_denied" for trace in loop_result.tool_trace):
             return "permission_denied"
         if loop_result.status == "failed":

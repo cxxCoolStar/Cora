@@ -12,13 +12,20 @@ from core.agent.loop import AgentLoop, LoopResult
 from core.agent.orchestrator import AgentOrchestrator, OrchestratorInput
 from core.agent.prompt_builder import AgentPromptBuilder
 from core.agent.policy_profiles import HARNESS_POLICY_PROFILES, HarnessPolicyProfile, get_harness_policy_profile
+from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.tool_policy import (
     ToolPolicyDecision,
     allow_tool_policy_decision,
+    ask_tool_policy_decision,
     deny_max_tool_calls_decision,
     deny_tool_policy_decision,
 )
-from core.agent.tool_policy_engine import ToolPolicyEngine, has_runtime_tool_governance
+from core.agent.tool_policy_engine import (
+    ToolPolicyEngine,
+    has_runtime_tool_governance,
+    requires_hitl_confirmation,
+    resolve_platform_name,
+)
 from core.agent.run_records import AgentRunRecord, AgentRunRecordRepository, InMemoryAgentRunRecordRepository
 from core.agent.runtime_manager import AgentRuntimeManager
 from core.agent.runtime_state import (
@@ -54,11 +61,16 @@ __all__ = [
     "HARNESS_POLICY_PROFILES",
     "HarnessPolicyProfile",
     "ToolPolicyDecision",
+    "HitlStore",
+    "InMemoryHitlStore",
     "allow_tool_policy_decision",
+    "ask_tool_policy_decision",
     "deny_tool_policy_decision",
     "deny_max_tool_calls_decision",
     "ToolPolicyEngine",
     "has_runtime_tool_governance",
+    "requires_hitl_confirmation",
+    "resolve_platform_name",
     "get_harness_policy_profile",
     "AgentRunRecord",
     "AgentRunRecordRepository",

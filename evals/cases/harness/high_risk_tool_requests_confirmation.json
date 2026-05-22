@@ -1,0 +1,38 @@
+{
+  "id": "high_risk_tool_requests_confirmation",
+  "type": "harness",
+  "description": "High-risk tools that require confirmation should return an ask decision without executing.",
+  "tags": ["harness", "single-agent", "tool-governance", "hitl", "ask"],
+  "steps": [
+    {
+      "label": "scheduled_tasks requires confirmation",
+      "input": {
+        "text": "/tool scheduled_tasks {\"action\":\"list\"}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "clarify",
+        "reply_contains_all": [
+          "confirmation",
+          "scheduled_tasks"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "needs_clarification",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "prepare.completed",
+            "tool.policy.applied",
+            "tool.requested",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}
