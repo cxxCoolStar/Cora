@@ -1,0 +1,35 @@
+{
+  "id": "spawn_worker_policy_inherit_denied",
+  "type": "harness",
+  "description": "spawn_worker should deny child tools that are not allowed by the parent run policy.",
+  "tags": ["harness", "subagent", "spawn", "tool-governance"],
+  "steps": [
+    {
+      "label": "write tool denied for readonly parent",
+      "input": {
+        "agent_role": "spawn",
+        "text": "Write notes/todo.txt",
+        "run_budget": {
+          "policy_profile": "background_readonly",
+          "allowed_tool_names": ["write_file"],
+          "max_child_runs": 2
+        }
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "error",
+        "reply_contains_all": [
+          "Subagent tool policy denied",
+          "write_file",
+          "not allowed by parent run"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawn.denied"
+          ]
+        }
+      }
+    }
+  ]
+}

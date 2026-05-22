@@ -25,7 +25,9 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 3c | 顺序 Worker 执行计划 | `plan_executor.py`、`execute_plan_turn` | ✅ |
 | Phase 3e | Plan 执行中 HITL 暂停与续跑 | `plan_execution_state.py`、plan store execution | ✅ |
 | Phase 4a | Subagent spawn 深度预算（harness 拒绝超深 run） | `spawn_depth.py`、`HarnessRunInput.spawn_depth` | ✅ |
-| Phase 4b+ | spawn 工具、子 session、policy 继承、结果合并 | 见 [cora-phase4-subagents-design.md](./cora-phase4-subagents-design.md) | 未开始 |
+| Phase 4b | spawn_worker、子 session、子 run 记录、max_child_runs | `subagent_spawner.py`、`spawn_worker_turn` | ✅ |
+| Phase 4c | 子 run tool policy 继承（子 ⊂ 父 allow） | `subagent_policy.py`、harness 过滤 | ✅ |
+| Phase 4d | 子结果 `SubagentResultSpec` 合并回父回复 / metadata | `schemas/subagent.py` | ✅ |
 
 ## 建议的自学方式（在本仓库内）
 

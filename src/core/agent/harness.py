@@ -37,7 +37,9 @@ from core.schemas.tool_policy import ToolPolicyContext
 from core.schemas.message import Message
 from core.schemas.tool import ToolResult
 from core.agent.spawn_depth import SpawnDepthDenial, check_spawn_depth_allowed
+from core.agent.tool_policy_engine import normalize_tool_names
 from core.schemas.harness import HarnessRunInput, HarnessTraceEventType, RunBudget, RunTraceEvent
+from core.schemas.subagent import SUBAGENT_WORKER_ROLE
 
 if TYPE_CHECKING:
     from core.agent.turn_runner import AgentTurnRunner
@@ -391,6 +393,15 @@ class DefaultAgentHarness:
                 },
             )
 
+    @staticmethod
+    def _parent_allowed_tool_names(*, run_input: HarnessRunInput) -> frozenset[str]:
+        if str(run_input.agent_role or "").strip() != SUBAGENT_WORKER_ROLE:
+            return frozenset()
+        raw = run_input.metadata.get("parent_allowed_tool_names")
+        if not isinstance(raw, list):
+            return frozenset()
+        return frozenset(normalize_tool_names([str(name) for name in raw]))
+
     def _apply_planner_tool_surface(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
         if run_input.agent_role != PLANNER_AGENT_ROLE:
             return
@@ -401,15 +412,19 @@ class DefaultAgentHarness:
         )
 
     def _apply_run_tool_policy(self, *, run_input: HarnessRunInput, prepared_turn) -> None:
+        parent_allowed = self._parent_allowed_tool_names(run_input=run_input)
         if not (
             effective_allowed_tool_names(run_input.budget)
             or effective_denied_tool_names(run_input.budget)
+            or parent_allowed
         ):
             return
         filtered_tool_specs = []
         for spec in prepared_turn.tool_specs:
             tool_name = str(getattr(spec, "name", "") or "").strip()
             if not tool_name:
+                continue
+            if parent_allowed and tool_name not in parent_allowed:
                 continue
             if not should_expose_tool(tool_name=tool_name, budget=run_input.budget):
                 continue

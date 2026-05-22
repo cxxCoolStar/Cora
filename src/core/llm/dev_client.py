@@ -119,7 +119,7 @@ class DevelopmentModelClient(ModelClient):
 
     @classmethod
     def _worker_tool_call_from_text(cls, text: str) -> ToolCall | None:
-        if "[Worker task" not in text:
+        if "[Worker task" not in text and "[Subagent task]" not in text:
             return None
         scope = ""
         for line in text.splitlines():

@@ -72,6 +72,9 @@ class AgentRunRecordRepository(Protocol):
     def list_by_session(self, *, session_id: str) -> list[AgentRunRecord]:
         ...
 
+    def list_by_parent_run_id(self, *, parent_run_id: str) -> list[AgentRunRecord]:
+        ...
+
 
 class InMemoryAgentRunRecordRepository:
     def __init__(self) -> None:
@@ -151,11 +154,17 @@ class InMemoryAgentRunRecordRepository:
             raise KeyError(f"Agent run record not found: {run_id}") from exc
 
     def list_by_session(self, *, session_id: str) -> list[AgentRunRecord]:
-        return [
+        records = [record for record in self._records.values() if record.session_id == session_id]
+        return sorted(records, key=lambda record: record.started_at, reverse=True)
+
+    def list_by_parent_run_id(self, *, parent_run_id: str) -> list[AgentRunRecord]:
+        normalized_parent_run_id = str(parent_run_id or "").strip()
+        records = [
             record
             for record in self._records.values()
-            if record.session_id == session_id
+            if str(record.parent_run_id or "").strip() == normalized_parent_run_id
         ]
+        return sorted(records, key=lambda record: record.started_at, reverse=True)
 
 
 def _failure_category_for_outcome(*, status: str, outcome: str) -> str | None:

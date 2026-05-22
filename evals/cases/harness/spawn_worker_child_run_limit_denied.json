@@ -1,0 +1,54 @@
+{
+  "id": "spawn_worker_child_run_limit_denied",
+  "type": "harness",
+  "description": "spawn_worker should deny additional child runs when max_child_runs is reached for the orchestrator parent run.",
+  "tags": ["harness", "subagent", "spawn", "budget"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "first child allowed",
+      "input": {
+        "agent_role": "spawn",
+        "text": "Find hello_agent in src.",
+        "run_budget": {
+          "allowed_tool_names": ["search_files"],
+          "max_child_runs": 1
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "reply_contains_all": [
+          "Subagent completed"
+        ]
+      }
+    },
+    {
+      "label": "second child denied",
+      "input": {
+        "agent_role": "spawn",
+        "text": "Find hello_agent again in src.",
+        "run_budget": {
+          "allowed_tool_names": ["search_files"],
+          "max_child_runs": 1
+        }
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "error",
+        "reply_contains_all": [
+          "child run limit exceeded"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_trace_contains_all": [
+            "subagent.spawn.denied"
+          ]
+        }
+      }
+    }
+  ]
+}

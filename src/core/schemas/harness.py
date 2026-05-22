@@ -52,6 +52,8 @@ class HarnessTraceEventType(StrEnum):
     PLAN_VALIDATION_COMPLETED = "plan.validation.completed"
     PLAN_VALIDATION_FAILED = "plan.validation.failed"
     SUBAGENT_SPAWN_DENIED = "subagent.spawn.denied"
+    SUBAGENT_SPAWNED = "subagent.spawned"
+    SUBAGENT_COMPLETED = "subagent.completed"
     BUDGET_TIMEOUT = "budget.timeout"
     RUN_FAILED = "run.failed"
 

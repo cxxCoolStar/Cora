@@ -16,6 +16,7 @@ class CoreSettings(BaseSettings):
     toolset_preset: str = "cora-wechat"
     harness_policy_profile: str | None = None
     harness_max_spawn_depth: int = 1
+    harness_max_child_runs: int = 4
     wechat_harness_policy_profile: str = "wechat_safe"
     job_harness_policy_profile: str = "background_readonly"
     model_provider: str = "dev"

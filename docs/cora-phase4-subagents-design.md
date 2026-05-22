@@ -1,6 +1,6 @@
 # Phase 4：受控 Subagent 设计草案
 
-> 状态：PR-4a 已落地（spawn 深度预算 + harness 拒绝 + eval）；4b–4e 未开始。  
+> 状态：PR-4a–4d 已落地；4e（额外 eval）可选。  
 > 前置：Phase 3（Planner / Worker / HITL / plan SQL）+ harness 18/18。
 
 ## 1. 目标
@@ -32,9 +32,9 @@
 | PR | 内容 | 状态 |
 |----|------|------|
 | **4a** | `spawn_depth` / `max_spawn_depth`、harness 启动前拒绝、`subagent.spawn.denied` trace、eval | ✅ |
-| **4b** | `spawn_worker`（或内部 API）、子 session、子 run 记录 | 未开始 |
-| **4c** | 继承 tool policy（子 ⊂ 父 allow 集） | 未开始 |
-| **4d** | 子 run `ResultSpec` 合并回父 / plan 下一步 | 未开始 |
+| **4b** | `spawn_worker_turn` / `SubagentSpawner`、子 session、`max_child_runs`、parent trace | ✅ |
+| **4c** | 继承 tool policy（子 ⊂ 父 allow 集） | ✅ |
+| **4d** | 子 run `SubagentResultSpec` 合并回父 orchestrator metadata + 回复 | ✅ |
 | **4e** | eval：spawn 超限、policy 继承 deny、merge 失败 | 未开始 |
 
 ## 4. Harness 行为（4a）
@@ -63,10 +63,35 @@ sequenceDiagram
 - Plan Worker 已设 `parent_run_id`；**不**自动提高 `spawn_depth`（仍为 0），直到 4b 显式 spawn。
 - Reviewer（PR-3d）继续可选，不阻塞 Phase 4。
 
-## 6. 验收（4a）
+## 6. 验收
 
-- `spawn_depth_exceeds_max_denied` eval：metadata `spawn_depth=2` + budget `max_spawn_depth=1` → failed + trace 含 `subagent.spawn.denied`
-- `.\scripts\run_harness_evals.cmd` 全绿（19 cases）
+**4a**
+
+- `spawn_depth_exceeds_max_denied` eval
+
+**4b**
+
+- `ClawBotService.spawn_worker_turn()` → `SubagentSpawner.spawn_worker()`
+- 子 session：`session_kind=subagent`，`parent_session_id` 指向父会话
+- 子 run：`spawn_depth=parent+1`，`parent_run_id` 指向 orchestrator run
+- Parent trace：`subagent.spawned` / `subagent.completed`（拒绝时 `subagent.spawn.denied`）
+- Eval：`spawn_worker_child_run_completes`、`spawn_worker_child_run_limit_denied`
+
+**4c**
+
+- `subagent_policy.py`：`parent_effective_allow_set` + `resolve_child_allowed_tool_names`
+- Spawn 前拒绝不在父 allow 集内的 tool；子 run metadata `parent_allowed_tool_names` + harness 二次过滤
+- Eval：`spawn_worker_policy_inherit_denied`
+
+**4d**
+
+- `SubagentResultSpec` + `subagent_result_from_turn()`；orchestrator `metadata.child_result`
+- 父回复：`Subagent completed (status=…, tools=…)` + 子摘要
+- `TurnResponse.context.child_result` 供上层合并
+
+**验收**
+
+- `.\scripts\run_harness_evals.cmd` 全绿（22 cases）
 
 ## 7. 参考
 

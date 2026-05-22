@@ -1,0 +1,48 @@
+{
+  "id": "spawn_worker_child_run_completes",
+  "type": "harness",
+  "description": "spawn_worker should create a child session run and record parent subagent.spawned/completed traces.",
+  "tags": ["harness", "subagent", "spawn"],
+  "setup": {
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "spawn child worker",
+      "input": {
+        "agent_role": "spawn",
+        "text": "Find hello_agent in src.",
+        "run_budget": {
+          "allowed_tool_names": ["search_files"],
+          "max_tool_calls": 2,
+          "max_child_runs": 2,
+          "max_spawn_depth": 1
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Subagent completed",
+          "status=completed",
+          "hello_agent"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "spawn_completed",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "subagent.spawned",
+            "subagent.completed"
+          ],
+          "latest_agent_run_input_metadata_contains": {
+            "spawn_orchestrator": "True"
+          }
+        }
+      }
+    }
+  ]
+}

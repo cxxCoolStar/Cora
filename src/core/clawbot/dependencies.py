@@ -190,6 +190,7 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         hitl_store=hitl_store,
         plan_store=plan_store,
         harness_max_spawn_depth=active_settings.harness_max_spawn_depth,
+        harness_max_child_runs=active_settings.harness_max_child_runs,
     )
     return ClawBotContainer(
         settings=active_settings,

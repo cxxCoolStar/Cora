@@ -107,6 +107,16 @@ class EvalRuntime:
                                     source_metadata=source_metadata or None,
                                 )
                             )
+                        elif str(step.input.agent_role or "").strip() == "spawn":
+                            source_metadata = _eval_step_source_metadata(step.input)
+                            response = asyncio.run(
+                                container.clawbot_service.spawn_worker_turn(
+                                    session_id=session.id,
+                                    text=step.input.text,
+                                    run_budget=step.input.run_budget,
+                                    source_metadata=source_metadata or None,
+                                )
+                            )
                         elif str(step.input.agent_role or "").strip() == "planner":
                             source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(

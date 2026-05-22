@@ -930,6 +930,16 @@ class SqlAgentRunRecordRepository:
             )
             return [self._to_agent_run_record(record) for record in session.scalars(stmt)]
 
+    def list_by_parent_run_id(self, *, parent_run_id: str) -> list[AgentRunRecord]:
+        normalized_parent_run_id = str(parent_run_id or "").strip()
+        with self.database.session() as session:
+            stmt = (
+                select(AgentRunRecordModel)
+                .where(AgentRunRecordModel.parent_run_id == normalized_parent_run_id)
+                .order_by(desc(AgentRunRecordModel.started_at))
+            )
+            return [self._to_agent_run_record(record) for record in session.scalars(stmt)]
+
     @staticmethod
     def _trace_event_to_json(event: RunTraceEvent) -> dict[str, Any]:
         return {

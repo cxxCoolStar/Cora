@@ -17,6 +17,8 @@ from core.agent.plan_executor import (
 from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
 from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
+from core.agent.subagent_spawner import SubagentSpawner
+from core.schemas.subagent import SpawnWorkerRequest, parse_spawn_instruction
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
 from core.agent.loop import AgentLoop
 from core.agent.context_manager import SessionContextManager
@@ -98,6 +100,7 @@ class ClawBotService:
         hitl_store: HitlStore | None = None,
         plan_store: PlanStore | None = None,
         harness_max_spawn_depth: int = 1,
+        harness_max_child_runs: int = 4,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
@@ -117,6 +120,7 @@ class ClawBotService:
         self.wechat_harness_policy_profile = str(wechat_harness_policy_profile or "").strip() or None
         self.job_harness_policy_profile = str(job_harness_policy_profile or "").strip() or None
         self.harness_max_spawn_depth = max(0, int(harness_max_spawn_depth))
+        self.harness_max_child_runs = max(0, int(harness_max_child_runs))
         self.skill_loader = SkillLoader()
         self.user_profile_aggregator = UserProfileAggregator()
         preconfigured_policy_resolver = (
@@ -551,6 +555,53 @@ class ClawBotService:
         )
         return self._session_shell.to_turn_response(outcome=outcome)
 
+    async def spawn_worker_turn(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        source_metadata: dict[str, Any] | None = None,
+        run_budget: RunBudget | None = None,
+        parent_run_id: str | None = None,
+    ) -> TurnResponse:
+        self.session_repository.get(session_id)
+        inbound_text = str(text or "").strip()
+        if not inbound_text.lower().startswith("/spawn"):
+            inbound_text = f"/spawn {inbound_text}".strip()
+        inbound_turn = await self._session_shell.record_inbound_turn(
+            session_id=session_id,
+            text=inbound_text,
+            upload=None,
+            source_metadata=source_metadata,
+        )
+        budget = self._run_budget_for_turn(
+            run_budget=run_budget,
+            context_snapshot=self.load_context_snapshot(session_id=session_id),
+            source_metadata=source_metadata,
+        )
+        tool_names = list(budget.allowed_tool_names)
+        if not tool_names:
+            tool_names = ["search_files"]
+        metadata = dict(source_metadata or {})
+        spawn_result = await self._subagent_spawner().spawn_worker(
+            request=SpawnWorkerRequest(
+                parent_session_id=session_id,
+                source_message_id=inbound_turn.source_message_id,
+                instruction=parse_spawn_instruction(inbound_text),
+                allowed_tool_names=tool_names,
+                parent_budget=budget,
+                parent_run_id=parent_run_id or metadata.get("parent_run_id"),
+                parent_spawn_depth=int(metadata.get("spawn_depth") or 0),
+                run_metadata=metadata,
+            ),
+            parent_context_snapshot=self.load_context_snapshot(session_id=session_id),
+            run_budget=budget,
+            registered_tool_names=self.list_tool_names(),
+        )
+        outcome = self._outcome_from_spawn_result(spawn_result)
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        return self._session_shell.to_turn_response(outcome=outcome)
+
     async def execute_plan_outcome(
         self,
         *,
@@ -629,6 +680,53 @@ class ClawBotService:
         return PlanExecutor(
             turn_runner=self._agent_turn_runner,
             run_record_repository=self.agent_run_record_repository,
+        )
+
+    def _subagent_spawner(self) -> SubagentSpawner:
+        harness = self._agent_turn_runner.harness
+        harness_id = getattr(harness, "id", "default-single-agent")
+        return SubagentSpawner(
+            turn_runner=self._agent_turn_runner,
+            session_repository=self.session_repository,
+            run_record_repository=self.agent_run_record_repository,
+            harness_id=str(harness_id),
+            default_max_spawn_depth=self.harness_max_spawn_depth,
+            default_max_child_runs=self.harness_max_child_runs,
+        )
+
+    @staticmethod
+    def _outcome_from_spawn_result(spawn_result):
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+
+        return AssistantTurnOutcome(
+            reply=spawn_result.reply,
+            action="spawn_worker",
+            disposition=spawn_result.disposition,
+            status=spawn_result.status,
+            tool_name="none",
+            tool_arguments={},
+            context={
+                "parent_run_id": spawn_result.parent_run_id,
+                "child_session_id": spawn_result.child_session_id,
+                "child_run_id": spawn_result.child_run_id,
+                "child_result": (
+                    spawn_result.child_result.to_dict()
+                    if spawn_result.child_result is not None
+                    else None
+                ),
+            },
+            confidence="high",
+            reason="Subagent worker spawn completed." if not spawn_result.denied else spawn_result.denial_reason or "spawn_denied",
+            artifacts=[],
+            trace=[
+                {
+                    "role": "system",
+                    "content": event_type,
+                    "metadata": {"event_type": event_type},
+                }
+                for event_type in spawn_result.parent_trace_events
+            ],
+            tool_trace=[],
         )
 
     @staticmethod
