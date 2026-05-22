@@ -1,6 +1,6 @@
 # Phase 3：结构化计划（单线程执行）设计草案
 
-> 状态：PR-3a–3e、PR-3f 已落地；PR-3d Reviewer 可选。前置：Phase 2 + harness 18/18。
+> 状态：PR-3a–3f + PR-3g（Plan 并行 subagent）已落地；PR-3d Reviewer 暂停。前置：Phase 2 + harness 18/18。
 
 ## 1. 目标
 
@@ -165,7 +165,14 @@ v1 建议 **显式 + 启发式** 并存：
 - 新 validated plan 写入时清除陈旧 execution 状态（与内存 store 一致）
 - 测试：`tests/test_sql_plan_store.py`
 
-### PR-3d（可选）：Reviewer + 失败策略细化
+### PR-3g：Plan 任务委派并行 subagent（`parallel_subagents`）— **已完成**
+
+- `TaskSpec.parallel_subagents`：Planner 为可并发的只读搜索列出多路子任务
+- `PlanExecutor` 在该步调用 `spawn_workers_for_tool`（非顺序 Worker turn）
+- `PlanSubtaskSpec`：`instruction` + `tool_names`；校验见 `plan_validator.py`
+- Eval：`plan_parallel_subagent_search_completes`（stub `CORA_EVAL_PLANNER_STUB=parallel_search`）
+
+### PR-3d（暂停）：Reviewer + 失败策略细化
 
 ## 10. Eval 计划
 
@@ -174,6 +181,7 @@ v1 建议 **显式 + 启发式** 并存：
 | `plan_validation_rejects_unknown_tool` | 非法 plan 不执行 Worker |
 | `plan_single_task_worker_completes` | 一步 plan + tool 成功 |
 | `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 — **已实现** |
+| `plan_parallel_subagent_search_completes` | `parallel_subagents` + `spawn_workers` 并发 search — **已实现** |
 
 ## 11. 验收标准
 

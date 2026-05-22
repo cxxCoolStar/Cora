@@ -1,0 +1,48 @@
+{
+  "id": "plan_parallel_subagent_search_completes",
+  "type": "harness",
+  "description": "A plan task with parallel_subagents should execute concurrent search via spawn_workers.",
+  "tags": ["harness", "planner", "planning", "subagent", "parallel"],
+  "setup": {
+    "planner_stub_mode": "parallel_search",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates parallel search plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Search the workspace for hello_agent in parallel"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute runs parallel subagent search",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["spawn_workers"],
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-search",
+          "Spawned 2 subagents",
+          "hello_agent"
+        ]
+      }
+    }
+  ]
+}

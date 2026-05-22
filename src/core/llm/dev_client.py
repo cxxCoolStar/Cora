@@ -85,6 +85,32 @@ class DevelopmentModelClient(ModelClient):
                 ],
             }
             return json.dumps(payload, ensure_ascii=False)
+        if stub_mode in {"parallel", "parallel_search", "parallel-search"}:
+            payload = {
+                "plan_id": "plan-dev-parallel-search",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-search",
+                        "title": "Parallel workspace search",
+                        "tool_names": [],
+                        "instruction": "Search the workspace for hello_agent references.",
+                        "parallel_subagents": [
+                            {
+                                "instruction": "Find hello_agent under src.",
+                                "tool_names": ["search_files"],
+                            },
+                            {
+                                "instruction": "Search for example modules under src.",
+                                "tool_names": ["search_files"],
+                            },
+                        ],
+                    }
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode == "invalid":
             payload = {
                 "plan_id": "plan-dev-invalid",

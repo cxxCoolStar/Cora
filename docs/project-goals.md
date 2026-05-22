@@ -24,6 +24,7 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 3b | Planner harness（只读角色产出 PlanSpec） | `plan_planner.py`、`plan_turn` | ✅ |
 | Phase 3c | 顺序 Worker 执行计划 | `plan_executor.py`、`execute_plan_turn` | ✅ |
 | Phase 3e | Plan 执行中 HITL 暂停与续跑 | `plan_execution_state.py`、plan store execution | ✅ |
+| Phase 3g | Plan 任务 `parallel_subagents` → `spawn_workers` 并发 search | `plan_executor.py`、`PlanSubtaskSpec` | ✅ |
 | Phase 4a | Subagent spawn 深度预算（harness 拒绝超深 run） | `spawn_depth.py`、`HarnessRunInput.spawn_depth` | ✅ |
 | Phase 4b | spawn_worker、子 session、子 run 记录、max_child_runs | `subagent_spawner.py`、`spawn_worker_turn` | ✅ |
 | Phase 4c | 子 run tool policy 继承（子 ⊂ 父 allow） | `subagent_policy.py`、harness 过滤 | ✅ |

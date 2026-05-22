@@ -28,21 +28,40 @@ def _string_list(value: object) -> list[str]:
 
 
 @dataclass(slots=True)
+class PlanSubtaskSpec:
+    instruction: str
+    tool_names: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "instruction": self.instruction,
+            "tool_names": list(self.tool_names),
+        }
+
+
+@dataclass(slots=True)
 class TaskSpec:
     task_id: str
     title: str
     tool_names: list[str]
     instruction: str
     requires_review: bool = False
+    parallel_subagents: list[PlanSubtaskSpec] = field(default_factory=list)
+
+    def uses_parallel_subagents(self) -> bool:
+        return bool(self.parallel_subagents)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "task_id": self.task_id,
             "title": self.title,
             "tool_names": list(self.tool_names),
             "instruction": self.instruction,
             "requires_review": self.requires_review,
         }
+        if self.parallel_subagents:
+            payload["parallel_subagents"] = [item.to_dict() for item in self.parallel_subagents]
+        return payload
 
 
 @dataclass(slots=True)
@@ -99,13 +118,29 @@ def new_plan_id() -> str:
     return f"plan-{uuid4().hex}"
 
 
+def plan_subtask_spec_from_dict(payload: dict[str, Any]) -> PlanSubtaskSpec:
+    return PlanSubtaskSpec(
+        instruction=_non_empty_str(payload.get("instruction"), field_name="subtask.instruction"),
+        tool_names=_string_list(payload.get("tool_names")),
+    )
+
+
 def task_spec_from_dict(payload: dict[str, Any]) -> TaskSpec:
+    raw_parallel = payload.get("parallel_subagents")
+    parallel_subagents: list[PlanSubtaskSpec] = []
+    if isinstance(raw_parallel, list):
+        parallel_subagents = [
+            plan_subtask_spec_from_dict(item)
+            for item in raw_parallel
+            if isinstance(item, dict)
+        ]
     return TaskSpec(
         task_id=_non_empty_str(payload.get("task_id"), field_name="task.task_id"),
         title=_non_empty_str(payload.get("title"), field_name="task.title"),
         tool_names=_string_list(payload.get("tool_names")),
         instruction=_non_empty_str(payload.get("instruction"), field_name="task.instruction"),
         requires_review=bool(payload.get("requires_review")),
+        parallel_subagents=parallel_subagents,
     )
 
 
@@ -129,10 +164,12 @@ __all__ = [
     "PlanRunSpec",
     "PlanRunStatus",
     "PlanSpec",
+    "PlanSubtaskSpec",
     "TaskResultSpec",
     "TaskResultStatus",
     "TaskSpec",
     "new_plan_id",
     "plan_spec_from_dict",
+    "plan_subtask_spec_from_dict",
     "task_spec_from_dict",
 ]

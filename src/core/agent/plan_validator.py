@@ -8,6 +8,7 @@ from core.schemas.plan import PlanSpec, plan_spec_from_dict
 
 
 DEFAULT_MAX_TASKS = 32
+MAX_PARALLEL_SUBAGENTS_PER_TASK = 8
 
 WECHAT_FORBIDDEN_PLAN_TOOLS = frozenset(
     {
@@ -123,11 +124,52 @@ class PlanValidator:
                 )
             seen_task_ids.add(task.task_id)
 
-            if not task.tool_names:
+            if task.uses_parallel_subagents():
+                if len(task.parallel_subagents) > MAX_PARALLEL_SUBAGENTS_PER_TASK:
+                    issues.append(
+                        PlanValidationIssue(
+                            code="too_many_parallel_subagents",
+                            message=(
+                                f"Task exceeds max parallel subagents ({MAX_PARALLEL_SUBAGENTS_PER_TASK})."
+                            ),
+                            task_id=task.task_id,
+                            field="parallel_subagents",
+                        )
+                    )
+                for index, subtask in enumerate(task.parallel_subagents, start=1):
+                    if not subtask.tool_names:
+                        issues.append(
+                            PlanValidationIssue(
+                                code="empty_tool_names",
+                                message="Each parallel subagent must list at least one tool.",
+                                task_id=task.task_id,
+                                field=f"parallel_subagents[{index - 1}].tool_names",
+                            )
+                        )
+                    for tool_name in subtask.tool_names:
+                        if tool_name not in options.registered_tool_names:
+                            issues.append(
+                                PlanValidationIssue(
+                                    code="unknown_tool",
+                                    message=f"Tool `{tool_name}` is not registered.",
+                                    task_id=task.task_id,
+                                    field=f"parallel_subagents[{index - 1}].tool_names",
+                                )
+                            )
+                        if tool_name in forbidden:
+                            issues.append(
+                                PlanValidationIssue(
+                                    code="forbidden_tool",
+                                    message=f"Tool `{tool_name}` is not allowed in this plan context.",
+                                    task_id=task.task_id,
+                                    field=f"parallel_subagents[{index - 1}].tool_names",
+                                )
+                            )
+            elif not task.tool_names:
                 issues.append(
                     PlanValidationIssue(
                         code="empty_tool_names",
-                        message="Each task must list at least one tool.",
+                        message="Each worker task must list at least one tool.",
                         task_id=task.task_id,
                         field="tool_names",
                     )
@@ -175,6 +217,7 @@ def validation_options_from_tool_names(
 
 __all__ = [
     "DEFAULT_MAX_TASKS",
+    "MAX_PARALLEL_SUBAGENTS_PER_TASK",
     "PlanValidationIssue",
     "PlanValidationOptions",
     "PlanValidationResult",

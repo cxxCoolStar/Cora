@@ -38,10 +38,27 @@ def build_planner_user_text(*, user_text: str, session_id: str) -> str:
         '      "title": "<step title>",\n'
         '      "tool_names": ["<tool>"],\n'
         '      "instruction": "<what the worker should do>"\n'
+        "    },\n"
+        "    {\n"
+        '      "task_id": "task-search",\n'
+        '      "title": "Parallel workspace search",\n'
+        '      "tool_names": [],\n'
+        '      "instruction": "<overall search goal>",\n'
+        '      "parallel_subagents": [\n'
+        "        {\n"
+        '          "instruction": "<search A>",\n'
+        '          "tool_names": ["search_files"]\n'
+        "        },\n"
+        "        {\n"
+        '          "instruction": "<search B>",\n'
+        '          "tool_names": ["search_files"]\n'
+        "        }\n"
+        "      ]\n"
         "    }\n"
         "  ]\n"
         "}\n"
-        "Use only tools appropriate for each worker step.\n"
+        "Use worker steps for sequential mutating work. "
+        "Use parallel_subagents when multiple read-only searches can run concurrently.\n"
         "Do NOT call any tools in this planner turn — output JSON only."
     )
 

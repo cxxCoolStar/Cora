@@ -13,7 +13,9 @@ from core.agent.plan_executor import (
     PlanExecutionResult,
     PlanExecutor,
     format_plan_execution_reply,
+    plan_subagent_run_budget,
 )
+from core.schemas.plan import PlanSpec, TaskSpec
 from core.agent.plan_planner import PLANNER_AGENT_ROLE, planner_run_budget
 from core.agent.plan_execution_state import StoredPlanExecution
 from core.agent.plan_store import InMemoryPlanStore, PlanStore, StoredValidatedPlan, stored_plan_from_metadata
@@ -683,6 +685,35 @@ class ClawBotService:
         return PlanExecutor(
             turn_runner=self._agent_turn_runner,
             run_record_repository=self.agent_run_record_repository,
+            spawn_workers_for_plan=self._spawn_workers_for_plan_execution,
+        )
+
+    async def _spawn_workers_for_plan_execution(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        planner_run_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        run_metadata: dict[str, Any] | None = None,
+    ):
+        parent_budget = plan_subagent_run_budget(plan=plan, task=task)
+        subagent_tasks = [
+            SpawnWorkerTaskSpec(
+                instruction=subtask.instruction,
+                tool_names=list(subtask.tool_names),
+            )
+            for subtask in task.parallel_subagents
+        ]
+        return await self.spawn_workers_for_tool(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            parent_run_id=planner_run_id,
+            parent_spawn_depth=0,
+            parent_budget=parent_budget,
+            tasks=subagent_tasks,
+            run_metadata=dict(run_metadata or {}),
         )
 
     def _subagent_spawner(self) -> SubagentSpawner:

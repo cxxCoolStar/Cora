@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from core.agent.run_records import AgentRunRecordRepository
     from core.agent.turn_runner import AgentTurnResult, AgentTurnRunner
     from core.agent.runtime_state import RuntimeContextSnapshot
+    from core.schemas.subagent import SpawnWorkersResult
 
 
 WORKER_AGENT_ROLE = "worker"
@@ -36,6 +37,26 @@ def worker_run_budget(*, plan: PlanSpec, task: TaskSpec) -> RunBudget:
     )
 
 
+def plan_subagent_run_budget(*, plan: PlanSpec, task: TaskSpec) -> RunBudget:
+    profile = str(plan.policy_profile or "").strip() or DEFAULT_WORKER_POLICY_PROFILE
+    allowed_tools: list[str] = []
+    for subtask in task.parallel_subagents:
+        for tool_name in subtask.tool_names:
+            if tool_name not in allowed_tools:
+                allowed_tools.append(tool_name)
+    return RunBudget(
+        policy_profile=profile,
+        allowed_tool_names=allowed_tools,
+        max_steps=8,
+        max_tool_calls=8,
+        max_spawn_depth=1,
+        max_child_runs=max(len(task.parallel_subagents), 1),
+    )
+
+
+SpawnWorkersForPlan = Callable[..., Awaitable["SpawnWorkersResult"]]
+
+
 @dataclass(slots=True)
 class PlanExecutionResult:
     plan_run: PlanRunSpec
@@ -54,9 +75,11 @@ class PlanExecutor:
         *,
         turn_runner: AgentTurnRunner,
         run_record_repository: AgentRunRecordRepository | None = None,
+        spawn_workers_for_plan: SpawnWorkersForPlan | None = None,
     ) -> None:
         self._turn_runner = turn_runner
         self._run_record_repository = run_record_repository
+        self._spawn_workers_for_plan = spawn_workers_for_plan
 
     async def execute(
         self,
@@ -204,6 +227,15 @@ class PlanExecutor:
         context_snapshot: RuntimeContextSnapshot,
         metadata_base: dict[str, Any],
     ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
+        if task.uses_parallel_subagents():
+            return await self._run_parallel_subagent_task(
+                session_id=session_id,
+                plan=plan,
+                task=task,
+                planner_run_id=planner_run_id,
+                source_message_id=source_message_id,
+                metadata_base=metadata_base,
+            )
         task_metadata = {
             **metadata_base,
             "agent_role": WORKER_AGENT_ROLE,
@@ -251,6 +283,86 @@ class PlanExecutor:
                 status="completed",
                 summary=_task_summary_from_turn(turn_result),
                 tool_trace_count=len(turn_result.tool_trace),
+            ),
+            trace_entries,
+        )
+
+    async def _run_parallel_subagent_task(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        metadata_base: dict[str, Any],
+    ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
+        if self._spawn_workers_for_plan is None:
+            return (
+                TaskResultSpec(
+                    task_id=task.task_id,
+                    run_id=planner_run_id,
+                    status="failed",
+                    summary="Parallel subagent execution is not configured for plan runs.",
+                    tool_trace_count=0,
+                ),
+                [],
+            )
+        task_metadata = {
+            **metadata_base,
+            "agent_role": "plan_subagent",
+            "task_id": task.task_id,
+            "parent_run_id": planner_run_id,
+            "plan_id": plan.plan_id,
+        }
+        spawn_result = await self._spawn_workers_for_plan(
+            session_id=session_id,
+            source_message_id=f"{source_message_id}:{task.task_id}",
+            planner_run_id=planner_run_id,
+            plan=plan,
+            task=task,
+            run_metadata=task_metadata,
+        )
+        trace_entries = [
+            {
+                "tool_name": "spawn_workers",
+                "arguments": {
+                    "task_count": len(task.parallel_subagents),
+                    "task_id": task.task_id,
+                },
+                "action": "plan_subagent",
+                "status": spawn_result.status,
+                "disposition": spawn_result.disposition,
+                "metadata": {
+                    "parent_run_id": spawn_result.parent_run_id,
+                    "denied": spawn_result.denied,
+                    "denial_reason": spawn_result.denial_reason,
+                },
+            }
+        ]
+        child_tool_count = sum(
+            int(getattr(item.child_result, "tool_trace_count", 0) or 0)
+            for item in spawn_result.results
+            if item.child_result is not None
+        )
+        if spawn_result.denied or spawn_result.status != "completed":
+            return (
+                TaskResultSpec(
+                    task_id=task.task_id,
+                    run_id=spawn_result.parent_run_id or planner_run_id,
+                    status="failed",
+                    summary=str(spawn_result.reply or "").strip() or "Parallel subagent task failed.",
+                    tool_trace_count=child_tool_count,
+                ),
+                trace_entries,
+            )
+        return (
+            TaskResultSpec(
+                task_id=task.task_id,
+                run_id=spawn_result.parent_run_id or planner_run_id,
+                status="completed",
+                summary=str(spawn_result.reply or "").strip() or task.instruction,
+                tool_trace_count=child_tool_count,
             ),
             trace_entries,
         )
@@ -328,8 +440,10 @@ def format_plan_execution_reply(*, plan: PlanSpec, plan_run: PlanRunSpec) -> str
 __all__ = [
     "PlanExecutionResult",
     "PlanExecutor",
+    "SpawnWorkersForPlan",
     "WORKER_AGENT_ROLE",
     "build_worker_user_text",
     "format_plan_execution_reply",
+    "plan_subagent_run_budget",
     "worker_run_budget",
 ]
