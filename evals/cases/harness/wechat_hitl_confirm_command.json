@@ -1,0 +1,59 @@
+{
+  "id": "wechat_hitl_confirm_command",
+  "type": "harness",
+  "description": "WeChat users should confirm or reject pending HITL requests with 确认/拒绝.",
+  "tags": ["harness", "wechat", "hitl", "confirm"],
+  "steps": [
+    {
+      "label": "wechat tool asks for confirmation",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-hitl-confirm",
+        "external_event_id": "wx-eval-hitl-confirm-1",
+        "text": "/tool scheduled_tasks {\"action\":\"list\"}"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "clarify",
+        "reply_contains_all": [
+          "需要你确认",
+          "确认",
+          "拒绝",
+          "定时提醒"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "needs_clarification",
+          "latest_agent_run_trace_contains_all": [
+            "tool.requested",
+            "cleanup.completed"
+          ]
+        }
+      }
+    },
+    {
+      "label": "wechat user confirms with 确认",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-hitl-confirm",
+        "external_event_id": "wx-eval-hitl-confirm-2",
+        "text": "确认"
+      },
+      "expect": {
+        "status": "completed",
+        "reply_contains_all": [
+          "已按你的确认执行",
+          "定时提醒"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_trace_contains_all": [
+            "tool.hitl.approved",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -26,7 +26,7 @@ Current baseline:
 - Phase 1 is implemented for the WeChat production path and the current
   single-agent loop.
 - The harness smoke gate is `.\scripts\run_harness_evals.cmd`.
-- The current smoke baseline is `12/12` harness cases passing, including
+- The current smoke baseline is `14/14` harness cases passing, including
   WeChat entry-path success, permission denial, timeout, and failure records.
 - Phase 2/3 work should not start by adding Planner, Worker, Reviewer, spawn,
   or direct tool-plan behavior. It should start by designing the unified tool
@@ -835,7 +835,8 @@ Phase 2 current status:
 - PR-2b (HITL durable + resume) landed: `SqlHitlStore`, approve/reject API,
   `approve_hitl_and_resume`, `RunBudget.approved_tool_names`, trace
   `tool.hitl.approved`; harness eval `hitl_approve_and_resume` passes.
-- Still pending: WeChat-native approval UX (buttons/commands wiring to API).
+- WeChat HITL UX: 中文确认卡；Gateway 解析「确认/拒绝」；有待确认时拦截其它消息；
+  harness eval `wechat_hitl_confirm_command` passes.
 
 ### Phase 3: Structured Planning Without Parallelism
 
@@ -893,8 +894,8 @@ Phase 1 is considered complete when this command passes:
 The expected baseline is:
 
 ```text
-Cases: 13/13 passed
-Steps: 14/14 passed
+Cases: 14/14 passed
+Steps: 16/16 passed
 ```
 
 The harness smoke gate currently includes:

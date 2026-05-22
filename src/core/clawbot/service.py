@@ -372,6 +372,32 @@ class ClawBotService:
             )
         return request
 
+    def get_latest_pending_hitl(self, *, session_id: str):
+        return self.hitl_store.get_latest_pending_for_session(session_id=session_id)
+
+    async def approve_latest_hitl_and_resume(
+        self,
+        *,
+        session_id: str,
+        source_metadata: dict[str, Any] | None = None,
+        run_budget: RunBudget | None = None,
+    ) -> TurnResponse:
+        pending = self.get_latest_pending_hitl(session_id=session_id)
+        if pending is None:
+            raise KeyError(f"No pending HITL request for session {session_id}")
+        return await self.approve_hitl_and_resume(
+            session_id=session_id,
+            hitl_id=pending.hitl_id,
+            source_metadata=source_metadata,
+            run_budget=run_budget,
+        )
+
+    def reject_latest_hitl(self, *, session_id: str):
+        pending = self.get_latest_pending_hitl(session_id=session_id)
+        if pending is None:
+            raise KeyError(f"No pending HITL request for session {session_id}")
+        return self.reject_hitl(session_id=session_id, hitl_id=pending.hitl_id)
+
     def _default_harness_policy_profile(
         self,
         *,

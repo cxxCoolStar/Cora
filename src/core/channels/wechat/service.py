@@ -9,6 +9,13 @@ from typing import Any
 from fastapi import UploadFile
 
 from core.channels.base import ChannelTurnInput
+from core.channels.wechat.hitl_commands import (
+    build_wechat_hitl_approved_prefix,
+    build_wechat_hitl_no_pending_message,
+    build_wechat_hitl_pending_reminder,
+    build_wechat_hitl_rejected_message,
+    parse_hitl_command,
+)
 from core.channels.wechat.ilink_client import WechatIlinkClient
 from core.channels.wechat.session_router import WechatSessionRouter
 from core.channels.wechat.types import WechatHandleResult, WechatInboundEvent
@@ -98,6 +105,22 @@ class WechatGatewayService:
                 action="session_reset",
             )
 
+        hitl_result = await self._try_handle_hitl_command(
+            event=event,
+            session_id=session_id,
+            text=resolution.normalized_text,
+        )
+        if hitl_result is not None:
+            self.event_repository.create(
+                channel=self.CHANNEL_NAME,
+                external_event_id=event.event_id,
+                external_user_id=event.user_id,
+                status="processed",
+                session_id=session_id,
+                reply_preview=hitl_result.reply[:300],
+            )
+            return hitl_result
+
         upload = None
         try:
             source_created_at = self._source_created_at(event)
@@ -140,7 +163,92 @@ class WechatGatewayService:
             session_id=session_id,
             reply=response.reply,
             action=response.action,
+            disposition=response.disposition,
+            needs_clarification=response.needs_clarification,
         )
+
+    async def _try_handle_hitl_command(
+        self,
+        *,
+        event: WechatInboundEvent,
+        session_id: str,
+        text: str | None,
+    ) -> WechatHandleResult | None:
+        command = parse_hitl_command(text)
+        pending = self.clawbot_service.get_latest_pending_hitl(session_id=session_id)
+
+        if command == "approve":
+            if pending is None:
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=build_wechat_hitl_no_pending_message(),
+                    action="hitl_no_pending",
+                )
+            try:
+                response = await self.clawbot_service.approve_hitl_and_resume(
+                    session_id=session_id,
+                    hitl_id=pending.hitl_id,
+                    source_metadata={"channel": self.CHANNEL_NAME, "platform": "wechat"},
+                )
+            except (KeyError, ValueError) as exc:
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=f"无法完成确认：{exc}",
+                    action="hitl_approve_failed",
+                )
+            prefix = build_wechat_hitl_approved_prefix(tool_name=pending.tool_name)
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=f"{prefix}{response.reply}".strip(),
+                action="hitl_approved",
+                disposition=response.disposition,
+                needs_clarification=response.needs_clarification,
+            )
+
+        if command == "reject":
+            if pending is None:
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=build_wechat_hitl_no_pending_message(),
+                    action="hitl_no_pending",
+                )
+            try:
+                rejected = self.clawbot_service.reject_hitl(
+                    session_id=session_id,
+                    hitl_id=pending.hitl_id,
+                )
+            except (KeyError, ValueError) as exc:
+                return WechatHandleResult(
+                    deduplicated=False,
+                    session_id=session_id,
+                    reply=f"无法完成拒绝：{exc}",
+                    action="hitl_reject_failed",
+                )
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=build_wechat_hitl_rejected_message(tool_name=rejected.tool_name),
+                action="hitl_rejected",
+            )
+
+        if pending is not None and self._has_user_payload(text=text, event=event):
+            return WechatHandleResult(
+                deduplicated=False,
+                session_id=session_id,
+                reply=build_wechat_hitl_pending_reminder(tool_name=pending.tool_name),
+                action="hitl_pending_blocked",
+            )
+        return None
+
+    @staticmethod
+    def _has_user_payload(*, text: str | None, event: WechatInboundEvent) -> bool:
+        if text and str(text).strip():
+            return True
+        return bool((event.file_path and event.file_name) or event.file_path)
 
     def _build_turn_input(
         self,

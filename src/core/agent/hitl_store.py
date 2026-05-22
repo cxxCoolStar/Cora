@@ -35,6 +35,9 @@ class HitlStore(Protocol):
     def reject(self, *, hitl_id: str) -> HitlRequest:
         ...
 
+    def get_latest_pending_for_session(self, *, session_id: str) -> HitlRequest | None:
+        ...
+
 
 class InMemoryHitlStore:
     def __init__(self) -> None:
@@ -81,6 +84,17 @@ class InMemoryHitlStore:
         request.status = "rejected"
         request.resolved_at = _utc_now()
         return request
+
+    def get_latest_pending_for_session(self, *, session_id: str) -> HitlRequest | None:
+        normalized_session_id = str(session_id or "").strip()
+        pending = [
+            request
+            for request in self._requests.values()
+            if request.session_id == normalized_session_id and request.status == "pending"
+        ]
+        if not pending:
+            return None
+        return max(pending, key=lambda item: item.created_at)
 
     def _require_pending(self, *, hitl_id: str) -> HitlRequest:
         request = self._requests.get(hitl_id)

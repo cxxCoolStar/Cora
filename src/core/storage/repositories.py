@@ -1320,6 +1320,21 @@ class SqlHitlStore:
     def reject(self, *, hitl_id: str) -> HitlRequest:
         return self._resolve(hitl_id=hitl_id, status="rejected")
 
+    def get_latest_pending_for_session(self, *, session_id: str) -> HitlRequest | None:
+        normalized_session_id = str(session_id or "").strip()
+        with self.database.session() as session:
+            stmt = (
+                select(HitlRequestModel)
+                .where(HitlRequestModel.session_id == normalized_session_id)
+                .where(HitlRequestModel.status == "pending")
+                .order_by(desc(HitlRequestModel.created_at))
+                .limit(1)
+            )
+            record = session.scalars(stmt).first()
+            if record is None:
+                return None
+            return self._to_hitl_request(record)
+
     def _resolve(self, *, hitl_id: str, status: str) -> HitlRequest:
         with self.database.session() as session:
             record = session.get(HitlRequestModel, hitl_id)

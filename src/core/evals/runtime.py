@@ -300,10 +300,10 @@ def _turn_response_from_wechat_result(result) -> TurnResponse:
     return TurnResponse(
         reply=result.reply,
         status="completed",
-        disposition="respond",
+        disposition=getattr(result, "disposition", None) or "respond",
         action=result.action,
         item_id=None,
-        needs_clarification=False,
+        needs_clarification=bool(getattr(result, "needs_clarification", False)),
         artifacts=[],
         trace=[],
         decision_source="wechat_gateway",

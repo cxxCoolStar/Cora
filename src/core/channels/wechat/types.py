@@ -26,3 +26,5 @@ class WechatHandleResult:
     session_id: str
     reply: str
     action: str
+    disposition: str = "respond"
+    needs_clarification: bool = False

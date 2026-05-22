@@ -12,7 +12,8 @@ from core.agent.execution_policy import ExecutionPolicy
 from core.agent.loop import LoopResult
 from core.agent.policy_profiles import get_harness_policy_profile
 from core.agent.hitl_store import HitlStore, InMemoryHitlStore
-from core.agent.sandbox_runtime import SandboxContext, SandboxWorkspaceManager
+from core.agent.sandbox_runtime import MUTATING_TOOLS_IN_SANDBOX, SandboxContext, SandboxWorkspaceManager
+from core.channels.wechat.hitl_commands import build_wechat_hitl_confirmation_message
 from core.agent.run_records import AgentRunRecordRepository
 from core.agent.runtime_state import ConversationRuntimeState
 from core.agent.tool_policy import ToolPolicyDecision
@@ -565,9 +566,17 @@ class DefaultAgentHarness:
                 "policy_decision": decision.to_dict(),
             },
         )
+        user_message = decision.safe_user_message
+        if platform == "wechat":
+            user_message = build_wechat_hitl_confirmation_message(
+                tool_name=tool_name,
+                tool_arguments=dict(getattr(tool_call, "arguments", None) or {}),
+                requires_sandbox=bool(decision.requires_sandbox)
+                or tool_name in MUTATING_TOOLS_IN_SANDBOX,
+            )
         return ToolResult(
             success=False,
-            content=decision.safe_user_message,
+            content=user_message,
             status="failed",
             disposition="clarify",
             action="policy_ask",
