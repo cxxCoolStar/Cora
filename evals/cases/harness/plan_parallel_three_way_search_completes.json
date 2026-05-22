@@ -1,0 +1,47 @@
+{
+  "id": "plan_parallel_three_way_search_completes",
+  "type": "harness",
+  "description": "A plan with three parallel_subagents should spawn three concurrent searches and merge results.",
+  "tags": ["harness", "planner", "planning", "subagent", "parallel"],
+  "setup": {
+    "planner_stub_mode": "parallel_three_way",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates three-way parallel search plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Discover hello_agent across src and tests in parallel before editing"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute"],
+        "state": {
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute runs three parallel subagent searches",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["spawn_workers"],
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-search",
+          "Spawned 3 subagents",
+          "hello_agent"
+        ]
+      }
+    }
+  ]
+}

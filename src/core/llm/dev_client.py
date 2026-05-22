@@ -85,6 +85,36 @@ class DevelopmentModelClient(ModelClient):
                 ],
             }
             return json.dumps(payload, ensure_ascii=False)
+        if stub_mode in {"parallel_three_way", "parallel-three-way", "parallel_3"}:
+            payload = {
+                "plan_id": "plan-dev-parallel-three-way",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-search",
+                        "title": "Parallel workspace discovery",
+                        "tool_names": [],
+                        "instruction": "Discover hello_agent references across the repo before any edits.",
+                        "parallel_subagents": [
+                            {
+                                "instruction": "Find hello_agent under src/.",
+                                "tool_names": ["search_files"],
+                            },
+                            {
+                                "instruction": "Search for example modules under src/.",
+                                "tool_names": ["search_files"],
+                            },
+                            {
+                                "instruction": "Search for hello_agent mentions under tests/.",
+                                "tool_names": ["search_files"],
+                            },
+                        ],
+                    }
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode in {"parallel", "parallel_search", "parallel-search"}:
             payload = {
                 "plan_id": "plan-dev-parallel-search",
@@ -159,7 +189,13 @@ class DevelopmentModelClient(ModelClient):
             return None
         arguments: dict = {}
         if tool_name == "search_files":
-            arguments = {"query": "hello_agent", "path": "src"}
+            lowered = text.lower()
+            if "tests/" in lowered or "under tests" in lowered:
+                arguments = {"query": "hello_agent", "path": "tests"}
+            elif "example" in lowered:
+                arguments = {"query": "example", "path": "src"}
+            else:
+                arguments = {"query": "hello_agent", "path": "src"}
         elif tool_name == "list_files":
             arguments = {"path": "src", "recursive": False}
         elif tool_name == "read_file":

@@ -39,6 +39,8 @@ def test_build_planner_user_text_includes_session_and_json_shape() -> None:
     assert "session-abc" in text
     assert "[Planner mode]" in text
     assert '"tasks"' in text
+    assert "parallel_subagents" in text
+    assert "1-3 independent" in text
     assert "List files" in text
 
 

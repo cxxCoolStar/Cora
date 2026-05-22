@@ -60,7 +60,8 @@ class PlanRunSpec:
 |------|------------|----------|------|
 | **Planner** | `planner` | 只读 profile（`background_readonly` 或专用 `planner_readonly`） | 仅 `read_file`、`search_*`、`web_search` 等；**禁止** `write_file`、`shell_exec`、`scheduled_tasks` |
 | **Worker** | `worker` | 每步 `RunBudget.allowed_tool_names = task.tool_names` | 继承 `ToolPolicyEngine`；HITL / sandbox 规则不变 |
-| **Reviewer**（可选 v1.1） | `reviewer` | 只读 | 仅在高风险步或低 confidence 后触发 |
+| **Plan 并行 subagent** | （执行层） | 同 plan 父 budget 子集 | `parallel_subagents` → `spawn_workers`；适合多路径并发 search |
+| **Reviewer**（暂停） | `reviewer` | 只读 | 仅在高风险步或低 confidence 后触发 |
 
 Planner 输出必须是 **JSON PlanSpec**（或 YAML 子集），由 `PlanValidator` 校验：
 
@@ -170,7 +171,8 @@ v1 建议 **显式 + 启发式** 并存：
 - `TaskSpec.parallel_subagents`：Planner 为可并发的只读搜索列出多路子任务
 - `PlanExecutor` 在该步调用 `spawn_workers_for_tool`（非顺序 Worker turn）
 - `PlanSubtaskSpec`：`instruction` + `tool_names`；校验见 `plan_validator.py`
-- Eval：`plan_parallel_subagent_search_completes`（stub `CORA_EVAL_PLANNER_STUB=parallel_search`）
+- Planner prompt 借鉴 OpenCode：1–3 路并行探索、每路独立焦点、复杂任务先 search 再 worker
+- Eval：`plan_parallel_subagent_search_completes`、`plan_parallel_three_way_search_completes`
 
 ### PR-3d（暂停）：Reviewer + 失败策略细化
 
@@ -182,6 +184,7 @@ v1 建议 **显式 + 启发式** 并存：
 | `plan_single_task_worker_completes` | 一步 plan + tool 成功 |
 | `plan_worker_hitl_pause_and_resume` | 计划步中 ask，确认后继续 — **已实现** |
 | `plan_parallel_subagent_search_completes` | `parallel_subagents` + `spawn_workers` 并发 search — **已实现** |
+| `plan_parallel_three_way_search_completes` | 三路 `parallel_subagents` 并行 search — **已实现** |
 
 ## 11. 验收标准
 

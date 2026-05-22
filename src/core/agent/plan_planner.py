@@ -46,19 +46,25 @@ def build_planner_user_text(*, user_text: str, session_id: str) -> str:
         '      "instruction": "<overall search goal>",\n'
         '      "parallel_subagents": [\n'
         "        {\n"
-        '          "instruction": "<search A>",\n'
+        '          "instruction": "<focused search A, e.g. Find X under src/>",\n'
         '          "tool_names": ["search_files"]\n'
         "        },\n"
         "        {\n"
-        '          "instruction": "<search B>",\n'
+        '          "instruction": "<focused search B, e.g. Search for Y under tests/>",\n'
+        '          "tool_names": ["search_files"]\n'
+        "        },\n"
+        "        {\n"
+        '          "instruction": "<focused search C, optional third angle>",\n'
         '          "tool_names": ["search_files"]\n'
         "        }\n"
         "      ]\n"
         "    }\n"
         "  ]\n"
         "}\n"
-        "Use worker steps for sequential mutating work. "
-        "Use parallel_subagents when multiple read-only searches can run concurrently.\n"
+        "Task choice:\n"
+        "- Worker (tool_names): one sequential step; mutating tools; or when B depends on A.\n"
+        "- parallel_subagents: 1-3 independent read-only searches (more only if scope is very broad).\n"
+        "- Complex work: often task-search (parallel_subagents) first, then worker tasks that apply changes.\n"
         "Do NOT call any tools in this planner turn — output JSON only."
     )
 

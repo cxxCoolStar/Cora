@@ -43,8 +43,21 @@ PLANNER_GUIDANCE = (
     "You are in PLANNER mode. Do not call any tools in this turn. "
     "Respond with exactly one JSON object and no markdown prose before or after it. "
     "The JSON must match the PlanSpec shape requested in the user message "
-    "(plan_id, session_id, goal, policy_profile, tasks with task_id, title, tool_names, instruction). "
-    "List only registered tool names that a later worker step may use; do not execute them now."
+    "(plan_id, session_id, goal, policy_profile, tasks). "
+    "Each task needs task_id, title, and instruction. "
+    "Use either tool_names (single worker step) or parallel_subagents (concurrent sub-runs), not both on the same task. "
+    "List only registered tool names; do not execute them now. "
+    "Planning workflow for complex requests: (1) add a read-only exploration task with parallel_subagents when the codebase scope is unclear, "
+    "(2) add worker tasks for mutations or steps that depend on earlier findings. "
+    "Worker steps (tool_names): sequential work, especially mutating tools (write_file, shell_exec, scheduled_tasks). "
+    "Parallel subagents (parallel_subagents): independent read-only lookups that can run at the same time "
+    "(search_files in different paths, different keywords, search_files plus web_search, etc.). "
+    "How many parallel_subagents: use 1 when the user named specific files/paths or the search target is narrow; "
+    "use 2-3 when multiple directories, topics, or evidence sources must be explored before implementation; "
+    "use 4 only for unusually broad discovery (avoid more than 4). "
+    "Give each parallel_subagents entry a distinct focus (one path, keyword, or source per entry) so work is not duplicated. "
+    "Leave tool_names as [] when parallel_subagents is set. "
+    "Do not use parallel_subagents when step B needs step A's output; order those as separate worker tasks instead."
 )
 
 SKILLS_GUIDANCE = (
