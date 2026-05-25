@@ -262,6 +262,41 @@ class RuntimeToolExecutor:
     async def _dispatch_invocation(self, invocation: ToolInvocation) -> ToolExecutionResult:
         tool_name = str(invocation.plan.tool or "").strip()
         started_at = perf_counter()
+        
+        # Check idempotency key for mutating operations on plan resume
+        from core.agent.idempotency import generate_idempotency_key, is_tool_idempotent
+        
+        run_id = invocation.context.get("agent_run_id", "")
+        task_id = invocation.context.get("task_id", "")
+        idempotency_key = generate_idempotency_key(
+            run_id=run_id,
+            task_id=task_id,
+            tool_name=tool_name,
+            tool_arguments=dict(invocation.plan.arguments or {}),
+        )
+        
+        if idempotency_key:
+            completed_ops = invocation.context.get("completed_operations", [])
+            if idempotency_key in completed_ops:
+                # Operation already completed, skip execution
+                logger.info(
+                    "tool skipped idempotency session_id=%s tool=%s idempotency_key=%s",
+                    invocation.session_id,
+                    tool_name,
+                    idempotency_key,
+                )
+                return ToolExecutionResult(
+                    reply=f"Operation {tool_name} already completed (skipped via idempotency key)",
+                    action="tool_skipped",
+                    status="completed",
+                    disposition="respond",
+                    metadata={
+                        "idempotency_key": idempotency_key,
+                        "skipped": True,
+                        "is_idempotent": is_tool_idempotent(tool_name),
+                    },
+                )
+        
         logger.info(
             "tool dispatch start session_id=%s tool=%s arguments=%s available_tools=%s",
             invocation.session_id,
@@ -292,6 +327,14 @@ class RuntimeToolExecutor:
             if blocked_result is not None:
                 return blocked_result
             result = await registry.dispatch(self, name=tool_name, invocation=normalized_invocation)
+            
+            # Record idempotency key for successful mutating operations
+            if idempotency_key and result.status == "completed":
+                if result.metadata is None:
+                    result.metadata = {}
+                result.metadata["idempotency_key"] = idempotency_key
+                result.metadata["is_idempotent"] = is_tool_idempotent(tool_name)
+            
             duration_ms = int((perf_counter() - started_at) * 1000)
             if result.status == "failed":
                 logger.warning(

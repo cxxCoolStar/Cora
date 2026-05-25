@@ -787,6 +787,11 @@ class ClawBotService:
         resume_metadata.update(source_metadata)
         resume_metadata["plan_checkpoint_id"] = str(checkpoint.checkpoint_id or "")
         resume_metadata["plan_resume"] = True
+        
+        # Inject completed operations for idempotency checking
+        completed_ops = list(checkpoint.completed_operations_cache.keys())
+        resume_metadata["completed_operations"] = completed_ops
+        
         execution = await self._plan_executor().execute(
             session_id=session_id,
             plan=stored.plan,
@@ -824,6 +829,13 @@ class ClawBotService:
         source_message_id: str,
         run_metadata: dict[str, Any],
     ) -> None:
+        # Collect all completed operations from task results
+        completed_ops_cache: dict[str, str] = {}
+        for task_result in execution.plan_run.task_results:
+            for op_key in task_result.completed_operations:
+                if op_key not in completed_ops_cache:
+                    completed_ops_cache[op_key] = task_result.summary[:200]
+        
         if execution.waiting_hitl:
             pending = self.hitl_store.get_latest_pending_for_session(session_id=session_id)
             if pending is not None and execution.paused_task_index is not None:
@@ -843,6 +855,7 @@ class ClawBotService:
                         pause_reason="hitl",
                         checkpoint_id=checkpoint_id,
                         run_metadata=run_metadata,
+                        completed_operations_cache=completed_ops_cache,
                     )
                 )
                 execution.pending_hitl_id = pending.hitl_id
@@ -868,6 +881,7 @@ class ClawBotService:
                     pause_reason="failed",
                     checkpoint_id=checkpoint_id,
                     run_metadata=run_metadata,
+                    completed_operations_cache=completed_ops_cache,
                 )
             )
             return

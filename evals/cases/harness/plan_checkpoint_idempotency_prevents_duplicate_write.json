@@ -1,0 +1,78 @@
+{
+  "id": "plan_checkpoint_idempotency_prevents_duplicate_write",
+  "type": "harness",
+  "description": "Resume should skip already-completed mutating operations using idempotency keys to prevent duplicate writes.",
+  "tags": ["harness", "planner", "worker", "checkpoint", "idempotency"],
+  "setup": {
+    "planner_stub_mode": "two_step",
+    "workspace_files": {
+      "config.py": "# Initial config\nDEBUG = False\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates three-step plan with write operations",
+      "input": {
+        "agent_role": "planner",
+        "text": "Modify config files in stages"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-3"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute completes task-1 write then fails on task-2",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution failed",
+          "task-1",
+          "task-2",
+          "/execute resume"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-2"
+          }
+        }
+      }
+    },
+    {
+      "label": "resume skips task-1 operations via idempotency and completes",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute resume"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1",
+          "task-2",
+          "task-3"
+        ],
+        "state": {
+          "agent_run_count": 5,
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-3"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -18,6 +18,8 @@ class StoredPlanExecution:
     pause_reason: str = ""
     checkpoint_id: str = ""
     run_metadata: dict[str, Any] = field(default_factory=dict)
+    completed_operations_cache: dict[str, str] = field(default_factory=dict)
+    """Global cache of completed operations: {idempotency_key: result_summary}"""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +33,7 @@ class StoredPlanExecution:
             "pause_reason": self.pause_reason,
             "checkpoint_id": self.checkpoint_id,
             "run_metadata": dict(self.run_metadata),
+            "completed_operations_cache": dict(self.completed_operations_cache),
         }
 
 
@@ -41,6 +44,7 @@ def stored_plan_execution_from_dict(payload: dict[str, Any]) -> StoredPlanExecut
         for item in raw_results:
             if not isinstance(item, dict):
                 continue
+            completed_ops = item.get("completed_operations") or []
             task_results.append(
                 TaskResultSpec(
                     task_id=str(item.get("task_id") or ""),
@@ -48,8 +52,13 @@ def stored_plan_execution_from_dict(payload: dict[str, Any]) -> StoredPlanExecut
                     status=str(item.get("status") or "pending"),  # type: ignore[arg-type]
                     summary=str(item.get("summary") or ""),
                     tool_trace_count=int(item.get("tool_trace_count") or 0),
+                    completed_operations=list(completed_ops) if isinstance(completed_ops, list) else [],
                 )
             )
+    
+    raw_cache = payload.get("completed_operations_cache") or {}
+    completed_operations_cache = dict(raw_cache) if isinstance(raw_cache, dict) else {}
+    
     return StoredPlanExecution(
         session_id=str(payload.get("session_id") or ""),
         plan=plan_spec_from_dict(dict(payload.get("plan") or {})),
@@ -61,6 +70,7 @@ def stored_plan_execution_from_dict(payload: dict[str, Any]) -> StoredPlanExecut
         pause_reason=str(payload.get("pause_reason") or ""),
         checkpoint_id=str(payload.get("checkpoint_id") or ""),
         run_metadata=dict(payload.get("run_metadata") or {}),
+        completed_operations_cache=completed_operations_cache,
     )
 
 

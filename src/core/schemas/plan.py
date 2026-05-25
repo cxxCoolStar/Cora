@@ -89,6 +89,8 @@ class TaskResultSpec:
     status: TaskResultStatus = "pending"
     summary: str = ""
     tool_trace_count: int = 0
+    completed_operations: list[str] = field(default_factory=list)
+    """List of idempotency keys for completed mutating operations in this task"""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +99,7 @@ class TaskResultSpec:
             "status": self.status,
             "summary": self.summary,
             "tool_trace_count": self.tool_trace_count,
+            "completed_operations": list(self.completed_operations),
         }
 
 

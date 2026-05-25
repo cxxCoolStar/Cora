@@ -216,6 +216,8 @@ class PlanExecutor:
         )
         run_id = self._resolve_worker_run_id(session_id=session_id, task_id=task.task_id)
         trace_entries = _tool_trace_entries(turn_result)
+        completed_operations = _extract_completed_operations(turn_result)
+        
         if _task_waiting_hitl(turn_result) or _task_failed(turn_result):
             return (
                 TaskResultSpec(
@@ -224,6 +226,7 @@ class PlanExecutor:
                     status="failed",
                     summary=_task_summary_from_turn(turn_result),
                     tool_trace_count=len(turn_result.tool_trace),
+                    completed_operations=completed_operations,
                 ),
                 trace_entries,
                 turn_result,
@@ -235,6 +238,7 @@ class PlanExecutor:
                 status="completed",
                 summary=_task_summary_from_turn(turn_result),
                 tool_trace_count=len(turn_result.tool_trace),
+                completed_operations=completed_operations,
             ),
             trace_entries,
             turn_result,
@@ -351,11 +355,18 @@ class PlanExecutor:
         metadata_base: dict[str, Any],
     ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
         plan_resume = bool(metadata_base.get("plan_resume"))
+        
+        # Inject completed operations for idempotency checking on resume
+        completed_ops: list[str] = []
+        if plan_resume and "completed_operations" in metadata_base:
+            completed_ops = list(metadata_base["completed_operations"])
+        
         task_metadata = {
             **metadata_base,
             "agent_role": WORKER_AGENT_ROLE,
             "task_id": task.task_id,
             "parent_run_id": planner_run_id,
+            "completed_operations": completed_ops,
         }
         worker_text = build_worker_user_text(task=task, plan_resume=plan_resume)
         turn_result = await self._turn_runner.run_turn(
@@ -370,6 +381,10 @@ class PlanExecutor:
         )
         run_id = self._resolve_worker_run_id(session_id=session_id, task_id=task.task_id)
         trace_entries = _tool_trace_entries(turn_result)
+        
+        # Extract completed operations from tool trace
+        completed_operations = _extract_completed_operations(turn_result)
+        
         if _task_waiting_hitl(turn_result):
             return (
                 TaskResultSpec(
@@ -378,6 +393,7 @@ class PlanExecutor:
                     status="pending",
                     summary=_task_summary_from_turn(turn_result),
                     tool_trace_count=len(turn_result.tool_trace),
+                    completed_operations=completed_operations,
                 ),
                 trace_entries,
             )
@@ -389,6 +405,7 @@ class PlanExecutor:
                     status="failed",
                     summary=_task_summary_from_turn(turn_result),
                     tool_trace_count=len(turn_result.tool_trace),
+                    completed_operations=completed_operations,
                 ),
                 trace_entries,
             )
@@ -399,6 +416,7 @@ class PlanExecutor:
                 status="completed",
                 summary=_task_summary_from_turn(turn_result),
                 tool_trace_count=len(turn_result.tool_trace),
+                completed_operations=completed_operations,
             ),
             trace_entries,
         )
@@ -516,6 +534,18 @@ def _tool_trace_entries(turn_result: AgentTurnResult) -> list[dict[str, Any]]:
         }
         for entry in turn_result.tool_trace
     ]
+
+
+def _extract_completed_operations(turn_result: AgentTurnResult) -> list[str]:
+    """Extract idempotency keys from tool trace metadata."""
+    completed_ops: list[str] = []
+    for entry in turn_result.tool_trace:
+        metadata = entry.metadata or {}
+        idempotency_key = metadata.get("idempotency_key")
+        if idempotency_key and isinstance(idempotency_key, str):
+            if idempotency_key not in completed_ops:
+                completed_ops.append(idempotency_key)
+    return completed_ops
 
 
 def _task_summary_from_turn(turn_result: AgentTurnResult) -> str:
