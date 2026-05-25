@@ -1,0 +1,93 @@
+{
+  "id": "plan_replay_shows_retry_history",
+  "type": "harness",
+  "description": "Replay report should show retry history including retry count, error category, and last error for each task.",
+  "tags": ["harness", "planner", "worker", "replay", "retry"],
+  "setup": {
+    "planner_stub_mode": "two_step",
+    "workspace_files": {
+      "data.txt": "test data"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates three-step plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Process data files with retries"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-3"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute fails on task-2 after retries",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution failed",
+          "task-1",
+          "task-2"
+        ],
+        "state": {
+          "agent_run_count": 3
+        }
+      }
+    },
+    {
+      "label": "replay shows retry history with counts and errors",
+      "input": {
+        "agent_role": "execute",
+        "text": "/replay"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "Plan Execution Report",
+          "Plan ID",
+          "Status",
+          "Total Retries",
+          "task-1",
+          "task-2",
+          "Retries"
+        ],
+        "state": {
+          "agent_run_count": 3
+        }
+      }
+    },
+    {
+      "label": "replay json format shows structured retry data",
+      "input": {
+        "agent_role": "execute",
+        "text": "/replay json"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "\"plan_id\"",
+          "\"status\"",
+          "\"total_retries\"",
+          "\"tasks\"",
+          "\"retry_count\""
+        ],
+        "state": {
+          "agent_run_count": 3
+        }
+      }
+    }
+  ]
+}

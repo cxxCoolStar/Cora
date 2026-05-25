@@ -68,7 +68,7 @@ def classify_error(
         return (ErrorCategory.TIMEOUT, True)
     if "rate limit" in error_str or "too many requests" in error_str:
         return (ErrorCategory.RATE_LIMIT, True)
-    if "permission denied" in error_str or "access denied" in error_str or "forbidden" in error_str:
+    if "permission denied" in error_str or "access denied" in error_str or "forbidden" in error_str or "not allowed" in error_str:
         return (ErrorCategory.PERMISSION_DENIED, False)
     if "invalid argument" in error_str or "validation error" in error_str or "bad request" in error_str:
         return (ErrorCategory.INVALID_ARGUMENTS, False)

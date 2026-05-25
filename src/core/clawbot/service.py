@@ -642,8 +642,18 @@ class ClawBotService:
         source_metadata: dict[str, Any] | None = None,
     ):
         from core.clawbot.service_runtime import AssistantTurnOutcome
+        from core.agent.plan_execute import parse_replay_command
 
         self.session_repository.get(session_id)
+        
+        # Check if this is a /replay command
+        replay_command = parse_replay_command(text)
+        if replay_command is not None:
+            return await self._handle_replay_command(
+                session_id=session_id,
+                format_type=replay_command.format,
+            )
+        
         stored = self.plan_store.get_latest(session_id=session_id, plan_id=plan_id)
         if stored is None:
             return AssistantTurnOutcome(
@@ -886,6 +896,111 @@ class ClawBotService:
             )
             return
         self.plan_store.clear_execution(session_id=session_id)
+
+    async def _handle_replay_command(
+        self,
+        *,
+        session_id: str,
+        format_type: str,
+    ):
+        """Handle /replay command to generate execution replay report."""
+        from core.clawbot.service_runtime import AssistantTurnOutcome
+        from core.agent.plan_replay import build_plan_replay, generate_replay_report
+
+        # Get the stored plan
+        stored_plan = self.plan_store.get_latest(session_id=session_id)
+        if stored_plan is None:
+            return AssistantTurnOutcome(
+                reply="No plan found for this session. Run /plan and /execute first.",
+                action="plan_replay",
+                disposition="clarify",
+                status="failed",
+                tool_name="none",
+                tool_arguments={},
+                context=None,
+                confidence="high",
+                reason="Replay requested without a stored plan.",
+                artifacts=[],
+                trace=[],
+                tool_trace=[],
+            )
+
+        # Get the execution checkpoint
+        stored_execution = self.plan_store.get_execution(session_id=session_id)
+        if stored_execution is None or not stored_execution.task_results:
+            return AssistantTurnOutcome(
+                reply="No execution history found for this plan. Run /execute first.",
+                action="plan_replay",
+                disposition="clarify",
+                status="failed",
+                tool_name="none",
+                tool_arguments={},
+                context=None,
+                confidence="high",
+                reason="Replay requested without execution history.",
+                artifacts=[],
+                trace=[],
+                tool_trace=[],
+            )
+
+        # Rebuild tool trace from task results
+        # Note: We don't have the full tool_trace in checkpoint, so we'll build a minimal one
+        tool_trace = []
+        for task_result in stored_execution.task_results:
+            # Add a synthetic trace entry for each task
+            tool_trace.append({
+                "event": "task.completed",
+                "task_id": task_result.task_id,
+                "status": task_result.status,
+                "metadata": {
+                    "task_id": task_result.task_id,
+                    "retry_count": task_result.retry_count,
+                },
+            })
+
+        # Determine plan run status
+        plan_run_status = "completed"
+        if stored_execution.pause_reason == "hitl":
+            plan_run_status = "waiting_hitl"
+        elif stored_execution.pause_reason == "failed":
+            plan_run_status = "failed"
+        elif any(tr.status == "failed" for tr in stored_execution.task_results):
+            plan_run_status = "failed"
+
+        # Calculate total retry count
+        total_retry_count = sum(tr.retry_count for tr in stored_execution.task_results)
+
+        # Build replay report
+        replay = build_plan_replay(
+            plan=stored_execution.plan,
+            plan_run_status=plan_run_status,
+            task_results=stored_execution.task_results,
+            tool_trace=tool_trace,
+            total_retry_count=total_retry_count,
+            execution_start_time=None,  # Not available in checkpoint
+            execution_end_time=None,
+        )
+
+        # Generate report in requested format
+        report = generate_replay_report(
+            replay=replay,
+            format=format_type,
+        )
+
+        return AssistantTurnOutcome(
+            reply=report,
+            action="plan_replay",
+            disposition="respond",
+            status="completed",
+            tool_name="none",
+            tool_arguments={},
+            context=None,
+            confidence="high",
+            reason=f"Generated {format_type} replay report for plan execution.",
+            artifacts=[],
+            trace=[],
+            tool_trace=[],
+        )
 
     def _plan_executor(self) -> PlanExecutor:
         return PlanExecutor(

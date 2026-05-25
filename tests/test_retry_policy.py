@@ -47,6 +47,13 @@ def test_classify_error_for_permission_denied() -> None:
     assert retryable is False
 
 
+def test_classify_error_for_not_allowed() -> None:
+    """'Not allowed' errors should be classified as permission denied."""
+    category, retryable = classify_error(error="Tool write_file is not allowed by this run's harness policy")
+    assert category == ErrorCategory.PERMISSION_DENIED
+    assert retryable is False
+
+
 def test_classify_error_for_invalid_arguments() -> None:
     """Invalid argument errors should not be retryable."""
     category, retryable = classify_error(error="Invalid argument: path is required")

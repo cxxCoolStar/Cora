@@ -1,6 +1,6 @@
 # Phase 5e：Run Replay（PR-5e）
 
-> 状态：设计中  
+> 状态：✅ 已完成  
 > 前置：Phase 5a（checkpoint resume）、Phase 5b（idempotency）、Phase 5c（retry backoff）
 
 ## 1. 目标
@@ -482,47 +482,47 @@ Cora: <html>...</html>  (或者返回一个链接)
 
 ## 6. 实现切片（小步 PR）
 
-### PR-5e-1: 数据模型与时间戳记录
+### PR-5e-1: 数据模型与时间戳记录 ✅
 
-- [ ] `PlanExecutionResult` 扩展：`execution_start_time`, `execution_end_time`
-- [ ] `OperationReplay`, `TaskReplay`, `PlanReplay` 数据结构
-- [ ] 在 `PlanExecutor.execute` 记录时间戳
-- [ ] 单元测试：`test_plan_execution_result_with_timestamps`
+- [x] `PlanExecutionResult` 扩展：`execution_start_time`, `execution_end_time`
+- [x] `OperationReplay`, `TaskReplay`, `PlanReplay` 数据结构
+- [x] 在 `PlanExecutor.execute` 记录时间戳
+- [x] 单元测试：`test_plan_execution_result_with_timestamps`
 
-### PR-5e-2: Replay 数据构建
+### PR-5e-2: Replay 数据构建 ✅
 
-- [ ] `build_plan_replay()` 函数
-- [ ] `_extract_operations_from_trace()` 辅助函数
-- [ ] 从 `tool_trace` 提取操作信息
-- [ ] 识别跳过的操作（idempotency）
-- [ ] 识别重试事件
-- [ ] 单元测试：`test_build_plan_replay_from_execution_result`
+- [x] `build_plan_replay()` 函数
+- [x] `_extract_operations_from_trace()` 辅助函数
+- [x] 从 `tool_trace` 提取操作信息
+- [x] 识别跳过的操作（idempotency）
+- [x] 识别重试事件
+- [x] 单元测试：`test_build_plan_replay_from_execution_result`
 
-### PR-5e-3: Markdown 报告生成
+### PR-5e-3: Markdown 报告生成 ✅
 
-- [ ] `generate_replay_report()` 函数
-- [ ] `_format_replay_as_markdown()` 实现
-- [ ] 格式化 task、operation、retry 信息
-- [ ] 单元测试：`test_format_replay_as_markdown`
+- [x] `generate_replay_report()` 函数
+- [x] `_format_replay_as_markdown()` 实现
+- [x] 格式化 task、operation、retry 信息
+- [x] 单元测试：`test_format_replay_as_markdown`
 
-### PR-5e-4: JSON 报告生成
+### PR-5e-4: JSON 报告生成 ✅
 
-- [ ] `_format_replay_as_json()` 实现
-- [ ] JSON 序列化
-- [ ] 单元测试：`test_format_replay_as_json`
+- [x] `_format_replay_as_json()` 实现
+- [x] JSON 序列化
+- [x] 单元测试：`test_format_replay_as_json`
 
-### PR-5e-5: 命令行集成
+### PR-5e-5: 命令行集成 ✅
 
-- [ ] `parse_replay_command()` 函数
-- [ ] `ClawBotService._handle_replay_command()` 实现
-- [ ] 从 checkpoint 重建 execution result
-- [ ] 单元测试：`test_parse_replay_command`
+- [x] `parse_replay_command()` 函数
+- [x] `ClawBotService._handle_replay_command()` 实现
+- [x] 从 checkpoint 重建 execution result
+- [x] 单元测试：`test_parse_replay_command`
 
-### PR-5e-6: Eval 与集成测试
+### PR-5e-6: Eval 与集成测试 ✅
 
-- [ ] `plan_replay_shows_retry_history.json`
-- [ ] `plan_replay_shows_skipped_operations.json`
-- [ ] 运行 `.\scripts\run_harness_evals.cmd` 确保全绿
+- [x] `plan_replay_shows_retry_history.json`
+- [x] `plan_replay_shows_skipped_operations.json`
+- [x] 运行 `.\scripts\run_harness_evals.cmd` 确保全绿（39/39 通过）
 
 ---
 
@@ -553,19 +553,19 @@ Resume 后的 replay 应该包含：
 
 ## 8. 验收标准
 
-- [ ] `PlanExecutionResult` 包含时间戳字段
-- [ ] `PlanReplay` 数据结构完整
-- [ ] 能从 `PlanExecutionResult` 构建 replay
-- [ ] Markdown 报告格式清晰易读
-- [ ] JSON 报告结构完整
-- [ ] `/replay` 命令正常工作
-- [ ] Replay 包含重试历史
-- [ ] Replay 包含跳过的操作（idempotency）
-- [ ] Eval 通过：
-  - `plan_replay_shows_retry_history`
-  - `plan_replay_shows_skipped_operations`
-- [ ] 现有 37 个 harness eval 仍然全绿
-- [ ] 单元测试覆盖 replay 构建和格式化逻辑
+- [x] `PlanExecutionResult` 包含时间戳字段
+- [x] `PlanReplay` 数据结构完整
+- [x] 能从 `PlanExecutionResult` 构建 replay
+- [x] Markdown 报告格式清晰易读
+- [x] JSON 报告结构完整
+- [x] `/replay` 命令正常工作
+- [x] Replay 包含重试历史
+- [x] Replay 包含跳过的操作（idempotency）
+- [x] Eval 通过：
+  - `plan_replay_shows_retry_history` ✅
+  - `plan_replay_shows_skipped_operations` ✅
+- [x] 现有 37 个 harness eval 仍然全绿（现在是 39 个全绿）
+- [x] 单元测试覆盖 replay 构建和格式化逻辑
 
 ---
 
