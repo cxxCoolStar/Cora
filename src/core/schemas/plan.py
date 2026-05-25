@@ -91,6 +91,14 @@ class TaskResultSpec:
     tool_trace_count: int = 0
     completed_operations: list[str] = field(default_factory=list)
     """List of idempotency keys for completed mutating operations in this task"""
+    retry_count: int = 0
+    """Number of retries attempted for this task"""
+    last_error: str | None = None
+    """Last error message if task failed"""
+    error_category: str | None = None
+    """Error category: transient | rate_limit | permission_denied | ..."""
+    retryable: bool = False
+    """Whether the error is retryable"""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +108,10 @@ class TaskResultSpec:
             "summary": self.summary,
             "tool_trace_count": self.tool_trace_count,
             "completed_operations": list(self.completed_operations),
+            "retry_count": self.retry_count,
+            "last_error": self.last_error,
+            "error_category": self.error_category,
+            "retryable": self.retryable,
         }
 
 

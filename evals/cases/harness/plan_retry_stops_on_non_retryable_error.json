@@ -1,0 +1,45 @@
+{
+  "id": "plan_retry_stops_on_non_retryable_error",
+  "type": "harness",
+  "description": "Task should not retry on non-retryable errors like permission denial.",
+  "tags": ["harness", "planner", "worker", "retry", "permission"],
+  "setup": {
+    "planner_stub_mode": "two_step",
+    "workspace_files": {
+      "data.txt": "initial content"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates three-step plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Process data files"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-3"]
+      }
+    },
+    {
+      "label": "execute fails immediately on permission denial without retry",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "reply_contains_all": ["execution failed", "task-2"],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-2"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from core.agent.plan_reviewer import PlanReviewVerdict, should_review_task
+from core.agent.retry_policy import ErrorCategory, calculate_backoff_delay, classify_error, log_retry_event
 from core.schemas.harness import RunBudget
 from core.schemas.plan import PlanRunSpec, PlanSpec, TaskResultSpec, TaskSpec
 
@@ -74,6 +77,12 @@ class PlanExecutionResult:
     paused_task_index: int | None = None
     pause_reason: str | None = None
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
+    total_retry_count: int = 0
+    """Total number of retries across all tasks in this plan execution"""
+    execution_start_time: float | None = None
+    """Timestamp when plan execution started (seconds since epoch)"""
+    execution_end_time: float | None = None
+    """Timestamp when plan execution ended (seconds since epoch)"""
 
 
 class PlanExecutor:
@@ -105,6 +114,8 @@ class PlanExecutor:
         initial_task_results: list[TaskResultSpec] | None = None,
         initial_tool_trace: list[dict[str, Any]] | None = None,
     ) -> PlanExecutionResult:
+        execution_start_time = time.time()
+        
         plan_run = PlanRunSpec(plan_id=plan.plan_id, status="executing")
         metadata_base = dict(run_metadata or {})
         metadata_base.setdefault("plan_id", plan.plan_id)
@@ -112,10 +123,36 @@ class PlanExecutor:
         if initial_task_results:
             plan_run.task_results.extend(initial_task_results)
 
+        # Retry configuration
+        total_retry_count = 0
+        max_total_retries = 10
+        
         tasks = list(plan.tasks)
         for index in range(max(0, int(start_task_index)), len(tasks)):
             task = tasks[index]
-            task_result, task_tool_trace = await self._run_task(
+            
+            # Check global retry limit
+            if total_retry_count >= max_total_retries:
+                plan_run.status = "failed"
+                return PlanExecutionResult(
+                    plan_run=plan_run,
+                    reply=format_plan_execution_reply(
+                        plan=plan,
+                        plan_run=plan_run,
+                        pause_reason="retry_limit_exceeded",
+                        paused_task_index=index,
+                    ) + f"\n\nPlan total retry limit exceeded ({max_total_retries} retries).",
+                    status="failed",
+                    disposition="respond",
+                    paused_task_index=index,
+                    pause_reason="retry_limit_exceeded",
+                    tool_trace=aggregated_tool_trace,
+                    total_retry_count=total_retry_count,
+                    execution_start_time=execution_start_time,
+                    execution_end_time=time.time(),
+                )
+            
+            task_result, task_tool_trace = await self._run_task_with_retry(
                 session_id=session_id,
                 plan=plan,
                 task=task,
@@ -123,9 +160,16 @@ class PlanExecutor:
                 source_message_id=source_message_id,
                 context_snapshot=context_snapshot,
                 metadata_base=metadata_base,
+                total_retry_count=total_retry_count,
+                max_total_retries=max_total_retries,
             )
+            
+            # Update total retry count
+            total_retry_count += task_result.retry_count
+            
             plan_run.task_results.append(task_result)
             aggregated_tool_trace.extend(task_tool_trace)
+            
             if task_result.status == "failed":
                 plan_run.status = "failed"
                 return PlanExecutionResult(
@@ -141,6 +185,9 @@ class PlanExecutor:
                     paused_task_index=index,
                     pause_reason="failed",
                     tool_trace=aggregated_tool_trace,
+                    total_retry_count=total_retry_count,
+                    execution_start_time=execution_start_time,
+                    execution_end_time=time.time(),
                 )
             if task_result.status == "pending":
                 plan_run.status = "waiting_hitl"
@@ -158,6 +205,9 @@ class PlanExecutor:
                     paused_task_index=index,
                     pause_reason="hitl",
                     tool_trace=aggregated_tool_trace,
+                    total_retry_count=total_retry_count,
+                    execution_start_time=execution_start_time,
+                    execution_end_time=time.time(),
                 )
 
         plan_run.status = "completed"
@@ -167,6 +217,9 @@ class PlanExecutor:
             status="completed",
             disposition="respond",
             tool_trace=aggregated_tool_trace,
+            total_retry_count=total_retry_count,
+            execution_start_time=execution_start_time,
+            execution_end_time=time.time(),
         )
 
     async def resume_task_after_hitl(
@@ -288,6 +341,184 @@ class PlanExecutor:
         if reviewed is not None:
             return reviewed, trace_entries
         return task_result, trace_entries
+
+    async def _run_task_with_retry(
+        self,
+        *,
+        session_id: str,
+        plan: PlanSpec,
+        task: TaskSpec,
+        planner_run_id: str,
+        source_message_id: str,
+        context_snapshot: RuntimeContextSnapshot,
+        metadata_base: dict[str, Any],
+        total_retry_count: int,
+        max_total_retries: int,
+    ) -> tuple[TaskResultSpec, list[dict[str, Any]]]:
+        """Run a task with automatic retry on transient errors."""
+        max_retries = 3
+        retry_timeout = 300.0  # 5 minutes
+        retry_start_time = time.time()
+        retry_count = 0
+        aggregated_trace: list[dict[str, Any]] = []
+        last_task_result: TaskResultSpec | None = None
+        
+        while retry_count <= max_retries:
+            # Check retry timeout
+            if time.time() - retry_start_time > retry_timeout:
+                if last_task_result is not None:
+                    last_task_result.retry_count = retry_count
+                    last_task_result.last_error = f"Task retry timeout exceeded ({retry_timeout}s)"
+                    last_task_result.error_category = ErrorCategory.TIMEOUT.value
+                    last_task_result.retryable = False
+                    return last_task_result, aggregated_trace
+                return (
+                    TaskResultSpec(
+                        task_id=task.task_id,
+                        run_id="",
+                        status="failed",
+                        summary=f"Task retry timeout exceeded ({retry_timeout}s)",
+                        retry_count=retry_count,
+                        last_error=f"Task retry timeout exceeded ({retry_timeout}s)",
+                        error_category=ErrorCategory.TIMEOUT.value,
+                        retryable=False,
+                    ),
+                    aggregated_trace,
+                )
+            
+            # Check global retry limit
+            if total_retry_count + retry_count >= max_total_retries:
+                if last_task_result is not None:
+                    last_task_result.retry_count = retry_count
+                    last_task_result.last_error = f"Plan total retry limit exceeded ({max_total_retries})"
+                    last_task_result.error_category = ErrorCategory.UNKNOWN.value
+                    last_task_result.retryable = False
+                    return last_task_result, aggregated_trace
+                return (
+                    TaskResultSpec(
+                        task_id=task.task_id,
+                        run_id="",
+                        status="failed",
+                        summary=f"Plan total retry limit exceeded ({max_total_retries})",
+                        retry_count=retry_count,
+                        last_error=f"Plan total retry limit exceeded ({max_total_retries})",
+                        error_category=ErrorCategory.UNKNOWN.value,
+                        retryable=False,
+                    ),
+                    aggregated_trace,
+                )
+            
+            # Execute task
+            try:
+                task_result, trace_entries = await self._run_task(
+                    session_id=session_id,
+                    plan=plan,
+                    task=task,
+                    planner_run_id=planner_run_id,
+                    source_message_id=source_message_id,
+                    context_snapshot=context_snapshot,
+                    metadata_base=metadata_base,
+                )
+                aggregated_trace.extend(trace_entries)
+                
+                # Success: return result
+                if task_result.status == "completed":
+                    task_result.retry_count = retry_count
+                    return task_result, aggregated_trace
+                
+                # HITL pending: return immediately (not retryable)
+                if task_result.status == "pending":
+                    task_result.retry_count = retry_count
+                    return task_result, aggregated_trace
+                
+                # Failed: classify error and decide whether to retry
+                error_category, retryable = classify_error(
+                    error=task_result.summary,
+                    tool_name=None,
+                    status_code=None,
+                )
+                
+                task_result.error_category = error_category.value
+                task_result.retryable = retryable
+                task_result.last_error = task_result.summary
+                last_task_result = task_result
+                
+                # Not retryable or reached max retries: fail
+                if not retryable or retry_count >= max_retries:
+                    task_result.retry_count = retry_count
+                    return task_result, aggregated_trace
+                
+                # Retryable: backoff and retry
+                retry_count += 1
+                delay = calculate_backoff_delay(attempt=retry_count - 1)
+                
+                # Log retry event
+                retry_event = log_retry_event(
+                    task_id=task.task_id,
+                    retry_count=retry_count,
+                    delay=delay,
+                    error_category=error_category,
+                    error_message=task_result.summary,
+                )
+                aggregated_trace.append(retry_event)
+                
+                # Wait for backoff delay
+                await asyncio.sleep(delay)
+                
+            except Exception as exc:
+                # Uncaught exception: classify and decide whether to retry
+                error_category, retryable = classify_error(error=exc)
+                
+                last_task_result = TaskResultSpec(
+                    task_id=task.task_id,
+                    run_id="",
+                    status="failed",
+                    summary=str(exc),
+                    retry_count=retry_count,
+                    last_error=str(exc),
+                    error_category=error_category.value,
+                    retryable=retryable,
+                )
+                
+                # Not retryable or reached max retries: fail
+                if not retryable or retry_count >= max_retries:
+                    return last_task_result, aggregated_trace
+                
+                # Retryable: backoff and retry
+                retry_count += 1
+                delay = calculate_backoff_delay(attempt=retry_count - 1)
+                
+                # Log retry event
+                retry_event = log_retry_event(
+                    task_id=task.task_id,
+                    retry_count=retry_count,
+                    delay=delay,
+                    error_category=error_category,
+                    error_message=str(exc),
+                )
+                aggregated_trace.append(retry_event)
+                
+                # Wait for backoff delay
+                await asyncio.sleep(delay)
+        
+        # Should not reach here, but return last result if we do
+        if last_task_result is not None:
+            last_task_result.retry_count = retry_count
+            return last_task_result, aggregated_trace
+        
+        return (
+            TaskResultSpec(
+                task_id=task.task_id,
+                run_id="",
+                status="failed",
+                summary="Task failed after maximum retries",
+                retry_count=retry_count,
+                last_error="Task failed after maximum retries",
+                error_category=ErrorCategory.UNKNOWN.value,
+                retryable=False,
+            ),
+            aggregated_trace,
+        )
 
     async def _apply_task_review(
         self,
