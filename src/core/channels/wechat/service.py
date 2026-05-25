@@ -339,16 +339,18 @@ class WechatGatewayService:
                 disposition=response.disposition,
                 needs_clarification=response.needs_clarification,
             )
+        # Handle both /execute and /replay commands
         response = await self.clawbot_service.execute_plan_turn(
             session_id=session_id,
             text=str(text or "").strip() or "/execute",
             source_metadata=metadata,
         )
+        action = "plan_replayed" if command == "replay" else "plan_executed"
         return WechatHandleResult(
             deduplicated=False,
             session_id=session_id,
             reply=response.reply,
-            action="plan_executed",
+            action=action,
             disposition=response.disposition,
             needs_clarification=response.needs_clarification,
         )

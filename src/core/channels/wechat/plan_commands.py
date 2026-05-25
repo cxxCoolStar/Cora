@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-PlanCommand = Literal["plan", "execute"]
+PlanCommand = Literal["plan", "execute", "replay"]
 
 
 def parse_plan_command(text: str | None) -> PlanCommand | None:
@@ -12,6 +12,8 @@ def parse_plan_command(text: str | None) -> PlanCommand | None:
     lowered = normalized.lower()
     if lowered == "/execute" or lowered.startswith("/execute "):
         return "execute"
+    if lowered == "/replay" or lowered.startswith("/replay "):
+        return "replay"
     if lowered.startswith("/plan"):
         return "plan"
     return None

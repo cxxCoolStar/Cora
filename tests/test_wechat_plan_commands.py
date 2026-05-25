@@ -8,6 +8,8 @@ def test_parse_plan_command_detects_plan_and_execute() -> None:
     assert parse_plan_command("/PLAN x") == "plan"
     assert parse_plan_command("/execute") == "execute"
     assert parse_plan_command("/execute now") == "execute"
+    assert parse_plan_command("/replay") == "replay"
+    assert parse_plan_command("/replay json") == "replay"
     assert parse_plan_command("hello") is None
 
 
