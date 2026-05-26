@@ -55,6 +55,7 @@ class ClawBotContainer:
     ingestion_service: IngestionService
     clawbot_service: ClawBotService
     tool_executor: RuntimeToolExecutor
+    mcp_manager: Any = None
 
     def initialize(self) -> None:
         self.database.create_all()
@@ -65,6 +66,28 @@ class ClawBotContainer:
         self.tool_executor.session_map_repository = session_map_repository
         self.tool_executor.channel_name = "wechat"
         self.clawbot_service.refresh_tool_specs()
+
+    async def connect_mcp_if_enabled(self) -> None:
+        """Connect configured MCP servers and register tools on the clawbot service."""
+        from core.mcp.runtime import create_mcp_manager
+        from core.tools import ToolManager
+
+        manager = await create_mcp_manager(
+            enabled=self.settings.mcp_enabled,
+            config_path=self.settings.mcp_config_path,
+        )
+        if manager is None:
+            return
+
+        self.mcp_manager = manager
+        self.clawbot_service.tool_manager = ToolManager(mcp_manager=manager)
+        self.clawbot_service.refresh_tool_specs()
+
+    async def disconnect_mcp(self) -> None:
+        from core.mcp.runtime import disconnect_mcp_manager
+
+        await disconnect_mcp_manager(self.mcp_manager)
+        self.mcp_manager = None
 
 
 _container: ClawBotContainer | None = None

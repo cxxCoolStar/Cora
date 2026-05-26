@@ -54,6 +54,8 @@ class CoreSettings(BaseSettings):
     scheduler_timezone: str | None = None
     scheduler_tick_seconds: int = 5
     scheduler_lease_seconds: int = 600
+    mcp_enabled: bool = False
+    mcp_config_path: Path | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="CORA_",

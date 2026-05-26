@@ -1,7 +1,7 @@
 # Cora 项目目标（长期）
 
 > 维护者：个人练手项目，用于系统学习 agent / harness 开发。  
-> 最后更新：2026-05-22
+> 最后更新：2026-05-26
 
 ## 长期目标
 
@@ -36,6 +36,14 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 4e | Subagent 边界 eval（深度/限额/policy/merge，含 tool 路径） | `evals/cases/harness/spawn_*` | ✅ |
 | Phase 4h | Subagent `context_mode` isolated / forked | `subagent_context.py`、`_load_agent_history` | ✅ |
 | Phase 5a | Plan 执行 checkpoint（失败续跑 / restart） | `plan_execute.py`、`execute_plan_outcome` | ✅ |
+| Phase 5b | Mutating tool 幂等键（plan resume 防重复写） | `idempotency.py`、checkpoint eval | ✅ |
+| Phase 5c | 瞬态错误指数退避重试 | `retry_policy.py` | ✅ |
+| Phase 5e | Plan 执行 replay（含微信 replay 命令） | `plan_replay.py`、`plan_commands.py` | ✅ |
+| Phase 6a | MCP Client / Manager 基础设施 | `src/core/mcp/` | ✅ |
+| Phase 6b | MCP 配置加载 + ToolManager 注册 | `config_loader.py`、`tool_adapter.py` | ✅ |
+| Phase 6c | MCP Tool Policy + HITL + gateway 接线 | `tool_policy_engine.py`、`mcp/runtime.py` | ✅ |
+| Phase 6d | MCP 幂等 / 重试 | 设计见 phase6 doc | 🚧 |
+| Phase 6e | MCP eval 全集 + 用户文档 | 设计见 phase6 doc | 🚧 |
 
 ## 建议的自学方式（在本仓库内）
 

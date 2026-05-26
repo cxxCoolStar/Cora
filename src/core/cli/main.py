@@ -193,11 +193,20 @@ def _build_gateway_runtime(*, settings: CoreSettings) -> GatewayRuntime:
     )
 
 
-async def _run_gateway_forever(*, poller: WechatPoller, worker: ScheduledTaskWorker) -> None:
-    await asyncio.gather(
-        poller.run_forever(),
-        worker.run_forever(),
-    )
+async def _run_gateway_forever(
+    *,
+    container: ClawBotContainer,
+    poller: WechatPoller,
+    worker: ScheduledTaskWorker,
+) -> None:
+    await container.connect_mcp_if_enabled()
+    try:
+        await asyncio.gather(
+            poller.run_forever(),
+            worker.run_forever(),
+        )
+    finally:
+        await container.disconnect_mcp()
 
 
 def _close_client(client: WechatIlinkClient | None) -> None:
@@ -213,7 +222,13 @@ def _run_gateway_command(*, settings: CoreSettings, start_message: str) -> None:
     runtime = _build_gateway_runtime(settings=settings)
     typer.echo(start_message.format(account=settings.wechat_account_name, base_url=runtime.base_url))
     try:
-        asyncio.run(_run_gateway_forever(poller=runtime.poller, worker=runtime.worker))
+        asyncio.run(
+            _run_gateway_forever(
+                container=runtime.container,
+                poller=runtime.poller,
+                worker=runtime.worker,
+            )
+        )
     finally:
         _close_client(runtime.client)
 

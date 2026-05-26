@@ -133,6 +133,17 @@ CORA_CONTEXT_SUMMARY_TARGET_RATIO=0.20
 CORA_CONTEXT_PROTECT_LAST_N_MIN=8
 ```
 
+### MCP 外部工具（可选）
+
+在 `config/mcp_servers.json` 中配置 MCP Server，并在 gateway 启动前启用：
+
+```env
+CORA_MCP_ENABLED=true
+CORA_MCP_CONFIG_PATH=config/mcp_servers.json
+```
+
+MCP 工具名称格式为 `mcp_{server}_{tool}`，并受与内置工具相同的 harness policy / HITL 约束（见 `src/core/agent/policy_profiles.py`）。
+
 ### 图片视觉描述配置
 
 图片上传会进入 archive 流程。若要为图片生成可检索的视觉描述，可额外配置：
@@ -460,13 +471,14 @@ This is equivalent to:
 python -B -m core.cli.main eval-run --case-type harness --report-path .cora/evals/harness-latest.json
 ```
 
-The harness smoke gate currently covers **14 cases / 16 steps**, including:
+The harness smoke gate currently covers **40 cases** (run all harness-type evals), including:
 
 - normal single-agent completion
 - tool-using turns and `tool.completed` trace events
 - timeout budget handling and `budget.timeout`
 - expected harness failure handling and `run.failed`
 - per-run allow/deny tool policy and named policy profiles
+- MCP tool policy (`mcp_tool_respects_policy`) when external servers are configured
 - WeChat HITL confirm flow (`wechat_hitl_confirm_command`) — see [docs/wechat-hitl.md](docs/wechat-hitl.md)
 
 Phase 3 planning design draft: [docs/cora-phase3-planning-design.md](docs/cora-phase3-planning-design.md).

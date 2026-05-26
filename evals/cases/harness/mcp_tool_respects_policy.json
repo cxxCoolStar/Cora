@@ -1,0 +1,113 @@
+{
+  "id": "mcp_tool_respects_policy",
+  "type": "harness",
+  "description": "MCP tools should respect harness policy profiles (deny patterns, default ask, readonly allow/deny).",
+  "tags": ["harness", "mcp", "tool-governance", "policy"],
+  "steps": [
+    {
+      "label": "wechat_safe denies dangerous mcp delete pattern",
+      "input": {
+        "text": "/tool mcp_example_delete {\"id\":1}",
+        "run_budget": {
+          "policy_profile": "wechat_safe"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "not allowed by this run's harness policy"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.policy.applied",
+            "tool.denied",
+            "cleanup.completed"
+          ]
+        }
+      }
+    },
+    {
+      "label": "wechat_safe asks before running generic mcp tool",
+      "input": {
+        "text": "/tool mcp_example_echo {\"text\":\"hi\"}",
+        "run_budget": {
+          "policy_profile": "wechat_safe"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "clarify",
+        "reply_contains_all": [
+          "confirmation",
+          "mcp_example_echo"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "needs_clarification",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.policy.applied",
+            "tool.requested",
+            "cleanup.completed"
+          ]
+        }
+      }
+    },
+    {
+      "label": "background_readonly denies non-read mcp tool",
+      "input": {
+        "text": "/tool mcp_example_write {\"data\":\"x\"}",
+        "run_budget": {
+          "policy_profile": "background_readonly"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "not allowed by this run's harness policy"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "tool.policy.applied",
+            "tool.denied"
+          ]
+        }
+      }
+    },
+    {
+      "label": "background_readonly allows read-pattern mcp tool name",
+      "input": {
+        "text": "/tool mcp_filesystem_read {\"path\":\".\"}",
+        "run_budget": {
+          "policy_profile": "background_readonly"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_not_contains": [
+          "not allowed by this run's harness policy"
+        ],
+        "state": {
+          "agent_run_count": 4,
+          "latest_agent_run_trace_contains_all": [
+            "tool.policy.applied"
+          ],
+          "latest_agent_run_trace_not_contains": [
+            "tool.denied"
+          ]
+        }
+      }
+    }
+  ]
+}
