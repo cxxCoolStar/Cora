@@ -196,6 +196,12 @@ class IngestionService:
             topic_name=topic_name,
             previous_current=previous_current,
         )
+        try:
+            from core.skills.hooks import fire_item_saved_hooks
+
+            fire_item_saved_hooks(item=item, parsed=parsed)
+        except Exception:
+            logger.exception("item_saved hooks failed item_id=%s", getattr(item, "id", ""))
         return IngestedItemResult(item_id=item.id, reply=reply, topic_name=topic_name)
 
     @staticmethod

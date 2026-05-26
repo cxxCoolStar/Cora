@@ -34,6 +34,11 @@ class SkillScriptExecutor:
             raise ValueError(f"Unknown skill: {request.skill_name}")
         if viewed.absolute_path.suffix.lower() != ".py":
             raise ValueError("skill_run only supports Python helper scripts.")
+        if self._should_run_archive_dispatch_in_process(request=request, viewed=viewed):
+            from core.skills.runner import run_archive_dispatch
+
+            parsed = run_archive_dispatch(request.input_payload)
+            return SkillExecutionResult.from_payload(parsed)
         payload = json.dumps(request.input_payload, ensure_ascii=False)
         completed = subprocess.run(
             [self.python_executable, str(viewed.absolute_path)],
@@ -56,3 +61,12 @@ class SkillScriptExecutor:
         if not isinstance(parsed, dict):
             raise ValueError("Skill script must return one JSON object.")
         return SkillExecutionResult.from_payload(parsed)
+
+    @staticmethod
+    def _should_run_archive_dispatch_in_process(*, request: SkillScriptRequest, viewed: Any) -> bool:
+        if request.skill_name != "archive-core":
+            return False
+        normalized = str(request.script_path or "").replace("\\", "/")
+        if not normalized.endswith("archive_dispatch.py"):
+            return False
+        return viewed.absolute_path.name == "archive_dispatch.py"

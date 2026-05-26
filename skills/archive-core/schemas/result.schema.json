@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ArchiveResult",
+  "type": "object",
+  "required": ["schema_version", "status", "disposition", "message"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "status": { "type": "string", "enum": ["completed", "failed"] },
+    "disposition": { "type": "string", "enum": ["respond", "clarify"] },
+    "message": { "type": "string" },
+    "artifacts": { "type": "array" },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "payload"],
+        "properties": {
+          "type": { "type": "string" },
+          "payload": { "type": "object" }
+        }
+      }
+    },
+    "pending": { "type": ["object", "null"] }
+  },
+  "additionalProperties": true
+}

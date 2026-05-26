@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
-from typing import Any
 
-from _archive_common import archive_paths, read_index_records, summarize_record
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
+if str(_SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT))
+
+from archive_core.store.file_store import FileArchiveStore  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,39 +22,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _match(record: dict[str, Any], *, query: str, topic: str, record_id: str) -> bool:
-    if topic and str(record.get("topic") or "") != topic:
-        return False
-    if record_id and str(record.get("id") or "") != record_id:
-        return False
-    if not query:
-        return True
-    haystack = " ".join(
-        str(record.get(field) or "")
-        for field in ("id", "topic", "path", "filename", "summary", "description", "source", "user_note")
-    ).lower()
-    return query in haystack
-
-
 def main() -> int:
     args = build_parser().parse_args()
-    paths = archive_paths(args.archive_root)
-    records = read_index_records(paths.index_path)
-    query = (args.query or "").strip().lower()
-    topic = (args.topic or "").strip().lower()
-    record_id = (args.record_id or "").strip()
-    limit = max(1, int(args.limit))
-
-    matches = [record for record in records if _match(record, query=query, topic=topic, record_id=record_id)]
-    results = []
-    for record in matches[:limit]:
-        item = summarize_record(record)
-        path_value = str(record.get("path") or "")
-        asset_path = (paths.archive_root / Path(path_value)).resolve()
-        item["file_exists"] = asset_path.exists()
-        item["resolved_path"] = str(asset_path)
-        results.append(item)
-
+    store = FileArchiveStore(args.archive_root)
+    matches = store.search(
+        query=args.query,
+        topic=args.topic,
+        record_id=args.record_id,
+        limit=args.limit,
+    )
+    results = [item.to_summary() for item in matches]
     print(
         json.dumps(
             {

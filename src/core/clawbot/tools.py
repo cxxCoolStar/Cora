@@ -691,6 +691,72 @@ class RuntimeToolExecutor:
             execution.item_id = first_ref or None
         return execution
 
+    async def _tool_archive_run(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        from core.skills.action_dispatcher import dispatch_cora_archive
+
+        arguments = dict(invocation.plan.arguments or {})
+        intent = str(arguments.get("intent") or "").strip()
+        logger.info(
+            "archive_run start session_id=%s intent=%s",
+            invocation.session_id,
+            intent,
+        )
+        if not intent:
+            return ToolExecutionResult(reply="archive_run 需要提供 intent。", action="skill", status="failed", disposition="respond")
+        payload = self._build_skill_payload(invocation=invocation, input_payload=arguments)
+        try:
+            skill_result = SkillExecutionResult.from_payload(dispatch_cora_archive(payload))
+        except (ValueError, RuntimeError) as exc:
+            logger.exception("archive_run failed session_id=%s intent=%s", invocation.session_id, intent)
+            return ToolExecutionResult(reply=str(exc), action="skill", status="failed", disposition="respond")
+
+        execution = ToolExecutionResult(
+            reply=skill_result.message,
+            action=skill_result.action,
+            status=skill_result.status,
+            disposition=skill_result.disposition,
+            artifacts=list(skill_result.artifacts),
+            metadata={
+                "skill_name": "archive-core",
+                "script_path": "adapters/cora/dispatch.py",
+                "result": skill_result.raw_payload,
+                "raw_skill_action": skill_result.action,
+            },
+            state_delta=self._runtime_state_delta_from_skill_delta(
+                invocation=invocation,
+                state_delta=skill_result.state_delta,
+            ),
+        )
+        try:
+            await self.effect_dispatcher.apply(invocation=invocation, execution=execution, effects=skill_result.effects)
+        except ValueError as exc:
+            logger.exception(
+                "archive_run effect_apply_failed session_id=%s intent=%s action=%s",
+                invocation.session_id,
+                intent,
+                skill_result.action,
+            )
+            return ToolExecutionResult(reply=str(exc), action="skill", status="failed", disposition="respond")
+        self._apply_pending_result(
+            invocation=invocation,
+            skill_name="archive-core",
+            skill_result=skill_result,
+            execution=execution,
+        )
+        if execution.status == "failed" and execution.action in {"capture", "retrieve", "delete", "organize"}:
+            execution.action = "chat"
+        if execution.artifacts:
+            first_ref = next(
+                (
+                    str(artifact.get("ref") or "").strip()
+                    for artifact in execution.artifacts
+                    if artifact.get("kind") == "item" and str(artifact.get("ref") or "").strip()
+                ),
+                "",
+            )
+            execution.item_id = first_ref or None
+        return execution
+
     async def _ingest_upload(
         self,
         *,

@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import sys
 from pathlib import Path
 
-from _archive_common import (
-    append_index_record,
-    archive_paths,
-    ensure_archive_layout,
-    generate_asset_id,
-    normalize_asset_type,
-    normalize_created_at,
-    normalize_topic,
-    unique_destination,
-)
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
+if str(_SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT))
+
+from archive_core.store.file_store import FileArchiveStore  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,48 +29,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    paths = archive_paths(args.archive_root)
-    ensure_archive_layout(paths)
-
-    source_file = Path(args.source_file).expanduser().resolve()
-    if not source_file.is_file():
-        raise FileNotFoundError(f"source file not found: {source_file}")
-
-    topic = normalize_topic(args.topic)
-    asset_type = normalize_asset_type(args.asset_type)
-    topic_dir = paths.topics_root / topic
-    topic_dir.mkdir(parents=True, exist_ok=True)
-
-    destination = unique_destination(topic_dir, source_file.name)
-    if args.move:
-        shutil.move(str(source_file), str(destination))
-    else:
-        shutil.copy2(source_file, destination)
-
-    created_at = normalize_created_at(args.created_at)
-    relative_path = destination.relative_to(paths.archive_root).as_posix()
-    record = {
-        "id": generate_asset_id(asset_type),
-        "type": asset_type,
-        "topic": topic,
-        "path": relative_path,
-        "filename": destination.name,
-        "summary": (args.summary or "").strip(),
-        "description": (args.description or "").strip(),
-        "source": (args.source or "unknown").strip() or "unknown",
-        "user_note": (args.user_note or "").strip(),
-        "created_at": created_at,
-    }
-
-    append_index_record(paths.index_path, record)
+    store = FileArchiveStore(args.archive_root)
+    record = store.save_asset(
+        source_path=Path(args.source_file),
+        topic=args.topic,
+        asset_type=args.asset_type,
+        summary=args.summary,
+        description=args.description,
+        source=args.source,
+        user_note=args.user_note,
+        created_at=args.created_at,
+        move=args.move,
+    )
+    resolved = store.resolve_path(record)
     print(
         json.dumps(
             {
                 "success": True,
-                "topic": topic,
-                "stored_path": str(destination),
-                "relative_path": relative_path,
-                "record": record,
+                "topic": record.topic,
+                "stored_path": str(resolved),
+                "relative_path": record.path,
+                "record": record.to_dict(),
             },
             ensure_ascii=False,
         )

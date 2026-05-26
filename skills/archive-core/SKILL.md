@@ -1,7 +1,7 @@
 ---
 name: archive-core
-description: Shared filesystem archive contract for saving, indexing, and locating archived assets across higher-level archive workflows.
-version: 0.1.0
+description: Portable filesystem archive for save, search, read, and deliver workflows (host-agnostic JSON contract).
+version: 0.2.0
 platforms: [macos, linux, windows]
 metadata:
   hermes:
@@ -24,7 +24,21 @@ metadata:
 
 # Archive Core
 
-This skill defines the shared archive contract for Cora's filesystem-first archive workflows.
+Portable archive skill (schema **1.0**). Works with any agent that can run `archive-cli` or import the `archive_core` Python package.
+
+- Machine contract: `manifest.json`, `schemas/request.schema.json`, `schemas/result.schema.json`
+- Integration guide: `references/PORTABLE.md`
+- Cora-specific bridge: `references/cora.md`
+
+## Quick start (any host)
+
+```bash
+pip install -e /path/to/skills/archive-core
+export ARCHIVE_ROOT=.cora/archive
+echo '{"schema_version":"1.0","intent":"search","arguments":{"query":"resume"}}' | archive-cli
+```
+
+## When to use
 
 Use this skill when a workflow needs to:
 
@@ -32,8 +46,7 @@ Use this skill when a workflow needs to:
 - append a structured archive record
 - look up a previously archived asset
 - rebuild or inspect archive metadata
-- save, search, or read content records from Cora's database through skill scripts
-- resolve a saved file for downstream delivery
+- resolve a saved file for downstream delivery (via `deliver` intent + host `deliver_file` action)
 
 ## Runtime Prerequisites
 

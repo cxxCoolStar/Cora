@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archive-core"
+version = "0.2.0"
+description = "Portable filesystem archive skill for agent hosts (save, search, deliver)."
+readme = "SKILL.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+]
+
+[project.scripts]
+archive-cli = "archive_core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["archive_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

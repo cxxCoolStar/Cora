@@ -237,6 +237,45 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 risk="low",
             )
         )
+    if active_registry.get("archive_run") is None:
+        active_registry.register(
+            ToolSpec(
+                name="archive_run",
+                toolset="skills_execute",
+                description=(
+                    "Run archive-core with a structured intent payload (save, search, read, deliver, delete, overview, list_topics). "
+                    "Prefer this over skill_run when handling archive intents directly."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "enum": [
+                                "save",
+                                "search",
+                                "read",
+                                "deliver",
+                                "delete",
+                                "overview",
+                                "list_topics",
+                                "clarify",
+                                "resolve_pending",
+                            ],
+                        },
+                        "arguments": {"type": "object"},
+                        "text": {"type": "string"},
+                        "upload_path": {"type": "string"},
+                        "upload_name": {"type": "string"},
+                    },
+                    "required": ["intent"],
+                    "additionalProperties": True,
+                },
+                handler=lambda executor, invocation: executor._tool_archive_run(invocation),
+                is_agent_stateful=True,
+                risk="medium",
+            )
+        )
     if active_registry.get("skill_run") is None:
         active_registry.register(
             ToolSpec(

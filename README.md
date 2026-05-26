@@ -144,6 +144,20 @@ CORA_MCP_CONFIG_PATH=config/mcp_servers.json
 
 MCP 工具名称格式为 `mcp_{server}_{tool}`，并受与内置工具相同的 harness policy / HITL 约束（见 `src/core/agent/policy_profiles.py`）。
 
+### 通用归档 skill（archive-core）
+
+`skills/archive-core` 是可移植的独立包（不依赖 Cora 业务代码），任意 agent 可通过 CLI 调用：
+
+```powershell
+pip install -e skills/archive-core
+$env:ARCHIVE_ROOT = ".cora/archive"
+'{"schema_version":"1.0","intent":"overview"}' | archive-cli
+```
+
+Cora 通过 `core/skills` 装配 `archive-core`（`adapters/cora/` + `archive_run` 工具）；契约见 `skills/archive-core/references/PORTABLE.md` 与 `references/cora.md`。
+
+微信主路径默认开启镜像（`CORA_ARCHIVE_MIRROR_ENABLED=true`）：ingest 后写入 `archive_index.jsonl`，检索/回传在 DB 无结果时会查文件库。详见 `skills/archive-core/references/cora.md`。
+
 ### 图片视觉描述配置
 
 图片上传会进入 archive 流程。若要为图片生成可检索的视觉描述，可额外配置：

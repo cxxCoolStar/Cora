@@ -15,7 +15,7 @@ TOOLSETS: dict[str, dict[str, object]] = {
     },
     "skills_execute": {
         "description": "Execute helper scripts that belong to a local skill after inspecting that skill's instructions.",
-        "tools": ["skill_run"],
+        "tools": ["skill_run", "archive_run"],
     },
     "automation": {
         "description": "Create and manage scheduled background tasks, reminders, and recurring checks.",

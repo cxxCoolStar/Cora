@@ -1,0 +1,26 @@
+{
+  "name": "archive-core",
+  "version": "0.2.0",
+  "schema_version": "1.0",
+  "description": "Save, search, read, and deliver files via a filesystem archive index.",
+  "entrypoints": {
+    "cli": "archive-cli",
+    "python": "archive_core.runtime:ArchiveRuntime",
+    "cora": "adapters.cora.dispatch:run_dispatch"
+  },
+  "intents": [
+    "save",
+    "search",
+    "read",
+    "deliver",
+    "delete",
+    "overview",
+    "list_topics"
+  ],
+  "required_capabilities": ["filesystem"],
+  "optional_capabilities": ["deliver_binary"],
+  "schemas": {
+    "request": "schemas/request.schema.json",
+    "result": "schemas/result.schema.json"
+  }
+}

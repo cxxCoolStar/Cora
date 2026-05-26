@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-import subprocess
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,8 +8,18 @@ from typing import Any
 
 from core.ingestion.parsers.base import FileSource
 from core.ingestion.parsers.image_parser import ImageFileParser
-import re
 from core.topics.selector import TopicSelector, TopicSelectorInput
+
+
+def _ensure_archive_core_on_path() -> None:
+    skill_root = Path(__file__).resolve().parents[3] / "skills" / "archive-core"
+    path = str(skill_root)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+_ensure_archive_core_on_path()
+from archive_core.store.file_store import FileArchiveStore  # noqa: E402
 
 
 @dataclass(slots=True)
@@ -64,12 +73,11 @@ class ArchiveSkillScriptRunner:
         scripts_root: Path | None = None,
         python_executable: str | None = None,
     ) -> None:
-        if scripts_root is None:
-            repo_root = Path(__file__).resolve().parents[3]
-            scripts_root = repo_root / "skills" / "archive-core" / "scripts"
         self.archive_root = Path(archive_root).expanduser().resolve()
-        self.scripts_root = Path(scripts_root).expanduser().resolve()
-        self.python_executable = python_executable or sys.executable
+        self._store = FileArchiveStore(self.archive_root)
+        # scripts_root / python_executable kept for backward-compatible constructor signature
+        _ = scripts_root
+        _ = python_executable
 
     def save_asset(
         self,
@@ -84,34 +92,23 @@ class ArchiveSkillScriptRunner:
         created_at: str = "",
         move: bool = False,
     ) -> ArchiveSaveResult:
-        args = [
-            "--archive-root",
-            str(self.archive_root),
-            "--source-file",
-            str(Path(source_file).expanduser().resolve()),
-            "--topic",
-            topic,
-            "--type",
-            asset_type,
-            "--summary",
-            summary,
-            "--description",
-            description,
-            "--source",
-            source,
-            "--user-note",
-            user_note,
-        ]
-        if created_at:
-            args.extend(["--created-at", created_at])
-        if move:
-            args.append("--move")
-        payload = self._run_json_script("save_asset.py", args)
+        record = self._store.save_asset(
+            source_path=source_file,
+            topic=topic,
+            asset_type=asset_type,
+            summary=summary,
+            description=description,
+            source=source,
+            user_note=user_note,
+            created_at=created_at,
+            move=move,
+        )
+        stored_path = self._store.resolve_path(record)
         return ArchiveSaveResult(
-            topic=str(payload["topic"]),
-            stored_path=Path(payload["stored_path"]).resolve(),
-            relative_path=str(payload["relative_path"]),
-            record=ArchiveAssetRecord.from_dict(payload["record"]),
+            topic=record.topic,
+            stored_path=stored_path,
+            relative_path=record.path,
+            record=ArchiveAssetRecord.from_dict(record.to_dict()),
         )
 
     def find_assets(
@@ -122,36 +119,14 @@ class ArchiveSkillScriptRunner:
         record_id: str = "",
         limit: int = 5,
     ) -> ArchiveLookupResult:
-        args = [
-            "--archive-root",
-            str(self.archive_root),
-            "--query",
-            query,
-            "--topic",
-            topic,
-            "--id",
-            record_id,
-            "--limit",
-            str(limit),
-        ]
-        payload = self._run_json_script("find_asset.py", args)
-        return ArchiveLookupResult(
-            count=int(payload.get("count") or 0),
-            results=list(payload.get("results") or []),
+        matches = self._store.search(
+            query=query,
+            topic=topic,
+            record_id=record_id,
+            limit=limit,
         )
-
-    def _run_json_script(self, script_name: str, args: list[str]) -> dict[str, Any]:
-        script_path = self.scripts_root / script_name
-        completed = subprocess.run(
-            [self.python_executable, str(script_path), *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        payload = json.loads(completed.stdout)
-        if not isinstance(payload, dict):
-            raise ValueError(f"{script_name} did not return a JSON object")
-        return payload
+        results = [item.to_summary() for item in matches]
+        return ArchiveLookupResult(count=len(results), results=results)
 
 
 class ArchiveImageWorkflow:

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ArchiveRequest",
+  "type": "object",
+  "required": ["intent"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "intent": {
+      "type": "string",
+      "enum": ["save", "search", "read", "deliver", "delete", "overview", "list_topics"]
+    },
+    "session": { "type": "object" },
+    "arguments": { "type": "object" },
+    "upload": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "name": { "type": "string" },
+        "move": { "type": "boolean" }
+      }
+    },
+    "context": { "type": "object" }
+  },
+  "additionalProperties": true
+}

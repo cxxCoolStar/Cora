@@ -221,6 +221,9 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
         plan_review_mode=active_settings.plan_review_mode,
     )
     tool_executor.bind_clawbot_service(clawbot_service)
+    from core.skills.bootstrap import bootstrap_host_skills
+
+    bootstrap_host_skills()
     return ClawBotContainer(
         settings=active_settings,
         database=database,
