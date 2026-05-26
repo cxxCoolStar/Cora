@@ -448,3 +448,6 @@ def register_builtin_tools(target_registry: ToolRegistry | None = None) -> None:
                 allowed_roles=("primary",),
             )
         )
+    from core.mcp.eval_stubs import register_eval_mcp_stub_tools
+
+    register_eval_mcp_stub_tools(active_registry)

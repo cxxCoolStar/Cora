@@ -1,0 +1,79 @@
+{
+  "id": "mcp_tool_idempotency_on_resume",
+  "type": "harness",
+  "description": "MCP mutating tools should respect idempotency keys on plan resume.",
+  "tags": ["harness", "mcp", "idempotency", "checkpoint"],
+  "setup": {
+    "planner_stub_mode": "mcp_checkpoint",
+    "mcp_tool_metadata": {
+      "mcp_test_write": {
+        "is_mutating": true,
+        "is_idempotent": true,
+        "idempotency_key_extractor": "args.file_path"
+      }
+    }
+  },
+  "steps": [
+    {
+      "label": "planner creates MCP checkpoint plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Write checkpoint via MCP then continue"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-3"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "execute completes MCP write then fails on task-2",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "failed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution failed",
+          "task-1",
+          "task-2",
+          "/execute resume"
+        ],
+        "state": {
+          "agent_run_count": 3,
+          "workspace_files_exist": ["mcp-checkpoint.txt"]
+        }
+      }
+    },
+    {
+      "label": "resume skips MCP write via idempotency and completes",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute resume"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1",
+          "task-2",
+          "task-3"
+        ],
+        "state": {
+          "agent_run_count": 5,
+          "workspace_files_exist": ["mcp-checkpoint.txt"],
+          "workspace_file_contains_all": {
+            "mcp-checkpoint.txt": ["mcp idempotency checkpoint"]
+          }
+        }
+      }
+    }
+  ]
+}

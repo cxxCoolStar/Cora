@@ -43,6 +43,15 @@ def classify_error(
         return (ErrorCategory.UNKNOWN, False)
     
     error_str = str(error).lower()
+    normalized_tool = str(tool_name or "").strip().lower()
+
+    if normalized_tool.startswith("mcp_"):
+        if "mcp server" in error_str and "not connected" in error_str:
+            return (ErrorCategory.TRANSIENT, True)
+        if "mcp tool execution" in error_str or ("mcp tool" in error_str and "failed" in error_str):
+            return (ErrorCategory.INFRASTRUCTURE_FAILURE, True)
+        if "connection" in error_str and ("mcp" in error_str or "server" in error_str):
+            return (ErrorCategory.TRANSIENT, True)
     
     # Check HTTP status codes first
     if status_code is not None:

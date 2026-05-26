@@ -66,6 +66,7 @@ class EvalRuntime:
                 self._configure_harness_prepare_failure(container=container, setup=case.setup)
                 self._configure_planner_stub(container=container, setup=case.setup)
                 self._configure_reviewer_stub(setup=case.setup)
+                self._configure_mcp_eval(container=container, setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
                 wechat_gateway = self._build_wechat_gateway(container=container)
@@ -229,12 +230,22 @@ class EvalRuntime:
         container.tool_executor.execute_tool_call = delayed_execute_tool_call
 
     @staticmethod
-    @staticmethod
     def _configure_reviewer_stub(*, setup: EvalSetup) -> None:
         mode = str(setup.reviewer_stub_mode or "").strip().lower()
         if not mode:
             return
         os.environ["CORA_EVAL_REVIEWER_STUB"] = mode
+
+    @staticmethod
+    def _configure_mcp_eval(*, container, setup: EvalSetup) -> None:
+        from core.mcp.eval_stubs import register_eval_mcp_stub_tools
+        from core.mcp.metadata import load_mcp_tool_metadata, set_eval_metadata_overrides
+        from core.tools import registry
+
+        load_mcp_tool_metadata()
+        set_eval_metadata_overrides(setup.mcp_tool_metadata or None)
+        register_eval_mcp_stub_tools(registry)
+        container.clawbot_service.refresh_tool_specs()
 
     @staticmethod
     def _configure_planner_stub(*, container, setup: EvalSetup) -> None:

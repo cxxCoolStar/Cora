@@ -17,6 +17,9 @@ async def create_mcp_manager(
     config_path: Path | None = None,
 ) -> MCPClientManager | None:
     """Connect to enabled MCP servers and return a manager, or None if disabled."""
+    from core.mcp.metadata import load_mcp_tool_metadata
+
+    load_mcp_tool_metadata()
     if not enabled:
         return None
 

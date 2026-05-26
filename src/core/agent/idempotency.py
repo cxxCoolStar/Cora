@@ -36,6 +36,18 @@ MUTATING_TOOLS: dict[str, dict[str, Any]] = {
 }
 
 
+def _resolve_tool_metadata(tool_name: str) -> dict[str, Any] | None:
+    builtin = MUTATING_TOOLS.get(tool_name)
+    if builtin is not None:
+        return builtin
+    try:
+        from core.mcp.metadata import metadata_as_mutating_dict
+
+        return metadata_as_mutating_dict(tool_name)
+    except Exception:
+        return None
+
+
 def generate_idempotency_key(
     *,
     run_id: str,
@@ -52,7 +64,7 @@ def generate_idempotency_key(
     
     Example: "run-abc123:task-2:write_file:config.py"
     """
-    tool_meta = MUTATING_TOOLS.get(tool_name)
+    tool_meta = _resolve_tool_metadata(tool_name)
     if tool_meta is None:
         return None  # Not a mutating tool
     
@@ -71,7 +83,7 @@ def generate_idempotency_key(
 
 def is_tool_idempotent(tool_name: str) -> bool:
     """Check if a mutating tool is idempotent (safe to retry)."""
-    tool_meta = MUTATING_TOOLS.get(tool_name)
+    tool_meta = _resolve_tool_metadata(tool_name)
     if tool_meta is None:
         return True  # Non-mutating tools are considered idempotent
     return bool(tool_meta.get("is_idempotent", False))

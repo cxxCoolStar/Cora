@@ -1,0 +1,21 @@
+{
+  "tools": {
+    "mcp_*_write": {
+      "pattern": true,
+      "is_mutating": true,
+      "is_idempotent": true,
+      "idempotency_key_extractor": "args.file_path"
+    },
+    "mcp_*_delete": {
+      "pattern": true,
+      "is_mutating": true,
+      "is_idempotent": true,
+      "idempotency_key_extractor": "args.id"
+    },
+    "mcp_test_write": {
+      "is_mutating": true,
+      "is_idempotent": true,
+      "idempotency_key_extractor": "args.file_path"
+    }
+  }
+}

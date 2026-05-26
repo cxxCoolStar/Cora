@@ -193,9 +193,17 @@ class EvalSetup:
     web_search_results: dict[str, list[EvalWebSearchHit]] = field(default_factory=dict)
     web_pages: dict[str, EvalWebPage] = field(default_factory=dict)
 
+    mcp_tool_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "EvalSetup":
         payload = payload or {}
+        raw_mcp_metadata = payload.get("mcp_tool_metadata")
+        mcp_tool_metadata: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_mcp_metadata, dict):
+            for name, raw in raw_mcp_metadata.items():
+                if isinstance(raw, dict):
+                    mcp_tool_metadata[str(name)] = dict(raw)
         return cls(
             user_memory_markdown=_maybe_str(payload.get("user_memory_markdown")),
             workspace_files=_string_map(payload.get("workspace_files")),
@@ -206,6 +214,7 @@ class EvalSetup:
             reviewer_stub_mode=_maybe_str(payload.get("reviewer_stub_mode")),
             web_search_results=_web_search_results_map(payload.get("web_search_results")),
             web_pages=_web_pages_map(payload.get("web_pages")),
+            mcp_tool_metadata=mcp_tool_metadata,
         )
 
 

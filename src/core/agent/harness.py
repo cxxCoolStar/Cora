@@ -451,6 +451,9 @@ class DefaultAgentHarness:
         if run_input.parent_run_id:
             runtime.metadata["parent_run_id"] = run_input.parent_run_id
         runtime.metadata["run_budget"] = run_input.budget.to_dict()
+        for key in ("task_id", "completed_operations", "plan_resume"):
+            if key in run_input.metadata:
+                runtime.metadata[key] = run_input.metadata[key]
 
     @staticmethod
     def _parent_allowed_tool_names(*, run_input: HarnessRunInput) -> frozenset[str]:
@@ -799,6 +802,15 @@ class DefaultAgentHarness:
         return max(1, int(budget.max_steps or 1))
 
     def _registered_tool_names(self) -> frozenset[str]:
+        from core.tools import registry
+
+        registered = frozenset(
+            str(name or "").strip()
+            for name in registry.names()
+            if str(name or "").strip()
+        )
+        if registered:
+            return registered
         return frozenset(
             str(getattr(spec, "name", "") or "").strip()
             for spec in self.runner.loop.tool_specs

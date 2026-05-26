@@ -49,6 +49,10 @@ class MCPClientManager:
                 for tool_name, tool_schema in client.tools.items():
                     prefixed_name = f"mcp_{config.name}_{tool_name}"
                     self.all_tools[prefixed_name] = tool_schema
+
+                from core.mcp.metadata import apply_metadata_to_tools
+
+                apply_metadata_to_tools(self.all_tools)
                 
                 logger.info(
                     f"Connected to MCP server {config.name}, "
@@ -59,6 +63,10 @@ class MCPClientManager:
                 logger.error(f"Failed to connect to MCP server {config.name}: {exc}")
                 if not config.retry_on_failure:
                     raise
+
+        from core.mcp.metadata import apply_metadata_to_tools
+
+        apply_metadata_to_tools(self.all_tools)
     
     async def call_tool(
         self,

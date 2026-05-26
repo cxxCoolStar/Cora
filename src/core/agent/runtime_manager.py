@@ -71,7 +71,7 @@ class AgentRuntimeManager:
             context["execution_mode"] = str(runtime.metadata.get("execution_mode") or "sandbox")
         elif runtime.execution_mode:
             context["execution_mode"] = runtime.execution_mode
-        for key in ("agent_run_id", "spawn_depth", "parent_run_id", "run_budget"):
+        for key in ("agent_run_id", "spawn_depth", "parent_run_id", "run_budget", "task_id", "completed_operations"):
             if key in runtime.metadata:
                 context[key] = runtime.metadata[key]
         return context

@@ -919,20 +919,17 @@ profiles:
 - ✅ HITL 确认流程正常工作（`mcp_default_policy_ask`）
 - ✅ Harness eval 通过（40/40）
 
-### PR-6d: Idempotency 与 Retry 集成 🚧
+### PR-6d: Idempotency 与 Retry 集成 ✅
 
 **目标**：MCP mutating 工具支持幂等性和重试
 
-- [ ] `src/core/mcp/schema.py`：扩展 `MCPToolSchema`
-  - [ ] `is_mutating` 字段
-  - [ ] `idempotency_key_extractor` 字段
-- [ ] `src/core/agent/idempotency.py`：支持 MCP 工具
-  - [ ] `generate_idempotency_key()` 支持 MCP 工具
-- [ ] `src/core/agent/retry_policy.py`：支持 MCP 工具
-  - [ ] `classify_error()` 识别 MCP 错误
-- [ ] 配置文件：`config/mcp_tool_metadata.json`（工具元数据）
-- [ ] 单元测试：`test_mcp_tool_idempotency`
-- [ ] Eval：`mcp_tool_idempotency_on_resume.json`
+- [x] `src/core/mcp/schema.py`：`MCPToolSchema.is_mutating` / `idempotency_key_extractor`
+- [x] `src/core/mcp/metadata.py`：加载 `config/mcp_tool_metadata.json` + eval override
+- [x] `src/core/agent/idempotency.py`：MCP 工具 metadata 解析
+- [x] `src/core/agent/retry_policy.py`：MCP 错误分类
+- [x] `src/core/mcp/eval_stubs.py`：`mcp_test_write` harness stub
+- [x] 单元测试：`tests/test_mcp_tool_idempotency.py`
+- [x] Eval：`mcp_tool_idempotency_on_resume.json`
 
 **验收标准**：
 - MCP mutating 工具生成 idempotency key

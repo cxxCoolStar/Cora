@@ -182,6 +182,34 @@ class DevelopmentModelClient(ModelClient):
                 ],
             }
             return json.dumps(payload, ensure_ascii=False)
+        if stub_mode in {"mcp_checkpoint", "mcp-checkpoint"}:
+            payload = {
+                "plan_id": "plan-dev-mcp-checkpoint",
+                "session_id": "session-dev",
+                "goal": goal,
+                "policy_profile": "coding_full",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "title": "MCP checkpoint write",
+                        "tool_names": ["mcp_test_write"],
+                        "instruction": "Write checkpoint file via MCP stand-in.",
+                    },
+                    {
+                        "task_id": "task-2",
+                        "title": "Simulated failure step",
+                        "tool_names": ["search_files"],
+                        "instruction": "This step is configured to fail in eval stubs.",
+                    },
+                    {
+                        "task_id": "task-3",
+                        "title": "Search after resume",
+                        "tool_names": ["search_files"],
+                        "instruction": "Find hello_agent under tests.",
+                    },
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False)
         if stub_mode in {"high_risk", "write_file", "review"}:
             payload = {
                 "plan_id": "plan-dev-high-risk",
@@ -299,7 +327,7 @@ class DevelopmentModelClient(ModelClient):
             "[Worker task task-2]" in text
             and "[Plan resume]" not in text
             and str(os.environ.get("CORA_EVAL_PLANNER_STUB") or "").strip().lower()
-            in {"two_step", "two-step", "checkpoint"}
+            in {"two_step", "two-step", "checkpoint", "mcp_checkpoint", "mcp-checkpoint"}
         ):
             return ToolCall(
                 id=str(uuid.uuid4()),
@@ -319,6 +347,8 @@ class DevelopmentModelClient(ModelClient):
                 arguments = {"query": "hello_agent", "path": "src"}
         elif tool_name == "write_file":
             arguments = {"path": "src/marker.txt", "content": "reviewed\n"}
+        elif tool_name == "mcp_test_write":
+            arguments = {"file_path": "mcp-checkpoint.txt", "content": "mcp idempotency checkpoint\n"}
         elif tool_name == "list_files":
             arguments = {"path": "src", "recursive": False}
         elif tool_name == "read_file":
