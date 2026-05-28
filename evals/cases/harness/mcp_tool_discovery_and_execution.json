@@ -1,0 +1,60 @@
+{
+  "id": "mcp_tool_discovery_and_execution",
+  "type": "harness",
+  "description": "In-process MCP stub tools are registered and executable via /tool under coding_full policy.",
+  "tags": ["harness", "mcp", "tool", "discovery"],
+  "steps": [
+    {
+      "label": "execute mcp echo stub",
+      "input": {
+        "text": "/tool mcp_example_echo {\"text\":\"hello world\"}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "hello world",
+          "mcp_example_echo"
+        ],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_outcome": "assistant_text",
+          "latest_agent_run_trace_contains_all": [
+            "run.started",
+            "tool.policy.applied",
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    },
+    {
+      "label": "execute mcp add stub",
+      "input": {
+        "text": "/tool mcp_example_add {\"a\":2,\"b\":3}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "5",
+          "mcp_example_add"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_trace_contains_all": [
+            "tool.policy.applied",
+            "tool.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -39,6 +39,30 @@ Cora 在微信通道上对**需要确认**的工具会暂停执行，等待用�
 
 CLI / API 本地调试时，高风险 tool 可能自动放行（`platform=cli`），与微信行为不同。
 
+## 处理中的进度提示
+
+长任务（归档、主题分类、生成最终回复）可能耗时 1–2 分钟。Gateway 会在处理期间向微信发送**多条**短消息，避免看起来像「卡住」：
+
+| 时机 | 示例文案 |
+|------|----------|
+| 开始处理 | `收到，正在处理你的请求…` |
+| 工具执行（`skill_run` / `archive_run`） | `正在归档处理…` |
+| 入库完成、仍在生成回复 | `已写入资料库，正在整理回复…` |
+| 超过心跳间隔仍在跑 | `还在处理中，请稍等…`（默认每 90s） |
+
+环境变量（前缀 `CORA_`）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `WECHAT_PROGRESS_ENABLED` | `true` | 关闭后不再发进度消息 |
+| `WECHAT_PROGRESS_HEARTBEAT_SECONDS` | `90` | 长任务心跳间隔（秒）；`0` 关闭心跳 |
+| `WECHAT_PROGRESS_TOOL_UPDATES` | `true` | 是否在工具开始/归档完成时推送 |
+| `WECHAT_PROGRESS_MIN_INTERVAL_SECONDS` | `12` | 进度消息最小间隔，避免刷屏 |
+
+实现：`src/core/channels/wechat/progress.py`（Poller 包裹整次 `handle_inbound_event`；工具层通过 context var 挂钩）。
+
+不会为 `确认`/`拒绝`、仅 `/new` 等极短指令发 ACK。
+
 ## 开发者接口
 
 HTTP（会话维度）：

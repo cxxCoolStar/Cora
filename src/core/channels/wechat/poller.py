@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from core.channels.wechat.ilink_client import WechatIlinkClient
+from core.channels.wechat.progress import WechatProgressSettings, wechat_progress_scope
 from core.channels.wechat.service import WechatGatewayService
 from core.channels.wechat.types import WechatInboundEvent
 
@@ -20,9 +21,11 @@ class WechatPoller:
         gateway_service: WechatGatewayService,
         aggregation_window_seconds: float = 3.0,
         late_media_window_ms: int = 30000,
+        progress_settings: WechatProgressSettings | None = None,
     ) -> None:
         self.client = client
         self.gateway_service = gateway_service
+        self.progress_settings = progress_settings or WechatProgressSettings()
         self._stopped = False
         self.aggregation_window_seconds = aggregation_window_seconds
         self.late_media_window_ms = late_media_window_ms
@@ -84,7 +87,12 @@ class WechatPoller:
             await self._process_event(event)
 
     async def _process_event(self, event: WechatInboundEvent) -> None:
-        result = await self.gateway_service.handle_inbound_event(event=event)
+        async with wechat_progress_scope(
+            event=event,
+            client=self.client,
+            settings=self.progress_settings,
+        ):
+            result = await self.gateway_service.handle_inbound_event(event=event)
         if self._is_text_only(event):
             self._recent_text_events[self._event_key(event)] = event
         if result.deduplicated:

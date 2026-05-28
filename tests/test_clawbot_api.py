@@ -2294,7 +2294,15 @@ def test_wechat_poller_merges_nearby_text_and_media_failure_events():
 
     client = _FakeClient()
     gateway = _FakeGateway()
-    poller = WechatPoller(client=client, gateway_service=gateway, aggregation_window_seconds=10.0, late_media_window_ms=30000)
+    from core.channels.wechat.progress import WechatProgressSettings
+
+    poller = WechatPoller(
+        client=client,
+        gateway_service=gateway,
+        aggregation_window_seconds=10.0,
+        late_media_window_ms=30000,
+        progress_settings=WechatProgressSettings(enabled=False),
+    )
 
     text_event = WechatInboundEvent(
         event_id="text-1",

@@ -116,7 +116,13 @@ def _build_wechat_runtime(
         enable_manual_reset=settings.wechat_session_enable_manual_reset,
     )
     active_container.configure_gateway(gateway, session_map_repository)
-    poller = WechatPoller(client=client, gateway_service=gateway)
+    from core.channels.wechat.progress import progress_settings_from_core
+
+    poller = WechatPoller(
+        client=client,
+        gateway_service=gateway,
+        progress_settings=progress_settings_from_core(settings),
+    )
     return active_container, client, gateway, poller, base_url
 
 

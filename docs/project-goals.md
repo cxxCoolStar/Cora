@@ -43,7 +43,7 @@ Cora 不仅是「微信文件助手」产品，更是**刻意练习的代码库*
 | Phase 6b | MCP 配置加载 + ToolManager 注册 | `config_loader.py`、`tool_adapter.py` | ✅ |
 | Phase 6c | MCP Tool Policy + HITL + gateway 接线 | `tool_policy_engine.py`、`mcp/runtime.py` | ✅ |
 | Phase 6d | MCP 幂等 / 重试 | `metadata.py`、`idempotency.py`、`retry_policy.py` | ✅ |
-| Phase 6e | MCP eval 全集 + 用户文档 | 设计见 phase6 doc | 🚧 |
+| Phase 6e | MCP eval 全集 + 用户文档 | [mcp-integration-guide.md](mcp-integration-guide.md)、`examples/mcp_servers/` | ✅ |
 
 ## 建议的自学方式（在本仓库内）
 

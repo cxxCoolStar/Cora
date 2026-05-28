@@ -1,6 +1,6 @@
 # Phase 6：MCP 工具集成（PR-6）
 
-> 状态：🚧 进行中（6a/6b/6c 已完成，6d/6e 待做）  
+> 状态：✅ 已完成（6a–6e）  
 > 前置：Phase 5（checkpoint、idempotency、retry、replay）
 
 ## 1. 目标
@@ -937,21 +937,21 @@ profiles:
 - MCP 工具错误能正确分类和重试
 - Eval 通过
 
-### PR-6e: Eval 与文档 🚧
+### PR-6e: Eval 与文档 ✅
 
 **目标**：完善 eval 测试和用户文档
 
-- [ ] Eval：`mcp_tool_discovery_and_execution.json`
-- [ ] Eval：`mcp_tool_respects_policy.json`
-- [ ] Eval：`mcp_tool_idempotency_on_resume.json`
-- [ ] 文档：`docs/mcp-integration-guide.md`（用户指南）
-- [ ] 文档：`docs/mcp-server-development.md`（开发自定义 server）
-- [ ] 示例：`examples/mcp_servers/`（示例 server 实现）
-- [ ] 运行 `.\scripts\run_harness_evals.cmd` 确保全绿
+- [x] Eval：`mcp_tool_discovery_and_execution.json`（in-process stub + `/tool`）
+- [x] Eval：`mcp_tool_respects_policy.json`
+- [x] Eval：`mcp_tool_idempotency_on_resume.json`
+- [x] 文档：`docs/mcp-integration-guide.md`（用户指南）
+- [x] 文档：`docs/mcp-server-development.md`（开发自定义 server）
+- [x] 示例：`examples/mcp_servers/`（stdio echo/add server）
+- [x] 运行 `.\scripts\run_harness_evals.cmd` 确保全绿
 
 **验收标准**：
 - 所有 MCP eval 通过
-- 现有 39 个 harness eval 仍然全绿
+- 现有 harness eval 仍然全绿
 - 用户文档完整清晰
 - 有可运行的示例
 

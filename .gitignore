@@ -40,4 +40,6 @@ pip-wheel-metadata/
 Thumbs.db
 nul
 .pip-install.log
-examples
+examples/*
+!examples/mcp_servers/
+!examples/mcp_servers/**

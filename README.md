@@ -41,6 +41,7 @@
 - 提供微信 iLink 轮询链路，支持把微信消息/文件接入同一套会话
 - 在微信链路已配置时，支持把原始文件回发给用户
 - 对高风险工具支持人工确认（HITL）：微信里回复「确认」或「拒绝」后再执行（见 [docs/wechat-hitl.md](docs/wechat-hitl.md)）
+- 长任务处理中会推送进度/心跳消息，减少「是否卡住」的不确定感（见 [docs/wechat-hitl.md](docs/wechat-hitl.md#处理中的进度提示)）
 
 ## 一个典型用法
 
@@ -142,7 +143,7 @@ CORA_MCP_ENABLED=true
 CORA_MCP_CONFIG_PATH=config/mcp_servers.json
 ```
 
-MCP 工具名称格式为 `mcp_{server}_{tool}`，并受与内置工具相同的 harness policy / HITL 约束（见 `src/core/agent/policy_profiles.py`）。
+MCP 工具名称格式为 `mcp_{server}_{tool}`，并受与内置工具相同的 harness policy / HITL 约束（见 `src/core/agent/policy_profiles.py`）。配置与排障见 [docs/mcp-integration-guide.md](docs/mcp-integration-guide.md)；本地示例 server 见 [examples/mcp_servers/](examples/mcp_servers/)。
 
 ### 通用归档 skill（archive-core）
 
@@ -185,6 +186,14 @@ CORA_WECHAT_POLL_TIMEOUT_SECONDS=35
 
 ```env
 CORA_WECHAT_TOKEN=your_token
+```
+
+长任务进度提示（可选，默认开启）：
+
+```env
+CORA_WECHAT_PROGRESS_ENABLED=true
+CORA_WECHAT_PROGRESS_HEARTBEAT_SECONDS=90
+CORA_WECHAT_PROGRESS_TOOL_UPDATES=true
 ```
 
 ## 启动方式

@@ -1,0 +1,15 @@
+{
+  "servers": [
+    {
+      "name": "local",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["examples/mcp_servers/echo_server.py"],
+      "env": {},
+      "enabled": true,
+      "timeout": 30.0,
+      "retry_on_failure": true,
+      "max_retries": 3
+    }
+  ]
+}

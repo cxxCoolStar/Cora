@@ -304,6 +304,9 @@ class RuntimeToolExecutor:
             dict(invocation.plan.arguments or {}),
             registry.names(),
         )
+        progress = self._wechat_progress_session()
+        if progress is not None:
+            await progress.on_tool_start(tool_name)
         try:
             normalized_invocation = invocation
             if tool_name != invocation.plan.tool:
@@ -355,6 +358,12 @@ class RuntimeToolExecutor:
                     result.status,
                     result.action,
                     duration_ms,
+                )
+            if progress is not None:
+                await progress.on_tool_done(
+                    tool_name,
+                    action=str(result.action or ""),
+                    status=str(result.status or ""),
                 )
             return result
         except KeyError:
@@ -1008,6 +1017,13 @@ class RuntimeToolExecutor:
             "choices": list(pending_state.choices),
             **dict(pending_state.payload),
         }
+
+    def _wechat_progress_session(self):
+        if str(self.channel_name or "").strip() != "wechat":
+            return None
+        from core.channels.wechat.progress import get_active_wechat_progress
+
+        return get_active_wechat_progress()
 
     def _resolve_external_user_id(self, session_id: str) -> str | None:
         if self.session_map_repository is None:
