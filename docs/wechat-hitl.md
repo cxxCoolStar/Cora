@@ -45,10 +45,13 @@ CLI / API 本地调试时，高风险 tool 可能自动放行（`platform=cli`�
 
 | 时机 | 示例文案 |
 |------|----------|
-| 开始处理 | `收到，正在处理你的请求…` |
-| 工具执行（`skill_run` / `archive_run`） | `正在归档处理…` |
-| 入库完成、仍在生成回复 | `已写入资料库，正在整理回复…` |
-| 超过心跳间隔仍在跑 | `还在处理中，请稍等…`（默认每 90s） |
+| 开始（保存向） | `收到，正在帮你记入资料库…` |
+| 开始（检索向） | `收到，正在资料库里查找…` |
+| 工具执行（`skill_run` / `archive_run`） | `正在归档处理…` / `正在资料库里检索…` |
+| 入库后、主题分类前 | `已保存，正在打标签和归类…` |
+| 主题 LLM 分类 | `正在分析主题（约 30 秒）…` |
+| 工具结束、模型写最终回复前 | `正在整理回复（约 1–2 分钟）…` |
+| 超过心跳间隔仍在跑 | 按当前阶段发「仍在整理回复/分析主题…」（默认每 90s） |
 
 环境变量（前缀 `CORA_`）：
 
@@ -58,6 +61,7 @@ CLI / API 本地调试时，高风险 tool 可能自动放行（`platform=cli`�
 | `WECHAT_PROGRESS_HEARTBEAT_SECONDS` | `90` | 长任务心跳间隔（秒）；`0` 关闭心跳 |
 | `WECHAT_PROGRESS_TOOL_UPDATES` | `true` | 是否在工具开始/归档完成时推送 |
 | `WECHAT_PROGRESS_MIN_INTERVAL_SECONDS` | `12` | 进度消息最小间隔，避免刷屏 |
+| `WECHAT_PROGRESS_MAX_MESSAGES` | `5` | 单条用户消息最多进度条数（不含最终回复） |
 
 实现：`src/core/channels/wechat/progress.py`（Poller 包裹整次 `handle_inbound_event`；工具层通过 context var 挂钩）。
 

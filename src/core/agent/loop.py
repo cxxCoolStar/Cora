@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 from core.agent.context_budget import ContextBudgetManager
 from core.agent.runtime_state import ConversationRuntimeState
@@ -74,6 +77,13 @@ class AgentLoop:
         artifacts: list[dict[str, Any]] = []
 
         for step in range(self.max_steps):
+            if tool_trace:
+                try:
+                    from core.channels.wechat.progress import notify_wechat_llm_compose
+
+                    await notify_wechat_llm_compose()
+                except Exception:
+                    logger.debug("wechat llm_compose progress hook skipped", exc_info=True)
             estimated_prompt_tokens = None
             if self.context_budget_manager is not None:
                 estimated_prompt_tokens = self.context_budget_manager.estimate_prompt_tokens(

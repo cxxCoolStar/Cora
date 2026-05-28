@@ -46,6 +46,12 @@ class TopicClassifier:
             len(existing_topics),
             normalized_text[:160].replace("\n", " "),
         )
+        from core.channels.wechat.progress import (
+            WechatProgressStage,
+            schedule_wechat_progress_stage,
+        )
+
+        schedule_wechat_progress_stage(WechatProgressStage.TOPIC_CLASSIFY)
 
         existing = [
             {"name": topic.name, "slug": topic.slug, "summary": topic.summary[:120]}

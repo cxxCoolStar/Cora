@@ -56,6 +56,7 @@ class CoreSettings(BaseSettings):
     wechat_progress_heartbeat_seconds: float = 90.0
     wechat_progress_tool_updates: bool = True
     wechat_progress_min_interval_seconds: float = 12.0
+    wechat_progress_max_messages: int = 5
     scheduler_timezone: str | None = None
     scheduler_tick_seconds: int = 5
     scheduler_lease_seconds: int = 600

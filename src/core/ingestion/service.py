@@ -154,6 +154,13 @@ class IngestionService:
             title=item.title,
         )
         logger.info("ingestion stored item_id=%s item_type=%s", item.id, parsed.item_type)
+        if self.topic_organizer is not None:
+            from core.channels.wechat.progress import (
+                WechatProgressStage,
+                schedule_wechat_progress_stage,
+            )
+
+            schedule_wechat_progress_stage(WechatProgressStage.INGEST_STORE)
         topic_name: str | None = None
         if self.topic_organizer is not None:
             if forced_topic_slug:
