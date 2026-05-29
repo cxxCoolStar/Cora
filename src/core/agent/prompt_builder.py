@@ -79,7 +79,10 @@ SKILLS_GUIDANCE = (
 
 PLATFORM_HINTS = {
     "wechat": (
-        "You are on WeChat. Keep replies compact and chat-friendly. "
+        "You are on WeChat. Keep replies compact and chat-friendly (1-2 short sentences, under 60 Chinese characters when possible). "
+        "After archive save/capture succeeds, confirm briefly (e.g. 「图片已保存。」 or 「已记入资料库。」) "
+        "without describing image contents, people, scenes, or filenames. "
+        "Do not add follow-up offers like「随时告诉我」 unless the user asked a question. "
         "When delivery is available, you can send previously saved photos, images, and files back to the user through tools. "
         "Do not tell the user that file sending is impossible when the archive deliver capability is available."
     ),
@@ -167,7 +170,11 @@ class AgentPromptBuilder:
             system_parts.extend(skill_lines)
 
         if upload_name:
-            system_parts.extend(["", "Upload hint:", upload_name])
+            normalized_upload = str(upload_name).strip()
+            if normalized_upload.lower().startswith("wechat_"):
+                system_parts.extend(["", "Upload hint:", "用户发送了一张图片。"])
+            else:
+                system_parts.extend(["", "Upload hint:", normalized_upload])
 
         state_block = self._format_state_block(runtime)
         system_parts.extend(["", "Structured conversation state:", state_block])
@@ -193,7 +200,8 @@ class AgentPromptBuilder:
             return hint
         if channel == "wechat":
             return (
-                "You are on WeChat. Keep replies compact and chat-friendly. "
+                "You are on WeChat. Keep replies compact and chat-friendly (1-2 short sentences). "
+                "After archive save/capture succeeds, confirm briefly without describing image contents or filenames. "
                 "This session may not currently have native file-delivery wiring, so avoid promising that a saved file was sent unless a tool actually confirms it."
             )
         return hint

@@ -598,6 +598,31 @@ class PendingStateRepository:
             )
             return session.scalar(stmt)
 
+    def get_latest_pending_of_type(
+        self,
+        *,
+        session_id: str,
+        payload_type: str,
+    ) -> PendingStateRecord | None:
+        normalized_type = str(payload_type or "").strip()
+        if not normalized_type:
+            return None
+        with self.database.session() as session:
+            stmt = (
+                select(PendingStateRecord)
+                .where(
+                    PendingStateRecord.session_id == session_id,
+                    PendingStateRecord.status == "pending",
+                )
+                .order_by(desc(PendingStateRecord.created_at))
+                .limit(20)
+            )
+            for record in session.scalars(stmt):
+                payload = dict(record.pending_payload_json or {})
+                if str(payload.get("type") or "").strip() == normalized_type:
+                    return record
+        return None
+
     def resolve(self, *, pending_state_id: str, status: str) -> None:
         with self.database.session() as session:
             record = session.get(PendingStateRecord, pending_state_id)

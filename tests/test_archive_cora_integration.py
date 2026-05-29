@@ -82,6 +82,185 @@ def test_item_saved_hook_mirrors_file(tmp_path: Path, monkeypatch) -> None:
     assert index_path.is_file()
 
 
+def test_mirror_prefers_topic_slug_over_localized_name(tmp_path: Path, monkeypatch) -> None:
+    archive_root = tmp_path / "archive"
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setenv("CORA_ARCHIVE_ROOT_DIR", str(archive_root))
+    monkeypatch.setenv("CORA_ARCHIVE_MIRROR_ENABLED", "true")
+    from adapters.cora.mirror import mirror_item_record
+    from adapters.cora.settings import get_cora_archive_settings
+
+    get_cora_archive_settings.cache_clear()
+
+    source = files_dir / "meal.jpg"
+    source.write_bytes(b"fake-jpeg")
+
+    class _Item:
+        item_type = "image"
+        title = "wechat_image"
+        summary = "泰餐照片"
+        metadata_json = {
+            "stored_file_path": str(source),
+            "topic_slug": "personal-photos",
+            "topic_name": "个人照片",
+            "user_note": "太美丽餐厅吃泰餐",
+        }
+
+    record = mirror_item_record(item=_Item())
+    assert record is not None
+    assert record["topic"] == "personal-photos"
+
+
+def test_search_with_nested_arguments_finds_saved_note(tmp_path: Path, monkeypatch) -> None:
+    archive_root = tmp_path / "archive"
+    db_path = tmp_path / "clawbot.db"
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setenv("CORA_CLAWBOT_DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("CORA_FILES_STORAGE_DIR", str(files_dir))
+    monkeypatch.setenv("CORA_ARCHIVE_ROOT_DIR", str(archive_root))
+
+    from adapters.cora._content_common import build_database
+    from core.storage.repositories import ItemRepository
+
+    database = build_database(f"sqlite:///{db_path.as_posix()}")
+    ItemRepository(database).create(
+        session_id="session-nested",
+        source_message_id="msg-save",
+        source_event_id=None,
+        item_type="text_note",
+        title="note",
+        raw_content="EVAL_NESTED_DISPATCH_q1 peanut allergy",
+        normalized_text="EVAL_NESTED_DISPATCH_q1 peanut allergy",
+        summary="EVAL_NESTED_DISPATCH_q1 peanut allergy",
+        metadata={"user_note": "EVAL_NESTED_DISPATCH_q1 peanut allergy"},
+        locator_hint=None,
+        document_key=None,
+        version=1,
+        is_current=1,
+    )
+
+    search = run_dispatch(
+        {
+            "intent": "search",
+            "session_id": "session-nested",
+            "source_message_id": "msg-search",
+            "arguments": {"arguments": {"query": "EVAL_NESTED_DISPATCH_q1"}},
+            "database_url": f"sqlite:///{db_path.as_posix()}",
+        }
+    )
+    assert search["status"] == "completed"
+    assert "EVAL_NESTED_DISPATCH_q1" in search["message"]
+
+
+def test_deliver_falls_back_to_any_session(tmp_path: Path, monkeypatch) -> None:
+    archive_root = tmp_path / "archive"
+    db_path = tmp_path / "clawbot.db"
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setenv("CORA_CLAWBOT_DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("CORA_FILES_STORAGE_DIR", str(files_dir))
+    monkeypatch.setenv("CORA_ARCHIVE_ROOT_DIR", str(archive_root))
+
+    source = files_dir / "deliver-me.txt"
+    source.write_text("deliver fallback marker", encoding="utf-8")
+
+    from adapters.cora._content_common import build_database
+    from core.storage.repositories import ItemRepository
+
+    database = build_database(f"sqlite:///{db_path.as_posix()}")
+    items = ItemRepository(database)
+    items.create(
+        session_id="session-origin",
+        source_message_id="msg-1",
+        source_event_id=None,
+        item_type="document",
+        title="deliver-me",
+        raw_content="deliver fallback marker",
+        normalized_text="deliver fallback marker",
+        summary="deliver fallback marker",
+        metadata={
+            "stored_file_path": str(source),
+            "original_file_name": "deliver-me.txt",
+            "user_note": "DELIVER_FALLBACK_x3",
+        },
+        locator_hint=None,
+        document_key=None,
+        version=1,
+        is_current=1,
+    )
+
+    deliver = run_dispatch(
+        {
+            "intent": "deliver",
+            "session_id": "session-other",
+            "source_message_id": "msg-2",
+            "arguments": {"query": "DELIVER_FALLBACK_x3"},
+            "database_url": f"sqlite:///{db_path.as_posix()}",
+        }
+    )
+    assert deliver["status"] == "completed"
+    effects = deliver.get("effects") or []
+    assert any(effect.get("kind") == "deliver_file" for effect in effects)
+
+
+def test_deliver_accepts_item_refs_from_nested_arguments(tmp_path: Path, monkeypatch) -> None:
+    archive_root = tmp_path / "archive"
+    db_path = tmp_path / "clawbot.db"
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setenv("CORA_CLAWBOT_DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("CORA_FILES_STORAGE_DIR", str(files_dir))
+    monkeypatch.setenv("CORA_ARCHIVE_ROOT_DIR", str(archive_root))
+
+    source = files_dir / "cake.jpg"
+    source.write_bytes(b"fake-jpeg")
+
+    from adapters.cora._content_common import build_database
+    from core.storage.repositories import ItemRepository
+
+    database = build_database(f"sqlite:///{db_path.as_posix()}")
+    items = ItemRepository(database)
+    item = items.create(
+        session_id="session-1",
+        source_message_id="msg-1",
+        source_event_id=None,
+        item_type="image",
+        title="wechat_image",
+        raw_content="cake photo",
+        normalized_text="女朋友 做蛋糕",
+        summary="cake photo",
+        metadata={
+            "stored_file_path": str(source),
+            "original_file_name": "cake.jpg",
+            "user_note": "女朋友做蛋糕",
+        },
+        locator_hint=None,
+        document_key=None,
+        version=1,
+        is_current=1,
+    )
+
+    deliver = run_dispatch(
+        {
+            "intent": "deliver",
+            "session_id": "session-1",
+            "source_message_id": "msg-2",
+            "arguments": {
+                "arguments": {
+                    "item_refs": [item.id, "00000000-0000-0000-0000-000000000000"],
+                }
+            },
+            "database_url": f"sqlite:///{db_path.as_posix()}",
+        }
+    )
+    assert deliver["status"] == "completed"
+    effects = deliver.get("effects") or []
+    assert any(effect.get("kind") == "deliver_file" for effect in effects)
+    assert effects[0]["payload"]["file_path"] == str(source)
+
+
 def test_skill_executor_runs_archive_dispatch_in_process(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CORA_ARCHIVE_ROOT_DIR", str(tmp_path / "archive"))
     monkeypatch.setenv("CORA_ARCHIVE_MIRROR_ENABLED", "true")

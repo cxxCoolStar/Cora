@@ -145,6 +145,8 @@ Common runtime mappings:
 
 When a user sends a short follow-up text that is clearly describing a recently uploaded image or file, prefer treating that text as the asset's user note for `intent: "save"` instead of creating a standalone text note. In those cases the uploaded asset remains the primary archive item.
 
+On WeChat, bare image uploads usually have non-searchable filenames such as `wechat_image.jpg`. Do not save them immediately without a user note unless the user explicitly says to save directly. Prefer staging the upload and asking for a one-line description first.
+
 For delivery requests, use:
 
 - `skill_run(name="archive-core", script_path="scripts/archive_dispatch.py", input={"intent":"deliver", ...})`

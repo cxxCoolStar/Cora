@@ -306,7 +306,10 @@ class RuntimeToolExecutor:
         )
         progress = self._wechat_progress_session()
         if progress is not None:
-            await progress.on_tool_start(tool_name)
+            tool_intent = None
+            if tool_name == "archive_run":
+                tool_intent = str((invocation.plan.arguments or {}).get("intent") or "").strip()
+            await progress.on_tool_start(tool_name, intent=tool_intent)
         try:
             normalized_invocation = invocation
             if tool_name != invocation.plan.tool:
@@ -797,7 +800,7 @@ class RuntimeToolExecutor:
             self.pending_state_repository.resolve(pending_state_id=latest.id, status=status)
 
     def _build_skill_payload(self, *, invocation: ToolInvocation, input_payload: dict[str, Any]) -> dict[str, Any]:
-        skill_arguments = dict(input_payload)
+        skill_arguments = self._flatten_archive_tool_arguments(dict(input_payload))
         intent = str(skill_arguments.pop("intent", "") or "").strip()
         database_engine_url = self.ingestion_service.item_repository.database.engine.url
         payload = {
@@ -817,6 +820,15 @@ class RuntimeToolExecutor:
             payload["upload_path"] = upload_path
             payload["upload_name"] = upload.filename
         return payload
+
+    @staticmethod
+    def _flatten_archive_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+        from core.skills.runner import ensure_archive_adapter_paths
+
+        ensure_archive_adapter_paths()
+        from adapters.cora._content_common import flatten_nested_arguments
+
+        return flatten_nested_arguments(arguments)
 
     def _normalize_skill_input(
         self,
@@ -1065,10 +1077,16 @@ class RuntimeToolExecutor:
         )
 
     async def _run_send_file(self, *, user_id: str, file_path: str, file_name: str) -> dict[str, Any]:
+        from core.agent.skill_effects import wechat_delivery_caption
+
         sender = getattr(self.gateway_service, "send_file_to_user", None)
         if sender is None:
             raise ValueError("当前网关不支持文件发送。")
-        result = sender(user_id=user_id, file_path=file_path, file_name=file_name)
+        result = sender(
+            user_id=user_id,
+            file_path=file_path,
+            caption=wechat_delivery_caption(file_name),
+        )
         if hasattr(result, "__await__"):
             return await result
         return result

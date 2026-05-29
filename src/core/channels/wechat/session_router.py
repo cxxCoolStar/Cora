@@ -113,7 +113,12 @@ class WechatSessionRouter:
                 normalized_text=normalized_text,
             )
 
-        if self.clawbot_service.pending_state_repository.get_latest_pending(session_id=active_session_id) is not None:
+        if self.clawbot_service.pending_state_repository.get_latest_pending_of_type(
+            session_id=active_session_id,
+            payload_type="upload_save",
+        ) is not None or self.clawbot_service.pending_state_repository.get_latest_pending(
+            session_id=active_session_id
+        ) is not None:
             self._touch_binding(binding=binding, now=now)
             return WechatSessionResolution(
                 session_id=active_session_id,

@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from adapters.cora._content_common import build_database, candidate_match_score, item_to_summary
+from adapters.cora._content_common import (
+    build_database,
+    candidate_match_score,
+    flatten_nested_arguments,
+    item_to_summary,
+)
 from core.storage.repositories import ItemRepository, SourceEventRepository
 
 FULL_TEXT_REPLY_THRESHOLD = 420
@@ -53,7 +58,7 @@ def _print(payload: dict[str, Any]) -> int:
 
 
 def _arguments(payload: dict[str, Any]) -> dict[str, Any]:
-    return dict(payload.get("arguments") or {})
+    return flatten_nested_arguments(dict(payload.get("arguments") or {}))
 
 
 def _runtime_pending(payload: dict[str, Any]) -> dict[str, Any]:
@@ -63,7 +68,14 @@ def _runtime_pending(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_query(arguments: dict[str, Any]) -> str:
-    raw = str(arguments.get("query") or arguments.get("text") or arguments.get("title") or "").strip()
+    raw = str(
+        arguments.get("query")
+        or arguments.get("text")
+        or arguments.get("title")
+        or arguments.get("topic")
+        or arguments.get("topic_name")
+        or ""
+    ).strip()
     if not raw:
         return ""
     cleaned = raw
@@ -128,6 +140,12 @@ def _looks_like_direct_open_request(*, payload: dict[str, Any]) -> bool:
     return any(token in raw_text for token in ("打开", "查看", "看看", "读取", "读一下", "显示", "给我看"))
 
 
+def _record_sort_key(record: Any, score: int) -> tuple[int, float]:
+    created_at = getattr(record, "created_at", None)
+    timestamp = created_at.timestamp() if created_at is not None else 0.0
+    return score, timestamp
+
+
 def _score_records(*, item_repository: ItemRepository, session_id: str, query: str) -> list[tuple[Any, int]]:
     records = item_repository.list_by_session(session_id=session_id, current_only=True)
     scored: list[tuple[Any, int]] = []
@@ -135,7 +153,7 @@ def _score_records(*, item_repository: ItemRepository, session_id: str, query: s
         score = candidate_match_score(record=record, query=query)
         if score > 0:
             scored.append((record, score))
-    scored.sort(key=lambda pair: pair[1], reverse=True)
+    scored.sort(key=lambda pair: _record_sort_key(pair[0], pair[1]), reverse=True)
     return scored
 
 
@@ -146,7 +164,7 @@ def _score_records_any_session(*, item_repository: ItemRepository, query: str) -
         score = candidate_match_score(record=record, query=query)
         if score > 0:
             scored.append((record, score))
-    scored.sort(key=lambda pair: pair[1], reverse=True)
+    scored.sort(key=lambda pair: _record_sort_key(pair[0], pair[1]), reverse=True)
     return scored
 
 
@@ -255,6 +273,34 @@ def _stored_file_path(record: Any) -> str:
 
 def _is_deliverable_record(record: Any) -> bool:
     return bool(_stored_file_path(record))
+
+
+def _is_wechat_runtime(payload: dict[str, Any]) -> bool:
+    runtime_state = payload.get("runtime_state")
+    if isinstance(runtime_state, dict):
+        for event in reversed(list(runtime_state.get("recent_events") or [])):
+            if not isinstance(event, dict):
+                continue
+            channel = str(event.get("channel") or "").strip().lower()
+            if channel:
+                return channel == "wechat"
+        channel = str(runtime_state.get("channel") or runtime_state.get("platform") or "").strip().lower()
+        if channel:
+            return channel == "wechat"
+    return False
+
+
+def _requires_wechat_image_note(*, payload: dict[str, Any], user_note: str | None) -> bool:
+    if not _is_wechat_runtime(payload):
+        return False
+    upload_name = str(payload.get("upload_name") or "").strip().lower()
+    if not str(payload.get("upload_path") or "").strip():
+        return False
+    if str(user_note or "").strip():
+        return False
+    if str(_arguments(payload).get("allow_direct_upload_save") or "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return upload_name.startswith("wechat_") or upload_name in {"wechat_image.jpg", "upload.bin"}
 
 
 def _looks_like_asset_description(*, text: str) -> bool:
@@ -506,17 +552,37 @@ def _delete(*, payload: dict[str, Any], item_id: str | None = None) -> dict[str,
     }
 
 
+def _resolve_deliver_item_id(arguments: dict[str, Any], *, item_id: str | None = None) -> str:
+    explicit = str(item_id or arguments.get("item_id") or "").strip()
+    if explicit:
+        return explicit
+    for key in ("item_refs", "item_ref", "refs"):
+        value = arguments.get(key)
+        if isinstance(value, list):
+            for entry in value:
+                candidate = str(entry or "").strip()
+                if candidate:
+                    return candidate
+        elif value is not None:
+            candidate = str(value).strip()
+            if candidate:
+                return candidate
+    return ""
+
+
 def _deliver(*, payload: dict[str, Any], item_id: str | None = None) -> dict[str, Any]:
     database = build_database(payload.get("database_url"))
     item_repository = ItemRepository(database)
     session_id = str(payload["session_id"])
     arguments = _arguments(payload)
-    resolved_item_id = str(item_id or arguments.get("item_id") or "").strip()
+    resolved_item_id = _resolve_deliver_item_id(arguments, item_id=item_id)
     if resolved_item_id:
         record = item_repository.get_any(item_id=resolved_item_id)
     else:
         query = _resolve_query(arguments)
         scored = _score_records(item_repository=item_repository, session_id=session_id, query=query)
+        if not scored:
+            scored = _score_records_any_session(item_repository=item_repository, query=query)
         if not scored:
             file_result = _try_file_archive_deliver(payload=payload, query=query)
             if file_result is not None:
@@ -630,7 +696,15 @@ def _clarify(*, payload: dict[str, Any]) -> dict[str, Any]:
     if str(payload.get("upload_path") or "").strip():
         upload_name = str(payload.get("upload_name") or "").strip() or "上传文件"
         media_kind = "image" if Path(upload_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else "file"
-        question = str(arguments.get("question") or f"我收到了文件 `{upload_name}`。你希望我直接保存，还是加一句说明再保存？").strip()
+        if media_kind == "image" and _is_wechat_runtime(payload):
+            question = str(
+                arguments.get("question")
+                or "收到图片 📷 请用一句话说明（例如场合、地点、人物），方便以后查找。不需要说明就回复「直接保存」。"
+            ).strip()
+        else:
+            question = str(
+                arguments.get("question") or f"我收到了文件 `{upload_name}`。你希望我直接保存，还是加一句说明再保存？"
+            ).strip()
         return _pending_payload(
             question=question,
             choices=["直接保存", "加说明保存", "取消"],
@@ -794,7 +868,12 @@ def run_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     intent = str(payload.get("intent") or "").strip().lower()
     if intent == "save":
         if str(payload.get("upload_path") or "").strip():
-            result = _save_upload(payload=payload)
+            arguments = _arguments(payload)
+            user_note = str(arguments.get("user_note") or payload.get("text") or "").strip() or None
+            if _requires_wechat_image_note(payload=payload, user_note=user_note):
+                result = _clarify(payload=payload)
+            else:
+                result = _save_upload(payload=payload, user_note=user_note)
         else:
             result = _save_content(payload=payload)
     elif intent == "search":

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 import re
+import shutil
 from urllib.parse import urlparse
 import uuid
 
@@ -94,6 +95,7 @@ class IngestionService:
         filename: str,
         user_note: str | None = None,
     ) -> IngestedItemResult:
+        file_path = self._ensure_permanent_storage(file_path=file_path, filename=filename)
         parsed = await self._parse_saved_upload(file_path=file_path, filename=filename)
         parsed = self._apply_user_note(parsed=parsed, user_note=user_note)
         return self._store_parsed_item(
@@ -102,6 +104,20 @@ class IngestionService:
             source_event_id=source_event_id,
             parsed=parsed,
         )
+
+    def _ensure_permanent_storage(self, *, file_path: Path, filename: str) -> Path:
+        resolved = file_path.resolve()
+        storage_root = self.storage_dir.resolve()
+        try:
+            resolved.relative_to(storage_root)
+            return file_path
+        except ValueError:
+            pass
+        target = storage_root / f"{uuid.uuid4()}_{filename or file_path.name}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, target)
+        logger.info("ingestion copied upload to storage path=%s from=%s", target, file_path)
+        return target
 
     def _store_parsed_item(
         self,
@@ -155,12 +171,16 @@ class IngestionService:
         )
         logger.info("ingestion stored item_id=%s item_type=%s", item.id, parsed.item_type)
         if self.topic_organizer is not None:
-            from core.channels.wechat.progress import (
-                WechatProgressStage,
-                schedule_wechat_progress_stage,
-            )
+            from core.channels.wechat.progress import get_active_wechat_progress
 
-            schedule_wechat_progress_stage(WechatProgressStage.INGEST_STORE)
+            # WeChat progress uses after_capture; skip ingest_store to avoid duplicate status lines.
+            if get_active_wechat_progress() is None:
+                from core.channels.wechat.progress import (
+                    WechatProgressStage,
+                    schedule_wechat_progress_stage,
+                )
+
+                schedule_wechat_progress_stage(WechatProgressStage.INGEST_STORE)
         topic_name: str | None = None
         if self.topic_organizer is not None:
             if forced_topic_slug:

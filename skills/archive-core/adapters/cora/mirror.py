@@ -48,16 +48,33 @@ def mirror_upload_file(
         return None
 
 
+def _mirror_topic_slug(*, metadata: dict[str, Any]) -> str:
+    from archive_core.paths import normalize_topic
+
+    slug = str(metadata.get("topic_slug") or "").strip()
+    if slug:
+        try:
+            return normalize_topic(slug)
+        except ValueError:
+            pass
+    name = str(metadata.get("topic_name") or "").strip()
+    if name:
+        try:
+            return normalize_topic(name)
+        except ValueError:
+            pass
+    return "inbox"
+
+
 def mirror_item_record(*, item: Any, stored_file_path: str | None = None) -> dict[str, Any] | None:
     path = str(stored_file_path or (item.metadata_json or {}).get("stored_file_path") or "").strip()
     if not path:
         return None
     metadata = item.metadata_json or {}
-    topic = str(metadata.get("topic_name") or metadata.get("topic_slug") or "inbox").strip()
-    topic_slug = topic.lower().replace(" ", "-")[:64] if topic else "inbox"
+    topic_slug = _mirror_topic_slug(metadata=metadata)
     return mirror_upload_file(
         file_path=path,
-        topic=topic_slug,
+        topic=topic_slug,  # slug from topic_slug metadata, not localized topic_name
         asset_type=str(item.item_type or "file"),
         summary=str(item.title or ""),
         description=str(item.summary or item.normalized_text or "")[:2000],

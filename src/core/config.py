@@ -53,10 +53,15 @@ class CoreSettings(BaseSettings):
     wechat_session_timezone: str | None = None
     wechat_session_enable_manual_reset: bool = True
     wechat_progress_enabled: bool = True
+    wechat_progress_mode: str = "minimal"
     wechat_progress_heartbeat_seconds: float = 90.0
     wechat_progress_tool_updates: bool = True
     wechat_progress_min_interval_seconds: float = 12.0
-    wechat_progress_max_messages: int = 5
+    wechat_progress_min_burst_interval_seconds: float = 3.0
+    wechat_progress_slow_tool_seconds: float = 5.0
+    wechat_progress_max_messages: int = 1
+    wechat_progress_max_messages_verbose: int = 5
+    wechat_image_note_wait_seconds: float = 20.0
     scheduler_timezone: str | None = None
     scheduler_tick_seconds: int = 5
     scheduler_lease_seconds: int = 600

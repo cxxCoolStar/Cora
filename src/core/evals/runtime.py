@@ -12,7 +12,11 @@ import shutil
 
 import core.clawbot.dependencies as clawbot_dependencies
 import httpx
-from core.channels.wechat.progress import progress_settings_from_core, wechat_progress_scope
+from core.channels.wechat.progress import (
+    progress_settings_from_core,
+    verbose_progress_settings_from_core,
+    wechat_progress_scope,
+)
 from core.channels.wechat.service import WechatGatewayService
 from core.channels.wechat.types import WechatInboundEvent
 from core.evals.wechat_capture import EvalWechatIlinkStub
@@ -80,6 +84,7 @@ class EvalRuntime:
                 for index, step in enumerate(case.steps, start=1):
                     observed_session_id = session.id
                     wechat_ilink_stub.sent.clear()
+                    step_progress_settings = _progress_settings_for_step(step, container.settings)
                     try:
                         if step.input.channel == "wechat":
                             event = _wechat_progress_event(case=case, step=step, index=index)
@@ -88,7 +93,7 @@ class EvalRuntime:
                                 async with wechat_progress_scope(
                                     event=event,
                                     client=wechat_ilink_stub,
-                                    settings=progress_settings,
+                                    settings=step_progress_settings,
                                 ):
                                     return await wechat_gateway.handle_inbound_event(event=event)
 
@@ -148,7 +153,7 @@ class EvalRuntime:
                                     step=step,
                                     index=index,
                                     stub=wechat_ilink_stub,
-                                    progress_settings=progress_settings,
+                                    progress_settings=step_progress_settings,
                                     coroutine=container.clawbot_service.reply(
                                         session_id=session.id,
                                         text=step.input.text,
@@ -468,6 +473,13 @@ def _latest_pending_hitl_id(*, database, session_id: str) -> str:
         if hitl_id:
             return hitl_id
     raise ValueError(f"No pending HITL id found in latest agent run for session {session_id}")
+
+
+def _progress_settings_for_step(step, core_settings):
+    state_expect = step.expect.state if getattr(step, "expect", None) is not None else None
+    if state_expect and list(getattr(state_expect, "wechat_progress_messages_contains_all", []) or []):
+        return verbose_progress_settings_from_core(core_settings)
+    return progress_settings_from_core(core_settings)
 
 
 def _wechat_progress_event(*, case: EvalCase, step, index: int) -> WechatInboundEvent:

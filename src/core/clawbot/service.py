@@ -72,6 +72,18 @@ from core.clawbot.planner import ToolPlan
 from core.clawbot.source_events import SourceEventManager
 from core.clawbot.tools import RuntimeToolExecutor
 from core.clawbot.user_profile import UserProfileAggregator
+from core.clawbot.wechat_image_note import (
+    WECHAT_IMAGE_BATCH_NOTE,
+    WECHAT_IMAGE_NOTE_QUESTION,
+    build_upload_save_pending_payload,
+    capture_reply_for_wechat,
+    classify_image_note_follow_up,
+    is_image_only_turn,
+    is_image_with_note_turn,
+    is_wechat_metadata,
+    normalize_image_note_text,
+    topic_name_from_artifacts,
+)
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -479,6 +491,212 @@ class ClawBotService:
             return self.wechat_harness_policy_profile or self.harness_policy_profile
         return self.harness_policy_profile
 
+    async def _run_wechat_archive_plan(
+        self,
+        *,
+        session_id: str,
+        source_message_id: str,
+        source_event_id: str,
+        plan: ToolPlan,
+        text: str | None,
+        upload: UploadFile | None,
+    ) -> AssistantTurnOutcome:
+        context_snapshot = self.load_context_snapshot(session_id=session_id)
+        context_snapshot.current_source_event_id = source_event_id
+        if str(plan.arguments.get("intent") or "").strip() == "resolve_pending":
+            pending_record = self.pending_state_repository.get_latest_pending_of_type(
+                session_id=session_id,
+                payload_type="upload_save",
+            )
+            if pending_record is not None:
+                context_snapshot.pending_state = self.runtime_manager._runtime_pending_state(pending_record)
+        runtime = self.runtime_manager.build_runtime_state(
+            session_id=session_id,
+            context_snapshot=context_snapshot,
+            source_message_id=source_message_id,
+            raw_text=text,
+            upload=upload,
+            execution_mode=DIRECT_TOOL_PLAN_MODE,
+        )
+        execution = await self.tool_executor.execute(
+            session_id=session_id,
+            source_message_id=source_message_id,
+            plan=plan,
+            text=text,
+            upload=upload,
+            context=self.runtime_manager.runtime_to_context(runtime),
+        )
+        return AssistantTurnOutcome(
+            reply=execution.reply,
+            action=execution.action,
+            disposition=execution.disposition,
+            status=execution.status,
+            tool_name=plan.tool,
+            tool_arguments=dict(plan.arguments or {}),
+            context=self.runtime_manager.runtime_to_context(runtime),
+            confidence="system",
+            reason="wechat image note workflow",
+            artifacts=list(execution.artifacts or []),
+            trace=[],
+            tool_trace=[],
+            item_id=execution.item_id,
+        )
+
+    async def _try_handle_wechat_image_note_turn(
+        self,
+        *,
+        session_id: str,
+        text: str | None,
+        upload: UploadFile | None,
+        source_metadata: dict[str, Any] | None,
+        inbound_turn,
+    ) -> TurnResponse | None:
+        if not is_wechat_metadata(source_metadata):
+            return None
+        media_kind = self._source_event_manager.detect_media_kind(upload=upload)
+        pending = self.pending_state_repository.get_latest_pending_of_type(
+            session_id=session_id,
+            payload_type="upload_save",
+        )
+        pending_payload = dict(getattr(pending, "pending_payload_json", None) or {})
+        pending_type = str(pending_payload.get("type") or "").strip()
+
+        if upload is None and str(text or "").strip() and pending is None:
+            logger.info(
+                "clawbot wechat_image_note skipped session_id=%s reason=no_upload_save_pending",
+                session_id,
+            )
+        if upload is None and str(text or "").strip() and pending is not None and pending_type == "upload_save":
+            resolution, note = classify_image_note_follow_up(str(text or ""))
+            if resolution == "cancel":
+                self.pending_state_repository.resolve(pending_state_id=pending.id, status="cancelled")
+                outcome = AssistantTurnOutcome(
+                    reply="好的，我先不保存这张图片。",
+                    action="clarify",
+                    disposition="respond",
+                    status="completed",
+                    tool_name="none",
+                    tool_arguments={},
+                    context=None,
+                    confidence="system",
+                    reason="wechat image note cancelled",
+                    artifacts=[],
+                    trace=[],
+                    tool_trace=[],
+                    item_id=None,
+                )
+            else:
+                arguments: dict[str, Any] = {"intent": "resolve_pending", "resolution": "save"}
+                if note:
+                    arguments["note"] = note
+                outcome = await self._run_wechat_archive_plan(
+                    session_id=session_id,
+                    source_message_id=inbound_turn.source_message_id,
+                    source_event_id=inbound_turn.source_event_id,
+                    plan=ToolPlan(tool="archive_run", arguments=arguments, reason="wechat image note follow-up"),
+                    text=text,
+                    upload=None,
+                )
+                if outcome.action == "capture":
+                    outcome.reply = capture_reply_for_wechat(
+                        had_user_note=bool(note and note.strip()),
+                        topic_name=topic_name_from_artifacts(outcome.artifacts),
+                    )
+            self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+            return self._session_shell.to_turn_response(outcome=outcome)
+
+        if is_image_with_note_turn(text=text, upload=upload, media_kind=media_kind):
+            user_note = normalize_image_note_text(str(text or ""))
+            outcome = await self._run_wechat_archive_plan(
+                session_id=session_id,
+                source_message_id=inbound_turn.source_message_id,
+                source_event_id=inbound_turn.source_event_id,
+                plan=ToolPlan(
+                    tool="archive_run",
+                    arguments={
+                        "intent": "save",
+                        "user_note": user_note,
+                        "text": user_note,
+                    },
+                    reason="wechat image with caption",
+                ),
+                text=user_note,
+                upload=upload,
+            )
+            if outcome.action == "capture":
+                outcome.reply = capture_reply_for_wechat(
+                    had_user_note=True,
+                    topic_name=topic_name_from_artifacts(outcome.artifacts),
+                )
+            self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+            return self._session_shell.to_turn_response(outcome=outcome)
+
+        if not is_image_only_turn(text=text, upload=upload) or media_kind != "image":
+            return None
+
+        source_event = self.source_event_repository.get_any(event_id=inbound_turn.source_event_id)
+        stored_path = str(getattr(source_event, "stored_file_path", "") or "").strip()
+        if not stored_path:
+            return None
+        entry = {
+            "upload_path": stored_path,
+            "upload_filename": str(getattr(source_event, "original_file_name", "") or upload.filename or "wechat_image.jpg"),
+            "source_event_id": inbound_turn.source_event_id,
+        }
+        if pending is not None and pending_type == "upload_save":
+            existing_entries = list(pending_payload.get("upload_entries") or [])
+            existing_entries.append(entry)
+            pending_payload["upload_entries"] = existing_entries
+            pending_payload["upload_path"] = entry["upload_path"]
+            pending_payload["upload_filename"] = entry["upload_filename"]
+            pending_payload["source_event_id"] = entry["source_event_id"]
+            self.pending_state_repository.update_pending(
+                pending_state_id=pending.id,
+                pending_payload=pending_payload,
+            )
+            question = WECHAT_IMAGE_BATCH_NOTE
+        else:
+            if pending is not None:
+                self.pending_state_repository.resolve(pending_state_id=pending.id, status="superseded")
+            self.pending_state_repository.create(
+                session_id=session_id,
+                source_message_id=inbound_turn.source_message_id,
+                question=WECHAT_IMAGE_NOTE_QUESTION,
+                candidate_intents=["直接保存", "加说明保存", "取消"],
+                pending_payload=build_upload_save_pending_payload(entry=entry, media_kind="image"),
+            )
+            question = WECHAT_IMAGE_NOTE_QUESTION
+        outcome = AssistantTurnOutcome(
+            reply=question,
+            action="clarify",
+            disposition="clarify",
+            status="completed",
+            tool_name="none",
+            tool_arguments={},
+            context=None,
+            confidence="system",
+            reason="wechat image awaiting user note",
+            artifacts=[],
+            trace=[],
+            tool_trace=[],
+            item_id=None,
+        )
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        logger.info(
+            "clawbot wechat_image_staged session_id=%s source_event_id=%s batched=%s",
+            session_id,
+            inbound_turn.source_event_id,
+            pending is not None and pending_type == "upload_save",
+        )
+        return TurnResponse(
+            reply=question,
+            status="completed",
+            disposition="clarify",
+            action="clarify",
+            needs_clarification=True,
+            decision_source="system",
+        )
+
     async def ingest(
         self,
         *,
@@ -500,6 +718,15 @@ class ClawBotService:
             upload=upload,
             source_metadata=source_metadata,
         )
+        wechat_image_response = await self._try_handle_wechat_image_note_turn(
+            session_id=session_id,
+            text=text,
+            upload=upload,
+            source_metadata=source_metadata,
+            inbound_turn=inbound_turn,
+        )
+        if wechat_image_response is not None:
+            return wechat_image_response
         if inbound_turn.buffered_response is not None:
             logger.info(
                 "clawbot upload_buffered session_id=%s source_event_id=%s filename=%s",
@@ -526,6 +753,11 @@ class ClawBotService:
             run_metadata=source_metadata,
         )
         outcome = self._session_shell.outcome_from_turn_result(turn_result)
+        if is_wechat_metadata(source_metadata) and outcome.action == "capture":
+            outcome.reply = capture_reply_for_wechat(
+                had_user_note=True,
+                topic_name=topic_name_from_artifacts(outcome.artifacts),
+            )
         self._session_shell.persist_assistant_turn(
             session_id=session_id,
             outcome=outcome,

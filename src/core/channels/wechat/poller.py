@@ -21,6 +21,7 @@ class WechatPoller:
         gateway_service: WechatGatewayService,
         aggregation_window_seconds: float = 3.0,
         late_media_window_ms: int = 30000,
+        image_note_wait_seconds: float = 20.0,
         progress_settings: WechatProgressSettings | None = None,
     ) -> None:
         self.client = client
@@ -29,7 +30,9 @@ class WechatPoller:
         self._stopped = False
         self.aggregation_window_seconds = aggregation_window_seconds
         self.late_media_window_ms = late_media_window_ms
+        self.image_note_wait_seconds = max(0.0, float(image_note_wait_seconds))
         self._pending_text_events: dict[str, tuple[WechatInboundEvent, float]] = {}
+        self._pending_image_events: dict[str, tuple[WechatInboundEvent, float]] = {}
         self._recent_text_events: dict[str, WechatInboundEvent] = {}
 
     async def run_forever(self) -> None:
@@ -55,6 +58,10 @@ class WechatPoller:
         logger.info("wechat inbound: user=%s event=%s text=%s", event.user_id, event.event_id, text_preview)
         key = self._event_key(event)
         if self._is_text_only(event):
+            pending_image = self._pending_image_events.pop(key, None)
+            if pending_image is not None and self._is_companion_match(pending_image[0], event):
+                await self._process_event(self._merge_events(event, pending_image[0]))
+                return
             deadline = asyncio.get_running_loop().time() + self.aggregation_window_seconds
             existing = self._pending_text_events.get(key)
             if existing is not None:
@@ -74,6 +81,13 @@ class WechatPoller:
                         reply="补充说明：刚才那条图文消息里的图片下载失败了，所以目前只记录了文字，还没有保存图片本体。",
                     )
                     return
+        if self._is_image_only(event) and self.image_note_wait_seconds > 0:
+            deadline = asyncio.get_running_loop().time() + self.image_note_wait_seconds
+            existing = self._pending_image_events.get(key)
+            if existing is not None:
+                await self._process_event(existing[0])
+            self._pending_image_events[key] = (event, deadline)
+            return
         await self._process_event(event)
 
     async def _flush_due_pending(self, *, force: bool = False) -> None:
@@ -84,6 +98,13 @@ class WechatPoller:
         ]
         for key in ready_keys:
             event, _ = self._pending_text_events.pop(key)
+            await self._process_event(event)
+        image_ready_keys = [
+            key for key, (_, deadline) in self._pending_image_events.items()
+            if force or deadline <= now
+        ]
+        for key in image_ready_keys:
+            event, _ = self._pending_image_events.pop(key)
             await self._process_event(event)
 
     async def _process_event(self, event: WechatInboundEvent) -> None:
@@ -140,6 +161,10 @@ class WechatPoller:
     @staticmethod
     def _is_media_companion(event: WechatInboundEvent) -> bool:
         return bool((event.file_path or event.media_download_failed) and not event.text)
+
+    @staticmethod
+    def _is_image_only(event: WechatInboundEvent) -> bool:
+        return bool(event.file_path and event.file_name and not str(event.text or "").strip())
 
     def _is_companion_match(self, text_event: WechatInboundEvent, media_event: WechatInboundEvent) -> bool:
         if text_event.user_id != media_event.user_id:

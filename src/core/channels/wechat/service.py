@@ -388,6 +388,7 @@ class WechatGatewayService:
                 "external_user_id": event.user_id,
                 "file_name": event.file_name,
                 "file_mime": event.file_mime,
+                "inbox_file_path": event.file_path,
                 "media_download_failed": event.media_download_failed,
                 "media_download_error": event.media_download_error,
                 "session_reset_reason": session_reset_reason,
@@ -444,6 +445,7 @@ class WechatGatewayService:
         user_id: str,
         file_path: str,
         caption: str = "",
+        file_name: str | None = None,
         context_token: str | None = None,
     ) -> dict[str, Any]:
         """Send a file to a WeChat user.
@@ -452,6 +454,7 @@ class WechatGatewayService:
             user_id: Target WeChat user ID
             file_path: Local file path to send
             caption: Optional caption text
+            file_name: Deprecated alias for caption (kept for older callers)
             context_token: Optional context token for the session
 
         Returns:
@@ -460,16 +463,17 @@ class WechatGatewayService:
         if self._ilink_client is None:
             raise RuntimeError("ilink_client not configured")
 
+        resolved_caption = str(caption or file_name or "").strip()
         logger.info(
             "wechat gateway sending file user_id=%s file=%s caption=%s",
             user_id,
             file_path,
-            bool(caption),
+            bool(resolved_caption),
         )
         result = await self._ilink_client.send_file(
             peer_user_id=user_id,
             file_path=file_path,
-            caption=caption,
+            caption=resolved_caption,
             context_token=context_token,
         )
         logger.info("wechat gateway file sent user_id=%s result=%s", user_id, result.get("ret"))

@@ -8,6 +8,30 @@ from fastapi import UploadFile
 from core.agent.skill_protocol import HostEffect
 
 
+def ilink_send_success(result: Any) -> bool:
+    """Treat empty or ret-less iLink payloads as success when no error code is present."""
+    if result is None:
+        return True
+    if not isinstance(result, dict):
+        return bool(result)
+    ret = result.get("ret")
+    errcode = result.get("errcode")
+    if ret not in {None, 0}:
+        return False
+    if errcode not in {None, 0}:
+        return False
+    return True
+
+
+def wechat_delivery_caption(title_or_name: str) -> str:
+    raw = str(title_or_name or "").strip()
+    lowered = raw.lower()
+    stem = Path(raw).stem.lower()
+    if stem == "wechat_image" or lowered.startswith("wechat_image."):
+        return ""
+    return raw
+
+
 class HostEffectDispatcher:
     def __init__(
         self,
@@ -29,6 +53,7 @@ class HostEffectDispatcher:
         self.current_source_event_id = current_source_event_id
         self.item_artifact = item_artifact
         self.ingest_upload = ingest_upload
+        self._deliver_sent_for_message: set[str] = set()
 
     async def apply(self, *, invocation: Any, execution: Any, effects: list[HostEffect]) -> None:
         for effect in effects:
@@ -79,7 +104,13 @@ class HostEffectDispatcher:
         execution.artifacts = artifacts
 
     async def _deliver_file(self, *, invocation: Any, execution: Any, payload: dict[str, Any]) -> None:
-        file_path = str(payload.get("file_path") or "").strip()
+        dedupe_key = f"{invocation.session_id}:{invocation.source_message_id}"
+        if dedupe_key in self._deliver_sent_for_message:
+            execution.reply = "已经发送，请查收。"
+            execution.action = "retrieve"
+            execution.status = "completed"
+            return
+        file_path = self._resolve_deliverable_path(str(payload.get("file_path") or "").strip())
         if not file_path:
             execution.reply = "没有可发送的原始文件路径。"
             execution.action = "chat"
@@ -96,24 +127,45 @@ class HostEffectDispatcher:
             execution.action = "chat"
             execution.status = "failed"
             return
+        caption = wechat_delivery_caption(str(payload.get("title") or Path(file_path).name))
         try:
             result = await self.send_file(
                 user_id=external_user_id,
                 file_path=file_path,
-                file_name=str(payload.get("title") or Path(file_path).name),
+                file_name=caption,
             )
         except Exception as exc:  # pragma: no cover - defensive
             execution.reply = str(exc)
             execution.action = "chat"
             execution.status = "failed"
             return
-        if result.get("ret") != 0 or result.get("errcode") not in {None, 0}:
+        if not ilink_send_success(result):
             execution.reply = str(result)
             execution.action = "chat"
             execution.status = "failed"
             return
+        self._deliver_sent_for_message.add(dedupe_key)
         execution.reply = "已经发送，请查收。"
         execution.action = "retrieve"
+        execution.status = "completed"
+
+    def _resolve_deliverable_path(self, file_path: str) -> str:
+        if not file_path:
+            return ""
+        candidate = Path(file_path)
+        if candidate.is_file():
+            return str(candidate)
+        storage_dir = Path(self.ingestion_service.storage_dir)
+        by_name = storage_dir / candidate.name
+        if by_name.is_file():
+            return str(by_name)
+        wechat_inbox = storage_dir / "wechat_inbox" / candidate.name
+        if wechat_inbox.is_file():
+            return str(wechat_inbox)
+        for match in storage_dir.rglob(candidate.name):
+            if match.is_file():
+                return str(match)
+        return ""
 
 
-__all__ = ["HostEffectDispatcher"]
+__all__ = ["HostEffectDispatcher", "ilink_send_success", "wechat_delivery_caption"]

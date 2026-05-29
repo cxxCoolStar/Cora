@@ -24,6 +24,21 @@ from core.storage.db import DatabaseManager  # noqa: E402
 from core.storage.repositories import ItemRepository, MessageRepository, UserSignalRepository  # noqa: E402
 
 
+def flatten_nested_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Merge LLM-style `arguments: { query: ... }` into the top-level argument dict."""
+    outer = dict(arguments or {})
+    inner = outer.get("arguments")
+    if not isinstance(inner, dict):
+        return outer
+    merged = dict(inner)
+    for key, value in outer.items():
+        if key == "arguments":
+            continue
+        if key not in merged or merged.get(key) in (None, ""):
+            merged[key] = value
+    return merged
+
+
 def build_database(database_url: str | None = None) -> DatabaseManager:
     if database_url:
         database = DatabaseManager(database_url)
@@ -88,13 +103,21 @@ def candidate_match_score(*, record: Any, query: str) -> int:
     )
     compact_query = "".join(lowered_query.split())
     score = 0
+    user_note = str(metadata.get("user_note") or "").lower()
+    tokens = [token for token in lowered_query.split() if token]
     for haystack in haystacks:
         if not haystack:
             continue
         compact_haystack = "".join(haystack.split())
         if compact_query and compact_query in compact_haystack:
             score += 35
-        for token in [token for token in lowered_query.split() if token]:
+        for token in tokens:
             if token in haystack:
                 score += 10
+    if user_note:
+        if compact_query and compact_query in "".join(user_note.split()):
+            score += 50
+        for token in tokens:
+            if token in user_note:
+                score += 25
     return score

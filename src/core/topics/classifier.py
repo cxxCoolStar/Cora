@@ -48,10 +48,12 @@ class TopicClassifier:
         )
         from core.channels.wechat.progress import (
             WechatProgressStage,
+            get_active_wechat_progress,
             schedule_wechat_progress_stage,
         )
 
-        schedule_wechat_progress_stage(WechatProgressStage.TOPIC_CLASSIFY)
+        if get_active_wechat_progress() is None:
+            schedule_wechat_progress_stage(WechatProgressStage.TOPIC_CLASSIFY)
 
         existing = [
             {"name": topic.name, "slug": topic.slug, "summary": topic.summary[:120]}

@@ -121,6 +121,7 @@ def _build_wechat_runtime(
     poller = WechatPoller(
         client=client,
         gateway_service=gateway,
+        image_note_wait_seconds=settings.wechat_image_note_wait_seconds,
         progress_settings=progress_settings_from_core(settings),
     )
     return active_container, client, gateway, poller, base_url
