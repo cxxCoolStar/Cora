@@ -1,0 +1,49 @@
+{
+  "id": "live_plan_execute_nl",
+  "type": "harness",
+  "description": "Live LLM: planner should emit an executable plan and /execute should complete worker search successfully.",
+  "tags": ["harness", "planner", "worker", "planning", "live", "task-success"],
+  "setup": {
+    "model_mode": "live",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n",
+      "tests/test_example.py": "def test_hello_agent():\n    assert hello_agent() == 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "live planner for workspace search",
+      "input": {
+        "agent_role": "planner",
+        "text": "在修改代码之前，请先在 workspace 里搜索 hello_agent 出现在哪些文件。"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_any": ["/execute", "task", "hello_agent", "search"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated"
+        }
+      }
+    },
+    {
+      "label": "live execute plan",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["execution completed successfully"],
+        "tool_names_any": ["search_files"],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_trace_contains_all": ["tool.completed", "cleanup.completed"]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "id": "plan_execute_task_success",
+  "type": "harness",
+  "description": "Plan execute path should complete worker tasks and report execution success (task success rate).",
+  "tags": ["harness", "planner", "worker", "planning", "task-success"],
+  "setup": {
+    "planner_stub_mode": "valid",
+    "workspace_files": {
+      "src/example.py": "def hello_agent():\n    return 'ok'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "planner validates plan",
+      "input": {
+        "agent_role": "planner",
+        "text": "Find hello_agent references before editing"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": ["/execute", "task-1"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_outcome": "plan_validated",
+          "latest_agent_run_trace_contains_all": [
+            "plan.validation.completed"
+          ]
+        }
+      }
+    },
+    {
+      "label": "execute completes with success summary",
+      "input": {
+        "agent_role": "execute",
+        "text": "/execute"
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "reply_contains_all": [
+          "execution completed successfully",
+          "task-1"
+        ],
+        "tool_names_any": ["search_files"],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed",
+          "latest_agent_run_input_metadata_contains": {
+            "agent_role": "worker",
+            "task_id": "task-1"
+          },
+          "latest_agent_run_trace_contains_all": [
+            "tool.completed",
+            "cleanup.completed"
+          ]
+        }
+      }
+    }
+  ]
+}

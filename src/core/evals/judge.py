@@ -147,6 +147,17 @@ def evaluate_step(
                 f"latest agent run trace missing required events: {missing_agent_run_events!r}; got {getattr(observed_state, 'latest_agent_run_trace_events', [])!r}"
             )
         )
+    progress_messages = (
+        list(observed_state.wechat_progress_messages) if observed_state is not None else []
+    )
+    combined_progress = "\n".join(progress_messages)
+    for token in state_expect.wechat_progress_messages_contains_all:
+        if token not in combined_progress:
+            failures.append(
+                EvalAssertionFailure(
+                    f"wechat progress messages missing required text: {token!r}; got {progress_messages!r}"
+                )
+            )
 
     user_memory_text = observed_state.user_memory_text if observed_state is not None else ""
     for token in state_expect.user_memory_contains_all:

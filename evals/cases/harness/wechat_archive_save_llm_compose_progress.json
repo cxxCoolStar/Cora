@@ -1,0 +1,29 @@
+{
+  "id": "wechat_archive_save_llm_compose_progress",
+  "type": "harness",
+  "description": "WeChat platform archive save via /tool should emit llm_compose progress after tools finish.",
+  "tags": ["harness", "wechat", "progress", "archive"],
+  "steps": [
+    {
+      "label": "archive save on wechat platform with compose progress",
+      "input": {
+        "platform": "wechat",
+        "text": "/tool archive_run {\"intent\":\"save\",\"arguments\":{\"text\":\"EVAL_LLM_COMPOSE meeting moved to Friday.\"}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "tool_names_any": ["archive_run"],
+        "state": {
+          "item_count": 1,
+          "wechat_progress_messages_contains_all": [
+            "记入资料库",
+            "整理回复"
+          ]
+        }
+      }
+    }
+  ]
+}

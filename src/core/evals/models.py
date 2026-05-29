@@ -21,6 +21,7 @@ class EvalStateExpectation:
     latest_agent_run_input_metadata_contains: dict[str, str] = field(default_factory=dict)
     latest_agent_run_error_contains_all: list[str] = field(default_factory=list)
     latest_agent_run_trace_contains_all: list[str] = field(default_factory=list)
+    wechat_progress_messages_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_all: list[str] = field(default_factory=list)
     user_memory_contains_any: list[str] = field(default_factory=list)
     user_memory_not_contains: list[str] = field(default_factory=list)
@@ -45,6 +46,9 @@ class EvalStateExpectation:
             latest_agent_run_input_metadata_contains=_string_map(payload.get("latest_agent_run_input_metadata_contains")),
             latest_agent_run_error_contains_all=_string_list(payload.get("latest_agent_run_error_contains_all")),
             latest_agent_run_trace_contains_all=_string_list(payload.get("latest_agent_run_trace_contains_all")),
+            wechat_progress_messages_contains_all=_string_list(
+                payload.get("wechat_progress_messages_contains_all")
+            ),
             user_memory_contains_all=_string_list(payload.get("user_memory_contains_all")),
             user_memory_contains_any=_string_list(payload.get("user_memory_contains_any")),
             user_memory_not_contains=_string_list(payload.get("user_memory_not_contains")),
@@ -254,6 +258,7 @@ class EvalObservedState:
     latest_agent_run_input_metadata: dict[str, Any] = field(default_factory=dict)
     latest_agent_run_error: str | None = None
     latest_agent_run_trace_events: list[str] = field(default_factory=list)
+    wechat_progress_messages: list[str] = field(default_factory=list)
     user_memory_text: str = ""
     workspace_root: str = ""
 

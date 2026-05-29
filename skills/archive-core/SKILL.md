@@ -12,7 +12,7 @@ metadata:
       required_input_fields: [intent]
       intent_phrases:
         deliver: [发我, 发给我, 发回来, 发送, 传给我, send me, send back, deliver]
-        save: [保存, 存一下, 记住, archive, save]
+        save: [保存, 存一下, 记住, 记录, archive, save]
         search: [找, 查, 查一下, 搜索, find, search, look up]
         read: [打开, 读取, 看看, 展开, 全文, read, open, show]
         delete: [删除, 删掉, 移除, remove, delete]

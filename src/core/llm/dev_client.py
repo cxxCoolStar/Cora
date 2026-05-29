@@ -42,6 +42,9 @@ class DevelopmentModelClient(ModelClient):
             return ModelResponse(assistant_text="How can I help?")
 
         text = latest_user.content.strip()
+        topic_stub = self._topic_classifier_stub_response(content=text)
+        if topic_stub is not None:
+            return topic_stub
         if text.startswith("/plan") or "[Planner mode]" in text:
             goal_line = text.split("\n", 1)[0].strip()
             return ModelResponse(assistant_text=self._planner_plan_json(f"/plan {goal_line}"))
@@ -74,6 +77,19 @@ class DevelopmentModelClient(ModelClient):
             )
 
         return ModelResponse(assistant_text=f"You said: {text}")
+
+    @staticmethod
+    def _topic_classifier_stub_response(*, content: str) -> ModelResponse | None:
+        if '"existing_topics"' not in content or '"content_preview"' not in content:
+            return None
+        payload = {
+            "topic_name": "Eval Notes",
+            "slug": "eval-notes",
+            "summary": "Harness eval topic bucket.",
+            "tags": ["eval"],
+            "reason": "DevelopmentModelClient topic stub.",
+        }
+        return ModelResponse(assistant_text=json.dumps(payload, ensure_ascii=False))
 
     @classmethod
     def _planner_plan_json(cls, user_text: str) -> str:

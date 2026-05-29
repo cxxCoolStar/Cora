@@ -1,0 +1,32 @@
+{
+  "id": "live_archive_save_nl",
+  "type": "harness",
+  "description": "Live LLM: natural-language save should persist one archive item (archive_run or equivalent capture).",
+  "tags": ["harness", "archive", "save", "live", "task-success"],
+  "setup": {
+    "model_mode": "live"
+  },
+  "steps": [
+    {
+      "label": "natural language save to archive",
+      "input": {
+        "text": "请帮我把下面这条记进资料库：LIVE_EVAL_SAVE_a7f3 我对花生过敏，下周要去复查。",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run", "skill_run"],
+        "action": "capture",
+        "reply_contains_any": ["LIVE_EVAL_SAVE_a7f3", "a7f3", "花生", "过敏", "保存", "记入", "已"],
+        "state": {
+          "item_count": 1,
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed"
+        }
+      }
+    }
+  ]
+}

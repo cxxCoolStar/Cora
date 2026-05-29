@@ -108,6 +108,11 @@ def infer_progress_route(event: WechatInboundEvent) -> str:
     text = str(event.text or "").strip()
     if not text:
         return "default"
+    lowered = text.lower()
+    if "archive_run" in lowered and "save" in lowered:
+        return "save"
+    if "archive_run" in lowered and "search" in lowered:
+        return "find"
     if _SAVE_HINT.search(text):
         return "save"
     if _FIND_HINT.search(text):
@@ -233,12 +238,13 @@ class WechatProgressSession:
             and stage != WechatProgressStage.HEARTBEAT
         ):
             return
+        forward_stage = self._current_stage is None or new_priority > current_priority
         text = _STAGE_MESSAGES.get(stage, "")
         if not text:
             return
         sent = await self._send_text(
             text,
-            bypass_throttle=bypass_throttle or stage.name.startswith("ACK_"),
+            bypass_throttle=bypass_throttle or forward_stage or stage.value.startswith("ack_"),
             kind=stage.value,
         )
         if sent:

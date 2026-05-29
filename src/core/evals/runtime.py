@@ -12,8 +12,10 @@ import shutil
 
 import core.clawbot.dependencies as clawbot_dependencies
 import httpx
+from core.channels.wechat.progress import progress_settings_from_core, wechat_progress_scope
 from core.channels.wechat.service import WechatGatewayService
 from core.channels.wechat.types import WechatInboundEvent
+from core.evals.wechat_capture import EvalWechatIlinkStub
 from core.clawbot.dependencies import get_clawbot_container
 from core.clawbot.schemas import TurnResponse
 from core.evals.judge import evaluate_step
@@ -69,21 +71,29 @@ class EvalRuntime:
                 self._configure_mcp_eval(container=container, setup=case.setup)
                 mock_web_client = self._configure_mock_web_tools(container=container, setup=case.setup)
                 session = container.clawbot_service.create_session()
-                wechat_gateway = self._build_wechat_gateway(container=container)
+                wechat_ilink_stub = EvalWechatIlinkStub()
+                wechat_gateway = self._build_wechat_gateway(
+                    container=container,
+                    ilink_stub=wechat_ilink_stub,
+                )
+                progress_settings = progress_settings_from_core(container.settings)
                 for index, step in enumerate(case.steps, start=1):
                     observed_session_id = session.id
+                    wechat_ilink_stub.sent.clear()
                     try:
                         if step.input.channel == "wechat":
+                            event = _wechat_progress_event(case=case, step=step, index=index)
+
+                            async def _handle_wechat_inbound() -> Any:
+                                async with wechat_progress_scope(
+                                    event=event,
+                                    client=wechat_ilink_stub,
+                                    settings=progress_settings,
+                                ):
+                                    return await wechat_gateway.handle_inbound_event(event=event)
+
                             with self._wechat_step_budget(container=container, step_budget=step.input.run_budget):
-                                wechat_result = asyncio.run(
-                                    wechat_gateway.handle_inbound_event(
-                                        event=WechatInboundEvent(
-                                            event_id=step.input.external_event_id or f"{case.id}-{index}",
-                                            user_id=step.input.external_user_id or f"eval-user-{case.id}",
-                                            text=step.input.text,
-                                        )
-                                    )
-                                )
+                                wechat_result = asyncio.run(_handle_wechat_inbound())
                             observed_session_id = wechat_result.session_id
                             response = _turn_response_from_wechat_result(wechat_result)
                         elif step.input.hitl_action == "approve":
@@ -133,11 +143,18 @@ class EvalRuntime:
                         else:
                             source_metadata = _eval_step_source_metadata(step.input)
                             response = asyncio.run(
-                                container.clawbot_service.reply(
-                                    session_id=session.id,
-                                    text=step.input.text,
-                                    run_budget=step.input.run_budget,
-                                    source_metadata=source_metadata or None,
+                                _eval_turn_with_optional_wechat_progress(
+                                    case=case,
+                                    step=step,
+                                    index=index,
+                                    stub=wechat_ilink_stub,
+                                    progress_settings=progress_settings,
+                                    coroutine=container.clawbot_service.reply(
+                                        session_id=session.id,
+                                        text=step.input.text,
+                                        run_budget=step.input.run_budget,
+                                        source_metadata=source_metadata or None,
+                                    ),
                                 )
                             )
                     except Exception as exc:
@@ -154,6 +171,7 @@ class EvalRuntime:
                         session_id=observed_session_id,
                         user_memory_path=user_memory_path,
                         workspace_root=workspace_root,
+                        wechat_progress_messages=wechat_ilink_stub.drain_sent(),
                     )
                     step_results.append(
                         evaluate_step(
@@ -269,12 +287,13 @@ class EvalRuntime:
         container.clawbot_service._agent_turn_runner.history_loader = failing_history_loader
 
     @staticmethod
-    def _build_wechat_gateway(*, container) -> WechatGatewayService:
+    def _build_wechat_gateway(*, container, ilink_stub: EvalWechatIlinkStub) -> WechatGatewayService:
         session_map_repository = ChannelSessionMapRepository(container.database)
         gateway = WechatGatewayService(
             clawbot_service=container.clawbot_service,
             event_repository=ChannelEventRepository(container.database),
             session_map_repository=session_map_repository,
+            ilink_client=ilink_stub,
             session_idle_minutes=container.settings.wechat_session_idle_minutes,
             session_daily_reset_hour=container.settings.wechat_session_daily_reset_hour,
             session_timezone=container.settings.wechat_session_timezone,
@@ -306,7 +325,19 @@ def live_evals_enabled() -> bool:
     flag = str(os.environ.get("CORA_RUN_LIVE_EVALS") or "").strip().lower()
     if flag not in {"1", "true", "yes", "on"}:
         return False
-    return bool(str(os.environ.get("CORA_OPENAI_API_KEY") or "").strip())
+    if str(os.environ.get("CORA_OPENAI_API_KEY") or "").strip():
+        return True
+    try:
+        from core.config import CoreSettings
+
+        return bool((CoreSettings().openai_api_key or "").strip())
+    except Exception:
+        return False
+
+
+def live_evals_only() -> bool:
+    flag = str(os.environ.get("CORA_EVAL_LIVE_ONLY") or "").strip().lower()
+    return flag in {"1", "true", "yes", "on"}
 
 
 @contextmanager
@@ -439,7 +470,46 @@ def _latest_pending_hitl_id(*, database, session_id: str) -> str:
     raise ValueError(f"No pending HITL id found in latest agent run for session {session_id}")
 
 
-def observe_state(*, database, session_id: str, user_memory_path: Path, workspace_root: Path) -> EvalObservedState:
+def _wechat_progress_event(*, case: EvalCase, step, index: int) -> WechatInboundEvent:
+    return WechatInboundEvent(
+        event_id=step.input.external_event_id or f"{case.id}-{index}",
+        user_id=step.input.external_user_id or f"eval-user-{case.id}",
+        text=step.input.text,
+    )
+
+
+def _step_uses_wechat_progress(step) -> bool:
+    return step.input.channel == "wechat" or step.input.platform == "wechat"
+
+
+async def _eval_turn_with_optional_wechat_progress(
+    *,
+    case: EvalCase,
+    step,
+    index: int,
+    stub: EvalWechatIlinkStub,
+    progress_settings,
+    coroutine,
+):
+    if not _step_uses_wechat_progress(step) or not progress_settings.enabled:
+        return await coroutine
+    event = _wechat_progress_event(case=case, step=step, index=index)
+    async with wechat_progress_scope(
+        event=event,
+        client=stub,
+        settings=progress_settings,
+    ):
+        return await coroutine
+
+
+def observe_state(
+    *,
+    database,
+    session_id: str,
+    user_memory_path: Path,
+    workspace_root: Path,
+    wechat_progress_messages: list[str] | None = None,
+) -> EvalObservedState:
     item_repository = ItemRepository(database)
     pending_repository = PendingStateRepository(database)
     agent_run_repository = SqlAgentRunRecordRepository(database)
@@ -471,6 +541,7 @@ def observe_state(*, database, session_id: str, user_memory_path: Path, workspac
         ]
         if latest_agent_run is not None
         else [],
+        wechat_progress_messages=list(wechat_progress_messages or []),
         user_memory_text=user_memory_text,
         workspace_root=str(workspace_root),
     )

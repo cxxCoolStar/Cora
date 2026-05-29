@@ -1,0 +1,57 @@
+{
+  "id": "live_archive_search_nl",
+  "type": "harness",
+  "description": "Live LLM: save then natural-language search should retrieve the saved marker in the same session.",
+  "tags": ["harness", "archive", "save", "retrieve", "live", "task-success"],
+  "setup": {
+    "model_mode": "live"
+  },
+  "steps": [
+    {
+      "label": "natural language save seed",
+      "input": {
+        "text": "记到资料库里：LIVE_EVAL_CHAIN_b8e4 体检报告提醒，周三上午抽血。",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run", "skill_run"],
+        "action": "capture",
+        "state": {
+          "item_count": 1,
+          "agent_run_count": 1
+        }
+      }
+    },
+    {
+      "label": "natural language search",
+      "input": {
+        "text": "帮我在资料库里找 LIVE_EVAL_CHAIN_b8e4 抽血那条记录。",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run", "skill_run"],
+        "reply_contains_any": [
+          "LIVE_EVAL_CHAIN_b8e4",
+          "b8e4",
+          "抽血",
+          "周三",
+          "找到",
+          "条",
+          "1"
+        ],
+        "state": {
+          "agent_run_count": 2,
+          "latest_agent_run_status": "completed"
+        }
+      }
+    }
+  ]
+}

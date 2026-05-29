@@ -1,0 +1,33 @@
+{
+  "id": "live_read_file_nl",
+  "type": "harness",
+  "description": "Live LLM: should read a workspace file via read_file and answer with the defined symbol.",
+  "tags": ["harness", "file", "live", "task-success"],
+  "setup": {
+    "model_mode": "live",
+    "workspace_files": {
+      "src/live_probe.py": "def live_probe_fn():\n    return 'LIVE_EVAL_READ_c4d5'\n"
+    }
+  },
+  "steps": [
+    {
+      "label": "read file and report function name",
+      "input": {
+        "text": "请读取工作区里的 src/live_probe.py，告诉我里面定义的函数叫什么名字。",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["read_file"],
+        "reply_contains_any": ["live_probe_fn", "LIVE_EVAL_READ_c4d5", "c4d5"],
+        "state": {
+          "agent_run_count": 1,
+          "latest_agent_run_status": "completed"
+        }
+      }
+    }
+  ]
+}

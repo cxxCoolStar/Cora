@@ -1,0 +1,44 @@
+{
+  "id": "wechat_find_progress_ack",
+  "type": "harness",
+  "description": "WeChat find-style queries should emit find-routed ACK text in progress messages.",
+  "tags": ["harness", "wechat", "archive", "progress", "retrieve"],
+  "steps": [
+    {
+      "label": "seed archive item",
+      "input": {
+        "text": "/tool archive_run {\"intent\":\"save\",\"arguments\":{\"text\":\"内网网关配置 10.0.0.1\"}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "state": {
+          "item_count": 1
+        }
+      }
+    },
+    {
+      "label": "wechat find query shows find ACK",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-progress-find",
+        "external_event_id": "wx-eval-progress-find-1",
+        "text": "帮我找一下之前的内网网关配置",
+        "run_budget": {
+          "policy_profile": "coding_full",
+          "timeout_seconds": 120
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "state": {
+          "wechat_progress_messages_contains_all": [
+            "资料库里查找"
+          ]
+        }
+      }
+    }
+  ]
+}

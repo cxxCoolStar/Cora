@@ -1,0 +1,47 @@
+{
+  "id": "archive_save_then_search",
+  "type": "harness",
+  "description": "Task success: archive_run should save a note and later retrieve it by query in the same session.",
+  "tags": ["harness", "archive", "save", "retrieve", "task-success"],
+  "steps": [
+    {
+      "label": "save text note via archive_run",
+      "input": {
+        "text": "/tool archive_run {\"intent\":\"save\",\"arguments\":{\"text\":\"EVAL_HARNESS allergy lab report for Dr Wang tomorrow.\"}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run"],
+        "action": "capture",
+        "state": {
+          "agent_run_count": 1,
+          "item_count": 1,
+          "latest_agent_run_status": "completed"
+        }
+      }
+    },
+    {
+      "label": "search saved note by meaning",
+      "input": {
+        "text": "/tool archive_run {\"intent\":\"search\",\"arguments\":{\"query\":\"EVAL_HARNESS allergy\"}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run"],
+        "reply_contains_any": ["EVAL_HARNESS", "allergy", "找到", "条"],
+        "state": {
+          "agent_run_count": 2,
+          "item_count": 1
+        }
+      }
+    }
+  ]
+}
