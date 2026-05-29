@@ -1,0 +1,45 @@
+{
+  "id": "archive_nested_arguments_search",
+  "type": "harness",
+  "description": "archive_run search should resolve query when LLM nests parameters under arguments.arguments.",
+  "tags": ["harness", "archive", "retrieve", "task-success"],
+  "steps": [
+    {
+      "label": "seed note with marker",
+      "input": {
+        "text": "/tool archive_run {\"intent\":\"save\",\"arguments\":{\"text\":\"EVAL_NESTED_ARG_z9k2 allergy clinic reminder.\"}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run"],
+        "state": {
+          "item_count": 1,
+          "agent_run_count": 1
+        }
+      }
+    },
+    {
+      "label": "search with nested arguments shape",
+      "input": {
+        "text": "/tool archive_run {\"intent\":\"search\",\"arguments\":{\"arguments\":{\"query\":\"EVAL_NESTED_ARG_z9k2\"}}}",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "tool_names_any": ["archive_run"],
+        "reply_contains_any": ["EVAL_NESTED_ARG_z9k2", "z9k2", "allergy", "clinic"],
+        "state": {
+          "item_count": 1,
+          "agent_run_count": 2
+        }
+      }
+    }
+  ]
+}

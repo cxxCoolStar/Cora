@@ -1,0 +1,51 @@
+{
+  "id": "wechat_image_note_save",
+  "type": "harness",
+  "description": "WeChat image-only upload should ask for a note before saving; follow-up text becomes user_note.",
+  "tags": ["harness", "wechat", "archive", "image", "task-success"],
+  "steps": [
+    {
+      "label": "stage image awaiting note",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-image-note",
+        "external_event_id": "wx-eval-image-note-1",
+        "upload_name": "wechat_image.jpg",
+        "upload_bytes": "fake image bytes for eval",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "clarify",
+        "action": "clarify",
+        "reply_contains_all": ["收到图片", "说明"],
+        "state": {
+          "item_count": 0
+        }
+      }
+    },
+    {
+      "label": "save staged image with user note",
+      "input": {
+        "channel": "wechat",
+        "external_user_id": "wx-eval-image-note",
+        "external_event_id": "wx-eval-image-note-2",
+        "text": "EVAL_IMAGE_NOTE 和女朋友在太美丽餐厅吃泰餐",
+        "run_budget": {
+          "policy_profile": "coding_full"
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "disposition": "respond",
+        "action": "capture",
+        "reply_contains_all": ["已保存"],
+        "state": {
+          "item_count": 1
+        }
+      }
+    }
+  ]
+}
