@@ -10,7 +10,7 @@
         "text": "把之前那份简历文件发给我"
       },
       "expect": {
-        "tool_names_any": ["skill_run"],
+        "tool_names_any": ["archive_run", "skill_run"],
         "reply_not_contains": ["不支持", "不能发送"]
       }
     }

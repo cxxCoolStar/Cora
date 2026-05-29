@@ -86,3 +86,34 @@ def unique_destination(topic_dir: Path, filename: str) -> Path:
         if not next_candidate.exists():
             return next_candidate
         counter += 1
+
+
+_WINDOWS_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def slugify_user_note(note: str, *, max_len: int = 48) -> str:
+    cleaned = (note or "").strip()
+    for prefix in ("=", "＝"):
+        while cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix) :].lstrip()
+    cleaned = _WINDOWS_INVALID_CHARS.sub("", cleaned)
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return ""
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
+    return cleaned
+
+
+def archive_filename_from_note(
+    *,
+    user_note: str,
+    suffix: str,
+    created_at: datetime | None = None,
+) -> str:
+    stamp = (created_at or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    slug = slugify_user_note(user_note)
+    ext = suffix if suffix.startswith(".") else f".{suffix}" if suffix else ""
+    if slug:
+        return f"{stamp}_{slug}{ext}"
+    return f"{stamp}_upload{ext}"

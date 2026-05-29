@@ -12,6 +12,7 @@ class CoreSettings(BaseSettings):
     files_storage_dir: Path = Field(default=Path(".cora/files"))
     archive_root_dir: Path = Field(default=Path(".cora/archive"))
     archive_mirror_enabled: bool = True
+    archive_storage_mode: str = "filesystem"
     user_memory_path: Path = Field(default=Path("user-memory/USER.md"))
     file_tool_root: Path = Field(default=Path("."))
     toolset_preset: str = "cora-wechat"

@@ -185,6 +185,8 @@ def build_clawbot_container(*, settings: CoreSettings | None = None) -> ClawBotC
             or active_settings.wechat_session_timezone
             or "Asia/Shanghai"
         ),
+        archive_root_dir=active_settings.archive_root_dir,
+        archive_storage_mode=active_settings.archive_storage_mode,
     )
     context_budget_manager = ContextBudgetManager(
         context_length=active_settings.context_length,

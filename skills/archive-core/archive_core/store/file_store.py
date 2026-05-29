@@ -7,6 +7,7 @@ from typing import Any
 
 from archive_core.models import ArchiveRecord, ScoredRecord
 from archive_core.paths import (
+    archive_filename_from_note,
     archive_paths,
     ensure_archive_layout,
     generate_asset_id,
@@ -15,7 +16,7 @@ from archive_core.paths import (
     normalize_topic,
     unique_destination,
 )
-from archive_core.search import score_record
+from archive_core.filename_match import score_archive_record
 
 
 class FileArchiveStore:
@@ -47,7 +48,15 @@ class FileArchiveStore:
         topic_dir = self.paths.topics_root / topic_slug
         topic_dir.mkdir(parents=True, exist_ok=True)
 
-        destination = unique_destination(topic_dir, source_file.name)
+        note = (user_note or "").strip()
+        if note:
+            destination_name = archive_filename_from_note(
+                user_note=note,
+                suffix=source_file.suffix or ".bin",
+            ).replace("/", "_").replace("\\", "_")
+        else:
+            destination_name = source_file.name
+        destination = unique_destination(topic_dir, destination_name)
         if move:
             shutil.move(str(source_file), str(destination))
         else:
@@ -59,10 +68,10 @@ class FileArchiveStore:
             topic=topic_slug,
             path=destination.relative_to(self.paths.archive_root).as_posix(),
             filename=destination.name,
-            summary=(summary or "").strip(),
-            description=(description or "").strip(),
+            summary=(summary or note or destination.stem).strip(),
+            description=(description or note or "").strip(),
             source=(source or "unknown").strip() or "unknown",
-            user_note=(user_note or "").strip(),
+            user_note=note,
             created_at=normalize_created_at(created_at or None),
             deleted=False,
         )
@@ -93,14 +102,14 @@ class FileArchiveStore:
                 scored.append(self._to_scored(record, score=100))
                 continue
             if needle:
-                score = score_record(record=record, query=needle)
+                score = score_archive_record(record=record, query=needle)
                 if score <= 0:
                     continue
                 scored.append(self._to_scored(record, score=score))
                 continue
             scored.append(self._to_scored(record, score=0))
 
-        scored.sort(key=lambda item: item.score, reverse=True)
+        scored.sort(key=lambda item: (item.score, item.record.created_at or ""), reverse=True)
         return scored[:limit]
 
     def get(self, record_id: str) -> ArchiveRecord | None:

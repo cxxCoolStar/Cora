@@ -333,6 +333,8 @@ def build_test_container(
         scheduled_task_repository=scheduled_task_repository,
         source_event_repository=source_event_repository,
         session_map_repository=session_map_repository,
+        archive_root_dir=settings.archive_root_dir,
+        archive_storage_mode=settings.archive_storage_mode,
     )
     model_client = StubTopicModelClient()
     context_budget_manager = ContextBudgetManager(

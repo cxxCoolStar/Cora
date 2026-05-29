@@ -445,8 +445,8 @@ class WechatGatewayService:
         user_id: str,
         file_path: str,
         caption: str = "",
-        file_name: str | None = None,
         context_token: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a file to a WeChat user.
 
@@ -454,16 +454,13 @@ class WechatGatewayService:
             user_id: Target WeChat user ID
             file_path: Local file path to send
             caption: Optional caption text
-            file_name: Deprecated alias for caption (kept for older callers)
             context_token: Optional context token for the session
-
-        Returns:
-            API response from iLink
+            **kwargs: Accepts legacy ``file_name`` as a caption alias
         """
         if self._ilink_client is None:
             raise RuntimeError("ilink_client not configured")
 
-        resolved_caption = str(caption or file_name or "").strip()
+        resolved_caption = str(caption or kwargs.get("file_name") or "").strip()
         logger.info(
             "wechat gateway sending file user_id=%s file=%s caption=%s",
             user_id,

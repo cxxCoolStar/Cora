@@ -9,7 +9,6 @@ from core.channels.wechat import progress as progress_module
 from core.channels.wechat.poller import WechatPoller
 from core.channels.wechat.progress import (
     HEARTBEAT_MESSAGE,
-    TOOL_DONE_CAPTURE_MESSAGE,
     WechatProgressMode,
     WechatProgressSettings,
     WechatProgressStage,
@@ -181,8 +180,7 @@ def test_progress_session_tool_messages() -> None:
         await session.on_tool_done("skill_run", action="tool_completed", status="completed")
 
     asyncio.run(_run())
-    assert session.client.sent[0] == "正在归档处理…"
-    assert TOOL_DONE_CAPTURE_MESSAGE in session.client.sent
+    assert session.client.sent == []
 
 
 def test_minimal_mode_suppresses_save_progress() -> None:
@@ -327,7 +325,7 @@ def test_agent_loop_emits_llm_compose_after_tools() -> None:
 
     try:
         asyncio.run(_run())
-        assert any("正在整理回复" in line for line in session.client.sent)
+        assert not any("正在整理回复" in line for line in session.client.sent)
     finally:
         progress_module._active_session.reset(token)
 
@@ -388,7 +386,49 @@ def test_progress_duplicate_text_not_sent_twice() -> None:
         await session.on_tool_start("skill_run")
 
     asyncio.run(_run())
-    assert session.client.sent == ["正在归档处理…"]
+    assert session.client.sent == []
+
+
+def test_save_route_suppresses_ack_and_archive_progress() -> None:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_text(self, *, peer_user_id: str, text: str, context_token: str | None = None):
+            self.sent.append(text)
+            return {"ret": 0}
+
+    event = WechatInboundEvent(
+        event_id="evt-save",
+        user_id="wx-user",
+        text="这是跟女朋友一起diy的蛋糕",
+        file_name="wechat_image.jpg",
+        file_path="/tmp/wechat_image.jpg",
+    )
+    session = progress_module.WechatProgressSession(
+        event=event,
+        client=_FakeClient(),
+        settings=WechatProgressSettings(
+            enabled=True,
+            mode=WechatProgressMode.VERBOSE,
+            heartbeat_seconds=0,
+            tool_updates=True,
+            min_update_interval_seconds=0.0,
+            min_burst_interval_seconds=0.0,
+            max_messages=5,
+        ),
+    )
+    session._route = "save"
+
+    async def _run() -> None:
+        await session.send_ack_if_needed()
+        await session.on_tool_start("skill_run")
+        await session.on_tool_start("archive_run", intent="save")
+        await session.report_stage(WechatProgressStage.LLM_COMPOSE)
+        await session.report_stage(WechatProgressStage.ACK_DEFAULT)
+
+    asyncio.run(_run())
+    assert session.client.sent == []
 
 
 def test_archive_search_uses_tool_find_stage() -> None:

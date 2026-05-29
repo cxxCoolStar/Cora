@@ -84,6 +84,7 @@ from core.clawbot.wechat_image_note import (
     normalize_image_note_text,
     topic_name_from_artifacts,
 )
+from core.clawbot.wechat_item_selection import PENDING_ITEM_SELECTION, classify_item_selection_follow_up
 from core.ingestion.service import IngestionService
 from core.llm.base import ModelClient
 from core.schemas.message import Message
@@ -504,10 +505,7 @@ class ClawBotService:
         context_snapshot = self.load_context_snapshot(session_id=session_id)
         context_snapshot.current_source_event_id = source_event_id
         if str(plan.arguments.get("intent") or "").strip() == "resolve_pending":
-            pending_record = self.pending_state_repository.get_latest_pending_of_type(
-                session_id=session_id,
-                payload_type="upload_save",
-            )
+            pending_record = self.pending_state_repository.get_latest_pending(session_id=session_id)
             if pending_record is not None:
                 context_snapshot.pending_state = self.runtime_manager._runtime_pending_state(pending_record)
         runtime = self.runtime_manager.build_runtime_state(
@@ -541,6 +539,74 @@ class ClawBotService:
             tool_trace=[],
             item_id=execution.item_id,
         )
+
+    async def _try_handle_wechat_item_selection_turn(
+        self,
+        *,
+        session_id: str,
+        text: str | None,
+        upload: UploadFile | None,
+        source_metadata: dict[str, Any] | None,
+        inbound_turn,
+    ) -> TurnResponse | None:
+        if not is_wechat_metadata(source_metadata):
+            return None
+        if upload is not None:
+            return None
+        cleaned_text = str(text or "").strip()
+        if not cleaned_text:
+            return None
+        pending = self.pending_state_repository.get_latest_pending(session_id=session_id)
+        if pending is None:
+            return None
+        pending_payload = dict(getattr(pending, "pending_payload_json", None) or {})
+        if str(pending_payload.get("type") or "").strip() != PENDING_ITEM_SELECTION:
+            return None
+        requested_intent = str(pending_payload.get("requested_intent") or "deliver").strip()
+        if requested_intent != "deliver":
+            return None
+        candidates = list(pending_payload.get("candidates") or [])
+        max_rank = max((int(candidate.get("rank") or 0) for candidate in candidates if isinstance(candidate, dict)), default=3)
+        resolution, rank = classify_item_selection_follow_up(cleaned_text, max_rank=max_rank)
+        if resolution == "invalid":
+            return None
+        if resolution == "cancel":
+            self.pending_state_repository.resolve(pending_state_id=pending.id, status="cancelled")
+            outcome = AssistantTurnOutcome(
+                reply="好的，这次我先不发送。",
+                action="clarify",
+                disposition="respond",
+                status="completed",
+                tool_name="none",
+                tool_arguments={},
+                context=None,
+                confidence="system",
+                reason="wechat item selection cancelled",
+                artifacts=[],
+                trace=[],
+                tool_trace=[],
+                item_id=None,
+            )
+            self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+            return self._session_shell.to_turn_response(outcome=outcome)
+        outcome = await self._run_wechat_archive_plan(
+            session_id=session_id,
+            source_message_id=inbound_turn.source_message_id,
+            source_event_id=inbound_turn.source_event_id,
+            plan=ToolPlan(
+                tool="archive_run",
+                arguments={
+                    "intent": "resolve_pending",
+                    "resolution": "select",
+                    "target": {"type": "working_set_rank", "value": rank},
+                },
+                reason="wechat item selection follow-up",
+            ),
+            text=cleaned_text,
+            upload=None,
+        )
+        self._session_shell.persist_assistant_turn(session_id=session_id, outcome=outcome)
+        return self._session_shell.to_turn_response(outcome=outcome)
 
     async def _try_handle_wechat_image_note_turn(
         self,
@@ -727,6 +793,15 @@ class ClawBotService:
         )
         if wechat_image_response is not None:
             return wechat_image_response
+        wechat_selection_response = await self._try_handle_wechat_item_selection_turn(
+            session_id=session_id,
+            text=text,
+            upload=upload,
+            source_metadata=source_metadata,
+            inbound_turn=inbound_turn,
+        )
+        if wechat_selection_response is not None:
+            return wechat_selection_response
         if inbound_turn.buffered_response is not None:
             logger.info(
                 "clawbot upload_buffered session_id=%s source_event_id=%s filename=%s",

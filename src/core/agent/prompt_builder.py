@@ -83,7 +83,9 @@ PLATFORM_HINTS = {
         "After archive save/capture succeeds, confirm briefly (e.g. 「图片已保存。」 or 「已记入资料库。」) "
         "without describing image contents, people, scenes, or filenames. "
         "Do not add follow-up offers like「随时告诉我」 unless the user asked a question. "
-        "When delivery is available, you can send previously saved photos, images, and files back to the user through tools. "
+        "When delivery is available, send previously saved photos or files with a single archive_run(intent=deliver, query=...) call. "
+        "Do not call search first and then deliver separately. "
+        "If archive_run returns multiple candidates, ask the user to pick by number and wait for their reply. "
         "Do not tell the user that file sending is impossible when the archive deliver capability is available."
     ),
 }

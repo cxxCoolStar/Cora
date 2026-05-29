@@ -86,6 +86,18 @@ _MINIMAL_ALLOWED_STAGES = frozenset(
     }
 )
 
+# Stages the product no longer sends to WeChat users.
+_DISABLED_STAGES = frozenset(
+    {
+        WechatProgressStage.ACK_DEFAULT,
+        WechatProgressStage.TOOL_ARCHIVE,
+        WechatProgressStage.AFTER_CAPTURE,
+        WechatProgressStage.LLM_COMPOSE,
+    }
+)
+
+_SAVE_SILENT_ROUTES = frozenset({"save", "image_note"})
+
 _SAVE_HINT = re.compile(
     r"(记录|保存|归档|记下|存档|上传|存入)",
     re.IGNORECASE,
@@ -183,16 +195,7 @@ def _stage_enabled(*, mode: WechatProgressMode, stage: WechatProgressStage) -> b
 
 
 async def notify_wechat_llm_compose() -> None:
-    session = get_active_wechat_progress()
-    if session is None:
-        return
-    if session.settings.mode != WechatProgressMode.VERBOSE:
-        return
-    if session._route != "find":
-        return
-    if session._current_stage == WechatProgressStage.AFTER_CAPTURE:
-        return
-    await session.report_stage(WechatProgressStage.LLM_COMPOSE)
+    return
 
 
 def schedule_wechat_progress_stage(stage: WechatProgressStage | str) -> None:
@@ -255,6 +258,13 @@ class WechatProgressSession:
             pass
         await self._cancel_slow_tool_task()
 
+    def _should_suppress_stage(self, stage: WechatProgressStage) -> bool:
+        if stage in _DISABLED_STAGES:
+            return True
+        if self._route in _SAVE_SILENT_ROUTES and stage != WechatProgressStage.FAILED:
+            return True
+        return False
+
     async def report_stage(
         self,
         stage: WechatProgressStage,
@@ -264,6 +274,9 @@ class WechatProgressSession:
         force: bool = False,
     ) -> None:
         if not self.settings.enabled:
+            return
+        if self._should_suppress_stage(stage):
+            logger.debug("wechat progress stage suppressed route=%s stage=%s", self._route, stage)
             return
         if not _stage_enabled(mode=self.settings.mode, stage=stage):
             logger.debug("wechat progress stage suppressed mode=%s stage=%s", self.settings.mode, stage)
@@ -322,6 +335,8 @@ class WechatProgressSession:
 
     async def on_tool_start(self, tool_name: str, *, intent: str | None = None) -> None:
         if not self.settings.tool_updates:
+            return
+        if self._route in _SAVE_SILENT_ROUTES:
             return
         resolved_intent = str(intent or "").strip().lower()
         if tool_name == "archive_run" and resolved_intent in {"save", "resolve_pending"}:
@@ -464,6 +479,7 @@ async def wechat_progress_scope(
         yield None
         return
     session = WechatProgressSession(event=event, client=client, settings=settings)
+    session._route = infer_progress_route(event)
     token = _active_session.set(session)
     await session.send_ack_if_needed()
     await session.start_heartbeat()

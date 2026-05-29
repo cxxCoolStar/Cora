@@ -50,7 +50,7 @@ def _run_via_cli(payload: dict[str, Any], *, archive_root: Path) -> dict[str, An
     return json.loads(completed.stdout)
 
 
-def archive_result_to_skill_payload(result: dict[str, Any]) -> dict[str, Any]:
+def archive_result_to_skill_payload(result: dict[str, Any], *, storage_mode: str = "database") -> dict[str, Any]:
     effects: list[dict[str, Any]] = []
     for action in list(result.get("actions") or []):
         if not isinstance(action, dict):
@@ -58,6 +58,8 @@ def archive_result_to_skill_payload(result: dict[str, Any]) -> dict[str, Any]:
         action_type = str(action.get("type") or "").strip()
         action_payload = dict(action.get("payload") or {})
         if action_type == "store_file":
+            if storage_mode == "filesystem":
+                continue
             record = dict(action_payload.get("record") or {})
             path = str(action_payload.get("resolved_path") or "").strip()
             if path:
@@ -80,30 +82,55 @@ def archive_result_to_skill_payload(result: dict[str, Any]) -> dict[str, Any]:
                 {
                     "kind": "deliver_file",
                     "payload": {
-                        "file_path": action_payload.get("path"),
+                        "file_path": action_payload.get("file_path") or action_payload.get("path"),
                         "title": action_payload.get("title"),
                     },
                 }
             )
 
+    artifacts = _skill_artifacts_from_result(result, storage_mode=storage_mode)
     return {
         "message": str(result.get("message") or ""),
         "status": str(result.get("status") or "completed"),
         "disposition": str(result.get("disposition") or "respond"),
-        "action": _action_from_result(result),
-        "artifacts": list(result.get("artifacts") or []),
+        "action": _action_from_result(result, storage_mode=storage_mode),
+        "artifacts": artifacts,
         "effects": effects,
         "pending_state_delta": _pending_from_result(result),
-        "state_delta": {"last_action": _action_from_result(result)},
+        "state_delta": {"last_action": _action_from_result(result, storage_mode=storage_mode)},
     }
 
 
-def _action_from_result(result: dict[str, Any]) -> str:
+def _skill_artifacts_from_result(result: dict[str, Any], *, storage_mode: str) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for artifact in list(result.get("artifacts") or []):
+        if not isinstance(artifact, dict):
+            continue
+        if storage_mode == "filesystem":
+            payload = dict(artifact.get("payload") or {})
+            artifacts.append(
+                {
+                    "kind": "item",
+                    "ref": str(artifact.get("ref") or payload.get("item_id") or payload.get("id") or ""),
+                    "payload": payload,
+                }
+            )
+            continue
+        artifacts.append(artifact)
+    return artifacts
+
+
+def _action_from_result(result: dict[str, Any], *, storage_mode: str = "database") -> str:
     if result.get("pending"):
         return "clarify"
     for action in list(result.get("actions") or []):
         if isinstance(action, dict) and action.get("type") == "deliver_file":
             return "retrieve"
+        if storage_mode == "filesystem" and isinstance(action, dict) and action.get("type") == "store_file":
+            return "capture"
+    message = str(result.get("message") or "")
+    if storage_mode == "filesystem" and ("照片已保存" in message or "已保存到主题" in message):
+        return "capture"
     return "chat"
 
 
@@ -114,15 +141,20 @@ def _pending_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     if pending.get("kind") != "item_selection":
         return None
     candidates = list(pending.get("candidates") or [])
+    for index, candidate in enumerate(candidates, start=1):
+        if isinstance(candidate, dict) and not candidate.get("rank"):
+            candidate["rank"] = index
+        if isinstance(candidate, dict) and not candidate.get("item_id"):
+            candidate["item_id"] = candidate.get("id")
     return {
         "request": {
             "kind": "item_selection",
-            "question": "找到了多条可能匹配的内容，请先确认你要哪一条。",
+            "question": str(result.get("message") or "找到了多条可能匹配的内容，请先确认你要哪一条。"),
             "choices": ["第一个", "第二个", "第三个", "取消"],
             "payload": {
                 "type": "item_selection",
                 "query": pending.get("query"),
-                "requested_intent": "deliver",
+                "requested_intent": pending.get("requested_intent") or "deliver",
                 "candidates": candidates,
             },
         }

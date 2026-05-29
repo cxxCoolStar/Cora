@@ -37,10 +37,8 @@ def test_fallback_tool_selection_uses_skill_runtime_metadata_for_delivery() -> N
 
     assert selection is not None
     assert selection.category == "deliver"
-    assert selection.tool_call.tool_name == "skill_run"
-    assert selection.tool_call.arguments["name"] == "archive-core"
-    assert selection.tool_call.arguments["script_path"] == "scripts/archive_dispatch.py"
-    assert selection.tool_call.arguments["input"]["intent"] == "deliver"
+    assert selection.tool_call.tool_name == "archive_run"
+    assert selection.tool_call.arguments["intent"] == "deliver"
 
 
 def test_fallback_tool_selection_uses_skill_runtime_metadata_for_delete() -> None:

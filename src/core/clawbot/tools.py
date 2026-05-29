@@ -124,8 +124,12 @@ class RuntimeToolExecutor:
         web_tavily_base_url: str | None = None,
         scheduled_task_default_timezone: str | None = None,
         clawbot_service: Any | None = None,
+        archive_root_dir: Path | None = None,
+        archive_storage_mode: str = "filesystem",
     ) -> None:
         self._clawbot_service = clawbot_service
+        self.archive_root_dir = archive_root_dir or Path(".cora/archive")
+        self.archive_storage_mode = str(archive_storage_mode or "filesystem")
         self.ingestion_service = ingestion_service
         self.item_repository = item_repository
         self.pending_state_repository = pending_state_repository
@@ -813,6 +817,8 @@ class RuntimeToolExecutor:
             "runtime_state": invocation.context,
             "storage_dir": str(self.ingestion_service.storage_dir),
             "database_url": self._normalize_database_url(database_engine_url),
+            "archive_root": str(self.archive_root_dir),
+            "archive_storage_mode": self.archive_storage_mode,
         }
         upload = invocation.upload
         if upload is not None and (upload.filename or "").strip():
@@ -1076,16 +1082,24 @@ class RuntimeToolExecutor:
             ),
         )
 
-    async def _run_send_file(self, *, user_id: str, file_path: str, file_name: str) -> dict[str, Any]:
-        from core.agent.skill_effects import wechat_delivery_caption
+    async def _run_send_file(
+        self,
+        *,
+        user_id: str,
+        file_path: str,
+        file_name: str = "",
+        caption: str = "",
+    ) -> dict[str, Any]:
+        from core.channels.delivery import wechat_delivery_caption
 
         sender = getattr(self.gateway_service, "send_file_to_user", None)
         if sender is None:
             raise ValueError("当前网关不支持文件发送。")
+        resolved_caption = wechat_delivery_caption(caption or file_name)
         result = sender(
             user_id=user_id,
             file_path=file_path,
-            caption=wechat_delivery_caption(file_name),
+            caption=resolved_caption,
         )
         if hasattr(result, "__await__"):
             return await result

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.utils.filename_match import filename_token_score
+
 
 DEFAULT_LIST_LIMIT = 50
 DEFAULT_SEARCH_LIMIT = 20
@@ -71,18 +73,29 @@ class FileToolStore:
         if not target.exists():
             raise ValueError(f"path does not exist: {path}")
 
-        matches: list[str] = []
+        matches: list[tuple[int, str]] = []
         normalized_needle = needle if case_sensitive else needle.lower()
         for file_path in self._iter_files(target=target, include_hidden=include_hidden):
             relative_path = file_path.relative_to(self._resolved_root()).as_posix()
             if file_pattern and not file_path.match(file_pattern):
                 continue
 
-            filename_haystack = relative_path if case_sensitive else relative_path.lower()
-            if normalized_needle in filename_haystack:
-                matches.append(f"- {relative_path} (filename match)")
+            filename_score = filename_token_score(
+                needle,
+                file_path.name if case_sensitive else file_path.name.lower(),
+            )
+            if filename_score > 0:
+                matches.append((filename_score, f"- {relative_path} (filename match)"))
                 if len(matches) >= limit:
                     break
+                continue
+
+            filename_haystack = relative_path if case_sensitive else relative_path.lower()
+            if normalized_needle in filename_haystack:
+                matches.append((1, f"- {relative_path} (path match)"))
+                if len(matches) >= limit:
+                    break
+                continue
 
             text = self._read_text_file(file_path)
             if text is None:
@@ -94,7 +107,7 @@ class FileToolStore:
                 snippet = line.strip()
                 if len(snippet) > MAX_MATCH_LINE_LENGTH:
                     snippet = snippet[: MAX_MATCH_LINE_LENGTH - 3] + "..."
-                matches.append(f"- {relative_path}:{line_number}: {snippet}")
+                matches.append((1, f"- {relative_path}:{line_number}: {snippet}"))
                 if len(matches) >= limit:
                     break
             if len(matches) >= limit:
@@ -104,8 +117,9 @@ class FileToolStore:
         if not matches:
             return f"No matches for `{needle}` under `{relative_target}`."
 
+        matches.sort(key=lambda item: item[0], reverse=True)
         lines = [f"Matches for `{needle}`:"]
-        lines.extend(matches)
+        lines.extend(line for _, line in matches)
         if len(matches) >= limit:
             lines.append(f"- Results truncated to the first {limit} matches.")
         return "\n".join(lines)

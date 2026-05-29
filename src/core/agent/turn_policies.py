@@ -115,6 +115,14 @@ class ToolRoutingPolicy:
         text = (raw_text or user_text or "").strip()
         if not text:
             return None
+        if retry_category == "deliver":
+            archive_fallback = self._forced_archive_selection_for_intent(
+                intent="deliver",
+                query=text,
+                category=retry_category,
+            )
+            if archive_fallback is not None:
+                return archive_fallback
         skill_fallback = self._forced_skill_selection_for_intent(
             intent=retry_category,
             query=text,
@@ -163,8 +171,8 @@ class ToolRoutingPolicy:
         if category == "deliver":
             return (
                 "Tool-use correction: the user is asking for a previously saved photo or file to be sent back over the current channel. "
-                "Do not claim file delivery is unsupported. Inspect the relevant skill with skill_view if needed, then use the appropriate tool workflow. "
-                "If the target is ambiguous, let the tool-backed workflow return a clarification instead of answering from chat."
+                "Use archive_run(intent=deliver, query=...) in one step. Do not call search or skill_run search first, then deliver. "
+                "If the target is ambiguous, let archive_run return a numbered clarification instead of answering from chat."
             )
         if category == "delete":
             return (
@@ -331,6 +339,26 @@ class ToolRoutingPolicy:
             if any(token and token in lowered for token in route.phrases):
                 return True
         return False
+
+    def _forced_archive_selection_for_intent(
+        self,
+        *,
+        intent: str,
+        query: str,
+        category: str,
+    ) -> ForcedToolSelection | None:
+        if not self._tool_is_available("archive_run"):
+            return None
+        normalized_intent = str(intent or "").strip()
+        if not normalized_intent:
+            return None
+        return ForcedToolSelection(
+            tool_call=ToolCall(
+                tool_name="archive_run",
+                arguments={"intent": normalized_intent, "query": query},
+            ),
+            category=category,
+        )
 
     def _forced_skill_selection_for_intent(
         self,

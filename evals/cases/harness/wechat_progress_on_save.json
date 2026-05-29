@@ -1,11 +1,11 @@
 {
   "id": "wechat_progress_on_save",
   "type": "harness",
-  "description": "WeChat save tasks should emit routed ACK and archive progress messages before the final reply.",
+  "description": "WeChat save tasks should not emit intermediate progress messages before the final reply.",
   "tags": ["harness", "wechat", "archive", "progress", "task-success"],
   "steps": [
     {
-      "label": "wechat save with progress stages",
+      "label": "wechat save without progress stages",
       "input": {
         "channel": "wechat",
         "external_user_id": "wx-eval-progress-save",
@@ -22,10 +22,7 @@
         "state": {
           "agent_run_count": 1,
           "item_count": 1,
-          "wechat_progress_messages_contains_all": [
-            "记入资料库",
-            "整理回复"
-          ]
+          "wechat_progress_messages_contains_all": []
         }
       }
     }

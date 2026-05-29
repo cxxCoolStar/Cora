@@ -9,6 +9,7 @@ from pathlib import Path
 class CoraArchiveSettings:
     archive_root_dir: Path
     archive_mirror_enabled: bool
+    archive_storage_mode: str = "filesystem"
 
 
 @lru_cache(maxsize=1)
@@ -20,6 +21,7 @@ def get_cora_archive_settings() -> CoraArchiveSettings:
         return CoraArchiveSettings(
             archive_root_dir=settings.archive_root_dir,
             archive_mirror_enabled=settings.archive_mirror_enabled,
+            archive_storage_mode=str(getattr(settings, "archive_storage_mode", "filesystem")),
         )
     except Exception:
         import os
@@ -30,4 +32,5 @@ def get_cora_archive_settings() -> CoraArchiveSettings:
             "false",
             "no",
         }
-        return CoraArchiveSettings(archive_root_dir=root, archive_mirror_enabled=enabled)
+        mode = str(os.environ.get("CORA_ARCHIVE_STORAGE_MODE", "filesystem")).strip().lower() or "filesystem"
+        return CoraArchiveSettings(archive_root_dir=root, archive_mirror_enabled=enabled, archive_storage_mode=mode)
